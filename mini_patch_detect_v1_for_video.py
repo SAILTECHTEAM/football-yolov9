@@ -386,30 +386,26 @@ def draw_detections(image, detections, class_names, color=(0, 255, 0)):
         cv2.putText(image, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
                     0.6, (255, 255, 255), 2)
 
-class TrackJsonStreamer:
+
+class TrackJsonlStreamer:
     """
-    Streams per-track data to disk and frees memory when a track
-    has been ‘quiet’ for > lost_thresh frames.
-    The file is a valid JSON array written incrementally.
+    Streams per-track data to disk as JSONL.
+    Each track is written as a single line once it becomes stale.
+    More efficient and streaming-friendly than JSON array.
     """
-    def __init__(self, out_path: str,
-                 flush_interval: int = 500,
-                 lost_thresh: int = 100):
+    def __init__(self, out_path: str, flush_interval: int = 500, lost_thresh: int = 100):
         self.out_path = Path(out_path)
         self.flush_interval = flush_interval
-        self.lost_thresh   = lost_thresh
-        self.records       = defaultdict(lambda: {
-            "track_id": None,   # filled on first update
+        self.lost_thresh = lost_thresh
+        self.records = defaultdict(lambda: {
+            "track_id": None,
             "frame_id": [],
             "team_conf": [],
             "bbox": [],
-            "projected": [],      # (x, y) projected point
+            "projected": [],
         })
-        self.last_seen     = {}          # track_id -> last frame
-        self._first_write  = True        # for '[' and commas
-        # open file handle once
+        self.last_seen = {}
         self.fh = self.out_path.open("w")
-        self.fh.write("[\n")             # start JSON array
 
     def update(self, tid, frame_idx, bbox, team_conf, proj_pt):
         rec = self.records[tid]
@@ -422,7 +418,6 @@ class TrackJsonStreamer:
         self.last_seen[tid] = frame_idx
 
     def maybe_flush(self, frame_idx):
-        """Flush finished / stale tracks every flush_interval frames."""
         if frame_idx % self.flush_interval != 0:
             return
 
@@ -433,19 +428,15 @@ class TrackJsonStreamer:
             self._write_record(self.records.pop(tid))
             self.last_seen.pop(tid, None)
 
-    # ---------- internal ----------
     def _write_record(self, rec):
-        if not self._first_write:
-            self.fh.write(",\n")
-        json.dump(rec, self.fh, ensure_ascii=False, indent=4)
-        self._first_write = False
+        json.dump(rec, self.fh, ensure_ascii=False)
+        self.fh.write("\n")  # write as JSONL
 
     def close(self):
-        # flush remaining tracks
         for rec in self.records.values():
             self._write_record(rec)
-        self.fh.write("\n]\n")
         self.fh.close()
+
 
 @smart_inference_mode()
 def run(
@@ -526,9 +517,9 @@ def run(
     output_path = str(Path(save_dir) / ("after_gobalNMS_overlap_remove_annotated_" + Path(source).name))
 
     # init json
-    output_json_path = str(Path(save_dir) / "team_tracking.json")
+    output_json_path = str(Path(save_dir) / "team_tracking.jsonl")
 
-    json_streamer = TrackJsonStreamer(output_json_path,
+    json_streamer = TrackJsonlStreamer(output_json_path,
                                     flush_interval=500,
                                     lost_thresh=100)  # tune as needed
     # # Initialize global dictionary once outside main loop if not already done

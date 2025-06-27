@@ -515,13 +515,7 @@ def merge_tracks_with_recursion(track_dict: Dict[str, Dict[str, Any]],
     return merged_tracks
 
 
-def stream_jsonl_segments(jsonl_path: str) -> Iterator[Dict[str, Any]]:
-    with open(jsonl_path, 'r') as f:
-        for line in f:
-            yield json.loads(line)
-
-
-def hybrid_merge_stream(
+def hybrid_merge_stream_fixed(
     jsonl_path: str,
     output_path: str,
     max_merge_gap: int = 5,
@@ -531,31 +525,31 @@ def hybrid_merge_stream(
     polyorder: int = 3,
     max_step: int = 20,
 ):
-    frame_to_tracks = defaultdict(list)
+
     final_output = open(output_path, 'w')
+    frame_to_tracks = defaultdict(list)
     active_tracks = {}
     done_tracks = set()
-    frame_window = 100  # How far ahead to buffer frames
 
-    # Stream and index initial segments
-    segment_buffer = deque()
-    for seg in stream_jsonl_segments(jsonl_path):
-        start_frame = seg['frames'][0]
-        frame_to_tracks[start_frame].append(seg)
-        segment_buffer.append((start_frame, seg))
+    # Load all segments from JSONL (inlined stream_jsonl_segments)
+    with open(jsonl_path, 'r') as f:
+        for line in f:
+            if not line.strip():
+                continue
+            seg = json.loads(line)
+            start_frame = seg['frames'][0]
+            frame_to_tracks[start_frame].append(seg)
 
-    current_frame = 0
     max_buffer_frame = max(frame_to_tracks.keys()) if frame_to_tracks else 0
+    current_frame = 0
 
     while current_frame <= max_buffer_frame:
-        # Load candidate segments starting within window
+        # Load candidate segments for current frame window
         candidates = []
         for offset in range(-max_merge_overlap_frames, max_merge_gap + 1):
             f = current_frame + offset
-            if f in frame_to_tracks:
-                candidates.extend(frame_to_tracks[f])
+            candidates.extend(frame_to_tracks.get(f, []))
 
-        # Merge candidates with open tracks or create new ones
         merged_this_round = set()
         for seg in candidates:
             tid = seg['track_id']
@@ -568,22 +562,17 @@ def hybrid_merge_stream(
                 if seg['team'] != m['team']:
                     continue
                 last_frame = m['frames'][-1]
-                if seg['frames'][0] - last_frame > max_merge_gap:
-                    continue
-
                 gap = seg['frames'][0] - last_frame
                 if not ((0 <= gap <= max_merge_gap) or (0 < -gap <= max_merge_overlap_frames)):
                     continue
-
-                last_point = m['points'][-1]
-                first_point = seg['points'][0]
-                dist = np.linalg.norm(np.array(last_point) - np.array(first_point))
+                dist = np.linalg.norm(
+                    np.array(m['points'][-1]) - np.array(seg['points'][0])
+                )
                 if dist <= max_merge_distance and dist < best_dist:
                     best_match = mtid
                     best_dist = dist
 
             if best_match:
-                # Merge into existing
                 m = active_tracks[best_match]
                 m['frames'].extend(seg['frames'])
                 m['points'].extend(seg['points'])
@@ -592,7 +581,6 @@ def hybrid_merge_stream(
                 merged_this_round.add(tid)
                 done_tracks.add(tid)
             else:
-                # Start new merged track
                 active_tracks[tid] = {
                     "track_id": tid,
                     "team": seg['team'],
@@ -603,25 +591,21 @@ def hybrid_merge_stream(
                 }
                 merged_this_round.add(tid)
 
-        # Finalize tracks that have not been extended for a while
+        # Finalize stale tracks
         to_remove = []
         for tid, m in active_tracks.items():
             if m['frames'][-1] < current_frame - max_merge_gap:
-                # Finalize: interpolate and smooth
-                frames = np.array(m['frames'])
-                points = np.array(m['points'])
+                frames, points = interpolate_full_track(m['frames'], np.array(m['points']))
                 if len(points) >= smoothing_window:
-                    xs, ys = points[:, 0], points[:, 1]
-
-                    xs = savgol_filter(xs, smoothing_window, polyorder)
-                    ys = savgol_filter(ys, smoothing_window, polyorder)
+                    xs = savgol_filter(points[:, 0], smoothing_window, polyorder)
+                    ys = savgol_filter(points[:, 1], smoothing_window, polyorder)
                     points = np.stack([xs, ys], axis=1)
-
                 team_conf = m['team_conf_total'] / m['team_conf_len'] if m['team_conf_len'] else 0.0
                 output = {
                     "track_id": m['track_id'],
                     "team": m['team'],
                     "frame_range": [int(frames[0]), int(frames[-1])],
+                    "frames": frames.tolist(),
                     "projected": points.tolist(),
                     "team_conf": team_conf,
                 }
@@ -639,22 +623,22 @@ def hybrid_merge_stream(
         frames = np.array(m['frames'])
         points = np.array(m['points'])
         if len(points) >= smoothing_window:
-            xs, ys = points[:, 0], points[:, 1]
-            xs = savgol_filter(xs, smoothing_window, polyorder)
-            ys = savgol_filter(ys, smoothing_window, polyorder)
+            xs = savgol_filter(points[:, 0], smoothing_window, polyorder)
+            ys = savgol_filter(points[:, 1], smoothing_window, polyorder)
             points = np.stack([xs, ys], axis=1)
-
         team_conf = m['team_conf_total'] / m['team_conf_len'] if m['team_conf_len'] else 0.0
         output = {
             "track_id": m['track_id'],
             "team": m['team'],
             "frame_range": [int(frames[0]), int(frames[-1])],
+            "frames": frames.tolist(),
             "projected": points.tolist(),
             "team_conf": team_conf,
         }
         final_output.write(json.dumps(output) + '\n')
 
     final_output.close()
+    print(f"✅ Merged and saved to: {output_path}")
 
 
 def load_and_merge_tracks(
@@ -693,9 +677,8 @@ def load_and_merge_tracks(
     track_dict = {}
 
     with open(json_path, 'r') as f:
-        objects = ijson_python.items(f, 'item', use_float=True)  # stream items from top-level list
-
-        for obj in objects:
+        for line in f:
+            obj = json.loads(line)
             # print(type(obj['projected'][0][0]))  # e.g., <class 'float'>
             projected_points = obj.get("projected", [])
             if len(projected_points) < min_track_length:
@@ -745,48 +728,23 @@ def load_and_merge_tracks(
                 with open(output_path, 'a') as out_f:
                     out_f.write(json.dumps(track_dict) + '\n')   
 
-    # # Merge tracks
-    # merged_tracks = optimized_merge_tracks(track_dict=track_dict, max_merge_gap=max_merge_gap, max_merge_overlap_frames=max_merge_overlap_frames, max_merge_distance=max_merge_distance)
 
-    # for track in merged_tracks:
-    #     points = np.array(track["points"])
-    #     # Keep ball track even if short
-    #     if len(points) < smoothing_window and track["team"] != "ball":
-    #         continue
-
-    #     xs, ys = points[:, 0], points[:, 1]
-    #     xs, ys = apply_position_smoothing(
-    #         xs, ys,
-    #         method="savgol",
-    #         window_size=smoothing_window,
-    #         polyorder=polyorder,
-    #         max_step=max_step,
-    #     )
-    #     track["points"] = np.stack([xs, ys], axis=1)
-
-    # return merged_tracks
-
-
-def remove_referee_near_boundary(jsonl_path, field_size, margin_meter=3.0):
+def remove_referee_near_boundary_stream(jsonl_path, output_jsonl_path, field_size, margin_meter=3.0):
     """
-    Remove referee tracks that stay mostly near the field boundary (in 0.1 meters).
+    Stream version that writes filtered tracks directly to a new .jsonl file.
 
     Args:
-        jsonl_path (str): Path to merged .jsonl file.
+        jsonl_path (str): Input path to merged .jsonl file.
+        output_jsonl_path (str): Path to write filtered output.
         field_size (tuple): Field dimensions (length, width) in 0.1 meters.
         margin_meter (float): Distance from boundary (in meters) considered "near".
-
-    Returns:
-        List of filtered tracks.
     """
-    filtered_tracks = []
-
-    with open(jsonl_path, 'r') as f:
+    with open(jsonl_path, 'r') as f, open(output_jsonl_path, 'w') as out_f:
         for line in f:
             track = json.loads(line)
 
             if track["team"] != "referee":
-                filtered_tracks.append(track)
+                out_f.write(json.dumps(track) + '\n')
                 continue
 
             points = np.array(track["projected"])
@@ -800,11 +758,10 @@ def remove_referee_near_boundary(jsonl_path, field_size, margin_meter=3.0):
             near_edge_ratio = (near_left + near_right + near_top + near_bottom) / len(points)
 
             if near_edge_ratio < 0.7:
-                filtered_tracks.append(track)
-
-    return filtered_tracks
+                out_f.write(json.dumps(track) + '\n')
 
 
+'''
 def draw_merged_paths_from_json(
     json_path,
     image_path,
@@ -896,8 +853,9 @@ def draw_merged_paths_from_json(
     #     window_size=20,
     #     threshold=0.9
     #     )
+'''
 
-
+'''
 def create_current_dot_video(
     json_path,
     image_path,
@@ -1002,7 +960,7 @@ def create_current_dot_video(
     #     threshold=0.9,
     #     fps=30
     # )
-
+'''
 
 def render_to_json(tracks, output_path):
     output_json = []
@@ -1042,7 +1000,7 @@ def prepare_background_and_tracks(
     # Merge and filter tracks
     load_and_merge_tracks(
         json_path=json_path,
-        output_path=json_path.replace('.json', '_spilt.jsonl'),
+        output_path=json_path.replace('.jsonl', '_spilt.jsonl'),
         field_size=field_size,
         min_track_length=min_track_length,
         smoothing_window=smoothing_window,
@@ -1055,9 +1013,9 @@ def prepare_background_and_tracks(
         max_step=max_step,
     )
 
-    hybrid_merge_stream(
-        jsonl_path=json_path.replace('.json', '_spilt.jsonl'),
-        output_path=json_path.replace('.json', '_merged.jsonl'),
+    hybrid_merge_stream_fixed(
+        jsonl_path=json_path.replace('.jsonl', '_spilt.jsonl'),
+        output_path=json_path.replace('.jsonl', '_merged.jsonl'),
         max_merge_gap=max_merge_gap,
         max_merge_overlap_frames=max_merge_overlap_frames,
         max_merge_distance=max_merge_distance,
@@ -1066,44 +1024,14 @@ def prepare_background_and_tracks(
         max_step=max_step,
     )
 
-    remove_referee_near_boundary(
-        jsonl_path=json_path.replace('.json', '_merged.jsonl'),
+    remove_referee_near_boundary_stream(
+        jsonl_path=json_path.replace('.jsonl', '_merged.jsonl'),
+        output_jsonl_path=json_path.replace('.jsonl', '_merged_filtered.jsonl'),
         field_size=field_size,
         margin_meter=30
     )
 
     return bg_img
-
-
-def render_to_image(bg_img, merged_tracks, field_size, min_track_length, output_path="trajectory_plot.png"):
-    fig, ax = plt.subplots(figsize=(12, 7))
-    ax.imshow(bg_img[..., ::-1], extent=[0, field_size[0], 0, field_size[1]])
-    team_colors = {
-        'eastern': 'blue',
-        'easterngoalkeeper': 'green',
-        'kitchee': 'pink',
-        'kitcheegoalkeeper': 'orange',
-        'referee': 'yellow',
-        'ball': 'black',
-    }
-
-    for track in merged_tracks:
-        points = np.array(track["points"])
-        if len(points) < min_track_length:
-            continue
-        xs, ys = points[:, 0], points[:, 1]
-        color = team_colors.get(track["team"], 'gray')
-        ax.plot(xs, ys, color=color, alpha=0.8)
-        ax.scatter(xs[-1], ys[-1], color=color)
-        ax.text(xs[-1], ys[-1], str(track["track_id"]), fontsize=8, color='black')
-
-    ax.set_xlim(0, field_size[0])
-    ax.set_ylim(0, field_size[1])
-    ax.set_title("Smoothed & Merged Trajectories")
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300)
-    plt.close()
-    print(f"✅ Saved image to: {output_path}")
 
 
 def render_to_image_from_jsonl(jsonl_path, bg_img, field_size, min_track_length, output_path="trajectory_plot.png"):
@@ -1122,13 +1050,20 @@ def render_to_image_from_jsonl(jsonl_path, bg_img, field_size, min_track_length,
         for line in f:
             track = json.loads(line)
             points = np.array(track.get("projected", track.get("points", [])))
+
+            # Remove None points
+            points = np.array([pt for pt in points if pt is not None])
             if len(points) < min_track_length:
                 continue
+
             xs, ys = points[:, 0], points[:, 1]
             color = team_colors.get(track["team"], 'gray')
             ax.plot(xs, ys, color=color, alpha=0.8)
-            ax.scatter(xs[-1], ys[-1], color=color)
-            ax.text(xs[-1], ys[-1], str(track["track_id"]), fontsize=8, color='black')
+
+            # Draw last valid point
+            if len(xs) > 0 and len(ys) > 0:
+                ax.scatter(xs[-1], ys[-1], color=color)
+                ax.text(xs[-1], ys[-1], str(track["track_id"]), fontsize=8, color='black')
 
     ax.set_xlim(0, field_size[0])
     ax.set_ylim(0, field_size[1])
@@ -1138,44 +1073,6 @@ def render_to_image_from_jsonl(jsonl_path, bg_img, field_size, min_track_length,
     plt.close()
     print(f"✅ Saved image to: {output_path}")
 
-
-def render_to_video(bg_img, merged_tracks, field_size, output_path, fps=30):
-    height, width, _ = bg_img.shape
-    writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
-
-    team_colors = {
-        'eastern': (255, 0, 0),
-        'easterngoalkeeper': (0, 255, 0),
-        'kitchee': (255, 192, 203),
-        'kitcheegoalkeeper': (0, 165, 255),
-        'referee': (0, 255, 255),
-        'ball': (0, 0, 0),
-    }
-
-    min_frame = min(t["frame_range"][0] for t in merged_tracks)
-    max_frame = max(t["frame_range"][1] for t in merged_tracks)
-
-    for f in range(min_frame, max_frame + 1):
-        frame_img = bg_img.copy()
-        for track in merged_tracks:
-            start, end = track["frame_range"]
-            if not (start <= f <= end):
-                continue
-            index = f - start
-            if index < 0 or index >= len(track["points"]):
-                continue
-            x, y = track["points"][index]
-            if x is None or y is None:
-                continue
-            x, y = int(x), field_size[1] - int(y)
-            color = team_colors.get(track["team"], (128, 128, 128))
-            cv2.circle(frame_img, (x, y), 5, color, -1)
-            cv2.putText(frame_img, str(track["track_id"]), (x + 6, y - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
-        writer.write(frame_img)
-
-    writer.release()
-    print(f"✅ Saved video to: {output_path}")
 
 
 def render_to_video_from_jsonl(jsonl_path, bg_img, field_size, output_path, fps=30):
@@ -1192,25 +1089,26 @@ def render_to_video_from_jsonl(jsonl_path, bg_img, field_size, output_path, fps=
     }
 
     tracks = [json.loads(line) for line in open(jsonl_path)]
-    min_frame = min(t["frame_range"][0] for t in tracks)
-    max_frame = max(t["frame_range"][1] for t in tracks)
+    min_frame = min(min(t["frames"]) for t in tracks)
+    max_frame = max(max(t["frames"]) for t in tracks)
+
+    frame_to_objects = defaultdict(list)
+    for t in tracks:
+        for i, f in enumerate(t["frames"]):
+            if i >= len(t["projected"]):
+                continue
+            pt = t["projected"][i]
+            if pt is None:
+                continue
+            frame_to_objects[f].append((pt, t["track_id"], t["team"]))
 
     for f in range(min_frame, max_frame + 1):
         frame_img = bg_img.copy()
-        for track in tracks:
-            start, end = track["frame_range"]
-            if not (start <= f <= end):
-                continue
-            index = f - start
-            if index < 0 or index >= len(track["projected"]):
-                continue
-            x, y = track["projected"][index]
-            if x is None or y is None:
-                continue
-            x, y = int(x), field_size[1] - int(y)
-            color = team_colors.get(track["team"], (128, 128, 128))
+        for pt, tid, team in frame_to_objects.get(f, []):
+            x, y = int(pt[0]), field_size[1] - int(pt[1])
+            color = team_colors.get(team, (128, 128, 128))
             cv2.circle(frame_img, (x, y), 5, color, -1)
-            cv2.putText(frame_img, str(track["track_id"]), (x + 6, y - 6),
+            cv2.putText(frame_img, str(tid), (x + 6, y - 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
         writer.write(frame_img)
 
@@ -1256,7 +1154,7 @@ def process_merged_tracks(
 
     if output_type in ['image', 'all']:
         render_to_image_from_jsonl(
-            jsonl_path=json_path.replace('.json', '_merged.jsonl'),
+            jsonl_path=json_path.replace('.jsonl', '_merged_filtered.jsonl'),
             bg_img=bg_img,
             field_size=field_size,
             min_track_length=min_track_length,
@@ -1264,31 +1162,19 @@ def process_merged_tracks(
         )
     if output_type in ['video', 'all']:
         render_to_video_from_jsonl(
-            jsonl_path=json_path.replace('.json', '_merged.jsonl'),
+            jsonl_path=json_path.replace('.jsonl', '_merged_filtered.jsonl'),
             bg_img=bg_img,
             field_size=field_size,
             output_path=output_path_video,
             fps=fps
         )
 
-    # # Output logic
-    # if output_type == 'image':
-    #     render_to_image(bg_img, merged_tracks, field_size, min_track_length, output_path_image)
-    # elif output_type == 'video':
-    #     render_to_video(bg_img, merged_tracks, field_size, output_path_video, fps)
-    # elif output_type == 'all':
-    #     render_to_image(bg_img, merged_tracks, field_size, min_track_length, output_path_image)
-    #     render_to_video(bg_img, merged_tracks, field_size, output_path_video, fps)
-    # elif output_type == 'json':
-    #     pass
-    # render_to_json(merged_tracks, output_json_path)
-
 
 if  __name__ == "__main__":
     start = time.time()
 
     process_merged_tracks(
-        json_path="./runs/detect/test_4k/team_tracking.json",
+        json_path="./runs/detect/test_4k/team_tracking.jsonl",
         image_path="./data/images/mongkok_football_field.png",
         field_size=(1060, 660),
         min_track_length=10,
@@ -1300,7 +1186,7 @@ if  __name__ == "__main__":
         max_merge_distance=50,
         window_size=20,
         threshold=0.9,
-        output_type='all', # 'image', 'video', 'json', or 'all'
+        output_type='all', # 'image', 'video', 'jsonl', or 'all'
         output_name='trajectory_plot' 
     )
 
