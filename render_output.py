@@ -10,6 +10,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import time
 import ijson.backends.python as ijson_python
 from typing import List, Dict, Any, Tuple, Iterator, Union
+from heapq import nsmallest
 
 def assign_team_by_majority_vote(team_conf_list):
     team_count = defaultdict(float)
@@ -349,121 +350,6 @@ def load_and_merge_tracks(
                 with open(output_path, 'a') as out_f:
                     out_f.write(json.dumps(track_dict) + '\n')   
 
-def remove_referee_near_boundary_stream(jsonl_path, output_jsonl_path, field_size, margin_meter=3.0):
-    """
-    Stream version that writes filtered tracks directly to a new .jsonl file.
-
-    Args:
-        jsonl_path (str): Input path to merged .jsonl file.
-        output_jsonl_path (str): Path to write filtered output.
-        field_size (tuple): Field dimensions (length, width) in 0.1 meters.
-        margin_meter (float): Distance from boundary (in meters) considered "near".
-    """
-    with open(jsonl_path, 'r') as f, open(output_jsonl_path, 'w') as out_f:
-        for line in f:
-            track = json.loads(line)
-
-            if track["team"] != "referee":
-                out_f.write(json.dumps(track) + '\n')
-                continue
-
-            points = np.array(track["projected"])
-            xs, ys = points[:, 0], points[:, 1]
-
-            near_left = (xs < margin_meter).sum()
-            near_right = (xs > field_size[0] - margin_meter).sum()
-            near_top = (ys < margin_meter).sum()
-            near_bottom = (ys > field_size[1] - margin_meter).sum()
-
-            near_edge_ratio = (near_left + near_right + near_top + near_bottom) / len(points)
-
-            if near_edge_ratio < 0.7:
-                out_f.write(json.dumps(track) + '\n')
-
-def prepare_background_and_tracks(
-    json_path,
-    image_path,
-    field_size,
-    min_track_length,
-    smoothing_window,
-    polyorder,
-    max_step,
-    max_merge_gap,
-    max_merge_overlap_frames,
-    max_merge_distance,
-    window_size,
-    threshold
-):
-    # Load and resize background
-    bg_img = cv2.imread(image_path)
-    if bg_img is None:
-        raise FileNotFoundError(f"Failed to load image: {image_path}")
-    bg_img = cv2.resize(bg_img, field_size)
-
-    # Merge and filter tracks
-    load_and_merge_tracks(
-        json_path=json_path,
-        output_path=json_path.replace('.jsonl', '_spilt.jsonl'),
-        field_size=field_size,
-        min_track_length=min_track_length,
-        smoothing_window=smoothing_window,
-        polyorder=polyorder,
-        max_merge_gap=max_merge_gap,
-        max_merge_distance=max_merge_distance,
-        max_merge_overlap_frames=max_merge_overlap_frames,
-        window_size=window_size,
-        threshold=threshold,
-        max_step=max_step,
-    )
-
-    hybrid_merge_stream_fixed(
-        jsonl_path=json_path.replace('.jsonl', '_spilt.jsonl'),
-        output_path=json_path.replace('.jsonl', '_merged.jsonl'),
-        max_merge_gap=max_merge_gap,
-        max_merge_overlap_frames=max_merge_overlap_frames,
-        max_merge_distance=max_merge_distance,
-        smoothing_window=smoothing_window,
-        polyorder=polyorder,
-        max_step=max_step,
-    )
-
-    remove_referee_near_boundary_stream(
-        jsonl_path=json_path.replace('.jsonl', '_merged.jsonl'),
-        output_jsonl_path=json_path.replace('.jsonl', '_merged_filtered.jsonl'),
-        field_size=field_size,
-        margin_meter=30
-    )
-
-    detect_team_size_violations_streaming(
-        jsonl_path=json_path.replace('.jsonl', '_merged_filtered.jsonl'),
-        save_path=json_path.replace('.jsonl', '_team_size_violations.jsonl'),
-        max_team_size=10,
-        allowed_goalkeepers=1,
-        allowed_referees=1
-    )
-
-    merged_window = merge_problem_windows_by_reason(
-        jsonl_path=json_path.replace('.jsonl', '_team_size_violations.jsonl'),
-        min_gap=3
-    )
-
-    print("Merged problem windows by reason:")
-    for reason, windows in merged_window.items():
-        print(f"{reason}: {windows}")
-
-    relabel_count = relabel_tracks_by_overlap_and_confidence(
-        track_jsonl_path=json_path.replace('.jsonl', '_merged_filtered.jsonl'),
-        reason_to_windows=merged_window,
-        output_jsonl_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
-        overlap_threshold=0.4,
-        conf_threshold=0.007,
-        not_sure_label="unsure"
-    )
-
-    print(f"Total tracks relabeled: {relabel_count}")
-
-    return bg_img
-
 def render_to_image_from_jsonl(jsonl_path, bg_img, field_size, min_track_length, output_path="trajectory_plot.png"):
     fig, ax = plt.subplots(figsize=(12, 7))
     ax.imshow(bg_img[..., ::-1], extent=[0, field_size[0], 0, field_size[1]])
@@ -545,59 +431,79 @@ def render_to_video_from_jsonl(jsonl_path, bg_img, field_size, output_path, fps=
     writer.release()
     print(f"✅ Saved video to: {output_path}")
 
-def process_merged_tracks(
-    json_path,
-    image_path,
-    field_size,
-    min_track_length,
-    smoothing_window,
-    polyorder,
-    max_step,
-    max_merge_gap,
-    max_merge_overlap_frames,
-    max_merge_distance,
-    window_size,
-    threshold,
-    output_type='image',
-    output_name='trajectory_plot',
-    fps=30
+def remove_tracks_near_boundary_stream(
+    jsonl_path, 
+    output_jsonl_path, 
+    field_size, 
+    margin_meter=30, 
+    near_ratio_threshold=0.9
 ):
-    # Auto-generate full path with extension
-    if output_type == 'image':
-        output_path_image = f"{output_name}.png"
-    elif output_type == 'video':
-        output_path_video = f"{output_name}.mp4"
-    elif output_type == 'all':
-        output_path_image = f"{output_name}.png"
-        output_path_video = f"{output_name}.mp4"
-    else:
-        raise ValueError("Unsupported output type. Use 'image', 'video' or 'all'.")
+    """
+    Removes tracks that stay near the field boundary for most of the time.
 
-    # Shared logic
-    bg_img = prepare_background_and_tracks(
-        json_path, image_path, field_size,
-        min_track_length, smoothing_window, polyorder, max_step,
-        max_merge_gap, max_merge_overlap_frames, max_merge_distance,
-        window_size, threshold
-    )
+    Args:
+        jsonl_path (str): Input path to .jsonl file.
+        output_jsonl_path (str): Output path to write filtered tracks.
+        field_size (tuple): Field dimensions (length, width) in 0.1 meters.
+        margin_meter (float): Distance from edge considered "near".
+        near_ratio_threshold (float): Ratio of points near edge to consider it a boundary-only track.
+    """
+    with open(jsonl_path, 'r') as f_in, open(output_jsonl_path, 'w') as f_out:
+        for line in f_in:
+            track = json.loads(line)
+            team = track.get("team", "")
+            points = np.array(track.get("projected", []))
 
-    if output_type in ['image', 'all']:
-        render_to_image_from_jsonl(
-            jsonl_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
-            bg_img=bg_img,
-            field_size=field_size,
-            min_track_length=min_track_length,
-            output_path=output_path_image
-        )
-    if output_type in ['video', 'all']:
-        render_to_video_from_jsonl(
-            jsonl_path=json_path.replace('.jsonl', '_merged_filtered.jsonl'),
-            bg_img=bg_img,
-            field_size=field_size,
-            output_path=output_path_video,
-            fps=fps
-        )
+            if len(points) == 0:
+                continue  # skip empty tracks
 
+            if team == "ball":
+                f_out.write(json.dumps(track) + "\n")
+                continue  # Always keep ball
+
+            xs, ys = points[:, 0], points[:, 1]
+            near_left = xs < margin_meter
+            near_right = xs > (field_size[0] - margin_meter)
+            near_top = ys < margin_meter
+            near_bottom = ys > (field_size[1] - margin_meter)
+
+            near_edge_mask = near_left | near_right | near_top | near_bottom
+            near_edge_ratio = near_edge_mask.sum() / len(points)
+
+            if near_edge_ratio < near_ratio_threshold:
+                f_out.write(json.dumps(track) + "\n")
+
+def remove_static_ball_tracks(
+    jsonl_path,
+    output_jsonl_path,
+    movement_threshold=10  # in meters (10 = 1m if 0.1m units)
+):
+    """
+    Remove ball tracks that don't move significantly.
+
+    Args:
+        jsonl_path (str): Input path to .jsonl file.
+        output_jsonl_path (str): Output path to write filtered tracks.
+        movement_threshold (float): Minimum total movement (Euclidean) to keep.
+    """
+    with open(jsonl_path, 'r') as f_in, open(output_jsonl_path, 'w') as f_out:
+        for line in f_in:
+            track = json.loads(line)
+            if track.get("team") != "ball":
+                f_out.write(json.dumps(track) + "\n")
+                continue
+
+            points = np.array(track.get("projected", []))
+            if len(points) < 2:
+                continue  # skip too short
+
+            # Compute total movement
+            deltas = np.diff(points, axis=0)
+            distances = np.linalg.norm(deltas, axis=1)
+            total_distance = distances.sum()
+
+            if total_distance >= movement_threshold:
+                f_out.write(json.dumps(track) + "\n")
 
 def detect_team_size_violations_streaming(jsonl_path, save_path,
                                           max_team_size=10,
@@ -655,134 +561,339 @@ def detect_team_size_violations_streaming(jsonl_path, save_path,
 
     print(f"📄 Saved violations to {save_path}")
 
-def merge_problem_windows_by_reason(jsonl_path: str, min_gap: int = 1) -> Dict[str, List[Tuple[int, int]]]:
+def merge_violation_windows_with_track_counts(jsonl_path: str, min_gap: int = 1) -> Dict[str, List[Dict]]:
     """
-    Merges frame_ids with violations from a JSONL file into continuous frame ranges per violation reason.
-
+    Merge consecutive violation frames into windows grouped by team and number of violating tracks.
+    
     Args:
-        jsonl_path (str): Path to the JSONL file, each line is a dict with 'frame_id' and 'violations'.
-        min_gap (int): Minimum gap between frames to merge into the same window.
-
+        jsonl_path (str): Path to the input JSONL file with per-frame violations.
+        min_gap (int): Allowed gap between frames to merge into the same window.
+    
     Returns:
-        Dict[str, List[Tuple[int, int]]]: Dictionary where each key is a violation reason and value is list of (start, end) frame ranges.
+        Dict[str, List[Dict]]: Dictionary with team as key and list of merged windows as value.
     """
-    reason_to_frames = defaultdict(list)
+    team_count_to_frames = defaultdict(lambda: defaultdict(list))  # team -> count -> list of frame info
 
+    # Read and categorize frames
     with open(jsonl_path, 'r') as f:
         for line in f:
             obj = json.loads(line.strip())
-            if "violations" in obj and obj["violations"]:
-                frame_id = obj["frame_id"]
-                for reason, ids in obj["violations"].items():
-                    if ids:
-                        reason_to_frames[reason].append(frame_id)
+            frame_id = obj["frame_id"]
+            violations = obj.get("violations", {})
+            for team, ids in violations.items():
+                track_count = len(ids)
+                team_count_to_frames[team][track_count].append((frame_id, set(ids)))
 
-    reason_to_merged = {}
-    for reason, frames in reason_to_frames.items():
-        if not frames:
-            continue
-        frames = sorted(set(frames))
-        merged = []
-        start = prev = frames[0]
-        for frame in frames[1:]:
-            if frame <= prev + min_gap:
-                prev = frame
-            else:
-                merged.append((start, prev))
-                start = prev = frame
-        merged.append((start, prev))
-        reason_to_merged[reason] = merged
+    merged_result = defaultdict(list)
 
-    return reason_to_merged
+    for team, count_to_frames in team_count_to_frames.items():
+        for count, frames in count_to_frames.items():
+            if not frames:
+                continue
+            frames = sorted(frames, key=lambda x: x[0])
+            merged = []
+            start, prev_frame, current_ids = frames[0][0], frames[0][0], frames[0][1].copy()
+            
+            for i in range(1, len(frames)):
+                frame_id, ids = frames[i]
+                if frame_id <= prev_frame + min_gap:
+                    current_ids.update(ids)
+                    prev_frame = frame_id
+                else:
+                    merged.append({
+                        "range": [start, prev_frame],
+                        "count": count,
+                        "track_ids": sorted(current_ids)
+                    })
+                    start = prev_frame = frame_id
+                    current_ids = ids.copy()
+            
+            # Append the last segment
+            merged.append({
+                "range": [start, prev_frame],
+                "count": count,
+                "track_ids": sorted(current_ids)
+            })
 
-def relabel_tracks_by_overlap_and_confidence(
+            merged_result[team].extend(merged)
+
+    return merged_result
+
+def relabel_tracks_by_confidence_and_decrement_windows_streaming(
     track_jsonl_path: str,
-    reason_to_windows: Dict[str, List[Tuple[int, int]]],
+    team_windows: Dict[str, List[Dict]],
     output_jsonl_path: str,
-    overlap_threshold: float = 0.8,
     conf_threshold: float = 0.007,
     not_sure_label: str = "unsure"
 ) -> int:
     """
-    Relabel low-confidence tracks that significantly overlap with problem windows by reason.
+    Efficiently relabel low-confidence tracks that violate team size constraints,
+    and decrement violation windows. Uses a one-pass preload strategy.
 
     Args:
         track_jsonl_path (str): Path to the input track JSONL file.
-        reason_to_windows (dict): Dictionary of violation reason -> list of (start, end) frame ranges.
-        output_jsonl_path (str): Path to save the modified tracks as a JSONL file.
-        overlap_threshold (float): Minimum overlap ratio to consider for relabeling.
-        conf_threshold (float): Maximum confidence to be considered low-confidence.
-        not_sure_label (str): Label to assign for uncertain tracks.
+        team_windows (dict): Team -> List of dicts with keys: 'range', 'count', 'track_ids'.
+        output_jsonl_path (str): Path to save the modified track JSONL.
+        conf_threshold (float): Confidence threshold for relabeling.
+        not_sure_label (str): Label to assign to uncertain tracks.
 
     Returns:
         int: Number of tracks relabeled.
     """
-    # Load all tracks
-    tracks = []
+
+    print("📦 Preloading track data...")
+    track_map = {}
     with open(track_jsonl_path, "r") as f:
         for line in f:
             track = json.loads(line.strip())
-            tracks.append(track)
+            tid = track.get("track_id")
+            if tid:
+                track_map[tid] = track
+    print(f"✅ Loaded {len(track_map)} tracks.")
 
     relabel_count = 0
+    relabel_map = {}  # tid -> new label
 
-    for reason, windows in reason_to_windows.items():
-        pending_windows = windows[:]
+    team_windows = {k: [w.copy() for w in v] for k, v in team_windows.items()}
 
-        while pending_windows:
-            current_window = pending_windows.pop(0)
-            window_start, window_end = current_window
+    for team, windows in team_windows.items():
+        while windows:
+            print(f"🔄 Processing team: {team}, remaining windows: {len(windows)}")
+            window = windows.pop(0)
+            win_start, win_end = window["range"]
+            count = window["count"]
+            track_ids = set(window["track_ids"])
 
-            # Find candidate tracks from the same team
+            allowed_count = 1 if team.endswith("goalkeeper") or team == "referee" else 10
+            excess = count - allowed_count
+            if excess <= 0:
+                continue
+
+            # Filter and collect candidate tracks from preload
             candidate_tracks = []
-            for track in tracks:
-                if track.get("team") != reason:
+            for tid in track_ids:
+                if tid in relabel_map:
+                    continue  # already relabeled
+                track = track_map.get(tid)
+                if not track or track.get("team") != team:
                     continue
-                frame_range = track.get("frame_range", [])
-                if not frame_range or len(frame_range) != 2:
-                    continue
+                conf = track.get("team_conf", 1.0)
+                frame_range = track.get("frame_range", [0, 0])
                 track_start, track_end = frame_range
-                # Compute intersection
-                inter_start = max(window_start, track_start)
-                inter_end = min(window_end, track_end)
-                if inter_end >= inter_start:
-                    overlap = inter_end - inter_start + 1
-                    duration = track_end - track_start + 1
-                    overlap_ratio = overlap / duration
-                    if overlap_ratio >= overlap_threshold:
-                        candidate_tracks.append((track, overlap, inter_start, inter_end))
+                # Overlap check
+                if win_end < track_start or win_start > track_end:
+                    continue
+                overlap_start = max(win_start, track_start)
+                overlap_end = min(win_end, track_end)
+                overlap = overlap_end - overlap_start + 1
+                duration = track_end - track_start + 1
+                overlap_ratio = overlap / duration if duration > 0 else 0
+                if overlap_ratio > 0.1:
+                    candidate_tracks.append((conf, tid, track_start, track_end))
 
-            # Sort by team_conf
-            candidate_tracks.sort(key=lambda x: x[0].get("team_conf", 1.0))
+            # Only take lowest confidence ones
+            candidate_tracks = nsmallest(excess, candidate_tracks)
 
-            for track, overlap, inter_start, inter_end in candidate_tracks:
-                if track.get("team_conf", 1.0) <= conf_threshold:
-                    team = track.get("team", "")
-                    if not team.startswith("referee") and not team.endswith("goalkeeper"):
-                        track["team"] = not_sure_label
-                        relabel_count += 1
+            relabeled_in_window = 0
+            for conf, tid, t_start, t_end in candidate_tracks:
+                if conf > conf_threshold or tid in relabel_map:
+                    continue
+                relabel_map[tid] = not_sure_label
+                relabel_count += 1
+                relabeled_in_window += 1
 
-                        # Add remaining segments of the current window back
-                        if window_start < inter_start:
-                            pending_windows.append((window_start, inter_start - 1))
-                        if inter_end < window_end:
-                            pending_windows.append((inter_end + 1, window_end))
-                        break  # Only one relabel per window
+                # Decrement other windows that overlap
+                new_windows = []
+                for other in windows:
+                    ow_start, ow_end = other["range"]
+                    if ow_end < t_start or ow_start > t_end:
+                        new_windows.append(other)
+                        continue
+                    if t_start > ow_start:
+                        new_windows.append({
+                            "range": [ow_start, t_start - 1],
+                            "count": other["count"],
+                            "track_ids": other["track_ids"]
+                        })
+                    if t_end < ow_end:
+                        new_windows.append({
+                            "range": [t_end + 1, ow_end],
+                            "count": other["count"],
+                            "track_ids": other["track_ids"]
+                        })
+                windows = new_windows
 
-    # Save modified tracks
-    with open(output_jsonl_path, "w") as f:
-        for track in tracks:
-            json.dump(track, f)
-            f.write("\n")
+            # If still unresolved, re-add current window
+            window["count"] -= relabeled_in_window
+            if window["count"] > allowed_count and relabeled_in_window > 0:
+                windows.append(window)
 
-    print(f"✅ Relabeled {relabel_count} tracks and saved to {output_jsonl_path}")
+    # Final pass to write relabeled file
+    with open(track_jsonl_path, "r") as f_in, open(output_jsonl_path, "w") as f_out:
+        for line in f_in:
+            track = json.loads(line.strip())
+            tid = track.get("track_id")
+            if tid in relabel_map:
+                if track.get("team") not in [not_sure_label, "referee"] and not track.get("team", "").endswith("goalkeeper"):
+                    track["team"] = relabel_map[tid]
+            json.dump(track, f_out)
+            f_out.write("\n")
+
+    print(f"✅ Relabeled {relabel_count} tracks.")
     return relabel_count
 
+def prepare_background_and_tracks(
+    json_path,
+    image_path,
+    field_size,
+    min_track_length,
+    smoothing_window,
+    polyorder,
+    max_step,
+    max_merge_gap,
+    max_merge_overlap_frames,
+    max_merge_distance,
+    window_size,
+    threshold
+):
+    # Load and resize background
+    bg_img = cv2.imread(image_path)
+    if bg_img is None:
+        raise FileNotFoundError(f"Failed to load image: {image_path}")
+    bg_img = cv2.resize(bg_img, field_size)
+
+    # Merge and filter tracks
+    load_and_merge_tracks(
+        json_path=json_path,
+        output_path=json_path.replace('.jsonl', '_spilt.jsonl'),
+        field_size=field_size,
+        min_track_length=min_track_length,
+        smoothing_window=smoothing_window,
+        polyorder=polyorder,
+        max_merge_gap=max_merge_gap,
+        max_merge_distance=max_merge_distance,
+        max_merge_overlap_frames=max_merge_overlap_frames,
+        window_size=window_size,
+        threshold=threshold,
+        max_step=max_step,
+    )
+
+    hybrid_merge_stream_fixed(
+        jsonl_path=json_path.replace('.jsonl', '_spilt.jsonl'),
+        output_path=json_path.replace('.jsonl', '_merged.jsonl'),
+        max_merge_gap=max_merge_gap,
+        max_merge_overlap_frames=max_merge_overlap_frames,
+        max_merge_distance=max_merge_distance,
+        smoothing_window=smoothing_window,
+        polyorder=polyorder,
+        max_step=max_step,
+    )
+
+    remove_tracks_near_boundary_stream(
+        jsonl_path=json_path.replace('.jsonl', '_merged.jsonl'),
+        output_jsonl_path=json_path.replace('.jsonl', '_merged_filtered_near_boundary.jsonl'),
+        field_size=field_size,
+        margin_meter=30
+    )
+
+    remove_static_ball_tracks(
+        json_path.replace('.jsonl', '_merged_filtered_near_boundary.jsonl'),
+        json_path.replace('.jsonl', '_merged_filtered.jsonl'),
+        movement_threshold=10  # in meters (10 = 1m if 0.1m units)
+    )
+
+    detect_team_size_violations_streaming(
+        jsonl_path=json_path.replace('.jsonl', '_merged_filtered.jsonl'),
+        save_path=json_path.replace('.jsonl', '_team_size_violations.jsonl'),
+        max_team_size=10,
+        allowed_goalkeepers=1,
+        allowed_referees=1
+    )
+
+    start_merged = time.time()
+    merged_window = merge_violation_windows_with_track_counts(
+        jsonl_path=json_path.replace('.jsonl', '_team_size_violations.jsonl'),
+        min_gap=3
+    )
+    end_merged = time.time()
+
+    for team, windows in merged_window.items():
+        print(f"🟢 Team {team} → {len(windows)} merged windows")
+    print(f"✅ Merged windows in {end_merged - start_merged:.2f} seconds")
+
+    relabel_count = relabel_tracks_by_confidence_and_decrement_windows_streaming(
+        track_jsonl_path=json_path.replace('.jsonl', '_merged_filtered.jsonl'),
+        team_windows=merged_window,
+        output_jsonl_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
+        conf_threshold=0.007,
+        not_sure_label="unsure"
+    )
+    end_relabel = time.time()
+    print(f"✅ Relabeled {relabel_count} tracks in {end_relabel - end_merged:.2f} seconds")
+    return bg_img
+
+def process_merged_tracks(
+    json_path,
+    image_path,
+    field_size,
+    min_track_length,
+    smoothing_window,
+    polyorder,
+    max_step,
+    max_merge_gap,
+    max_merge_overlap_frames,
+    max_merge_distance,
+    window_size,
+    threshold,
+    output_type,
+    output_name,
+    fps=30
+):
+    if output_name is None:
+        output_name = os.path.splitext(os.path.basename(json_path))[0]
+
+    # Auto-generate full path with extension
+    if output_type == 'image':
+        output_path_image = f"{output_name}.png"
+    elif output_type == 'video':
+        output_path_video = f"{output_name}.mp4"
+    elif output_type == 'all':
+        output_path_image = f"{output_name}.png"
+        output_path_video = f"{output_name}.mp4"
+    else:
+        raise ValueError("Unsupported output type. Use 'image', 'video' or 'all'.")
+
+    # Shared logic
+    bg_img = prepare_background_and_tracks(
+        json_path, image_path, field_size,
+        min_track_length, smoothing_window, polyorder, max_step,
+        max_merge_gap, max_merge_overlap_frames, max_merge_distance,
+        window_size, threshold
+    )
+
+    if output_type in ['image', 'all']:
+        render_to_image_from_jsonl(
+            jsonl_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
+            bg_img=bg_img,
+            field_size=field_size,
+            min_track_length=min_track_length,
+            output_path=output_path_image
+        )
+    if output_type in ['video', 'all']:
+        render_to_video_from_jsonl(
+            jsonl_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
+            bg_img=bg_img,
+            field_size=field_size,
+            output_path=output_path_video,
+            fps=fps
+        )
+
+#TODO: align the output video with the original video frames (now if there is no people in the field, it wont write the frame so the first few minutes of the video is missing)
 if  __name__ == "__main__":
     start = time.time()
 
     process_merged_tracks(
-        json_path="./runs/detect/test_4k/team_tracking.jsonl",
+        json_path="./runs/detect/test_4k-2h/team_tracking.jsonl",
         image_path="./data/images/mongkok_football_field.png",
         field_size=(1060, 660),
         min_track_length=10,
@@ -794,8 +905,8 @@ if  __name__ == "__main__":
         max_merge_distance=50,
         window_size=20,
         threshold=0.9,
-        output_type='image', # 'image', 'video', 'jsonl', or 'all'
-        output_name='trajectory_plot' 
+        output_type='all', # 'image', 'video', 'jsonl', or 'all'
+        output_name='./runs/detect/test_4k-2h/team_tracking_output'  # without extension
     )
 
     end = time.time()
