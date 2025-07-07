@@ -390,7 +390,7 @@ def render_to_image_from_jsonl(jsonl_path, bg_img, field_size, min_track_length,
     plt.close()
     print(f"✅ Saved image to: {output_path}")
 
-def render_to_video_from_jsonl(jsonl_path, bg_img, field_size, output_path, fps=30):
+def render_to_video_from_jsonl(jsonl_path, bg_img, field_size, output_path, fps=29.97):
     height, width, _ = bg_img.shape
     writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
@@ -405,7 +405,7 @@ def render_to_video_from_jsonl(jsonl_path, bg_img, field_size, output_path, fps=
     }
 
     tracks = [json.loads(line) for line in open(jsonl_path)]
-    min_frame = min(min(t["frames"]) for t in tracks)
+    min_frame = 0
     max_frame = max(max(t["frames"]) for t in tracks)
 
     frame_to_objects = defaultdict(list)
@@ -888,7 +888,7 @@ def process_merged_tracks(
             fps=fps
         )
 
-#TODO: align the output video with the original video frames (now if there is no people in the field, it wont write the frame so the first few minutes of the video is missing)
+
 if  __name__ == "__main__":
     start = time.time()
 
