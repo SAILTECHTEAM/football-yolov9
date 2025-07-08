@@ -23,16 +23,16 @@ def detect_abnormal_tracks_from_jsonl(
     min_valid_frames: int = 5,
     conf_threshold: float = 0.5,
     frame_threshold: int = 3,
-    distance_threshold: float = 0.5
+    distance_threshold: float = 0.5,
+    multi_ball_frames: set = None  # NEW: frames to exclude
 ):
     with open(jsonl_path, 'r') as f:
         tracks = [json.loads(line) for line in f]
 
-    # Split ball and player
     ball_tracks = [t for t in tracks if t["team"] == "ball"]
     player_tracks = [t for t in tracks if t["team"] != "ball"]
 
-    # Build ball position lookup per frame
+    # Build ball position lookup
     ball_by_frame: Dict[int, Tuple[float, float]] = {}
     for b in ball_tracks:
         for f, pt in zip(b["frames"], b["projected"]):
@@ -42,6 +42,8 @@ def detect_abnormal_tracks_from_jsonl(
     abnormal_tracks = []
     track_confidences = {}
     track_abnormal_frames = {}
+
+    multi_ball_frames = multi_ball_frames or set()
 
     for t in player_tracks:
         frames = t["frames"]
@@ -57,6 +59,10 @@ def detect_abnormal_tracks_from_jsonl(
             f_prev, f_curr = frames[i - 1], frames[i]
             pt_prev, pt_curr = points[i - 1], points[i]
             if pt_prev is None or pt_curr is None:
+                continue
+
+            # ⛔ Skip if either frame has multiple balls
+            if f_prev in multi_ball_frames or f_curr in multi_ball_frames:
                 continue
 
             player_vec = np.array(pt_curr) - np.array(pt_prev)
@@ -109,6 +115,21 @@ def detect_abnormal_tracks_from_jsonl(
 
     return abnormal_tracks, track_abnormal_frames, track_confidences
 
+def get_frames_with_multiple_balls(jsonl_path: str) -> set:
+    from collections import defaultdict
+    import json
+
+    counter = defaultdict(int)
+    with open(jsonl_path) as f:
+        for line in f:
+            t = json.loads(line)
+            if t.get("team") != "ball":
+                continue
+            for f_id in t.get("frames", []):
+                counter[f_id] += 1
+    return {f for f, count in counter.items() if count > 1}
+
+
 if __name__ == "__main__":
     # Load JSONL
     jsonl_path = "./runs/detect/test_4k-2h/team_tracking_relabeled.jsonl"
@@ -118,6 +139,8 @@ if __name__ == "__main__":
     conf_threshold = 0.7
     frame_threshold = 3
     distance_threshold = 20
+
+    multi_ball_frames = get_frames_with_multiple_balls(jsonl_path)
     # Detect abnormal tracks
     abnormal_tracks, track_abnormal_frames, track_confidences = detect_abnormal_tracks_from_jsonl(
         jsonl_path,
@@ -126,7 +149,8 @@ if __name__ == "__main__":
         min_valid_frames=min_valid_frames,
         conf_threshold=conf_threshold,
         frame_threshold=frame_threshold,
-        distance_threshold=distance_threshold
+        distance_threshold=distance_threshold,
+        multi_ball_frames=multi_ball_frames
     )
     
     # Output

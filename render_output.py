@@ -436,7 +436,7 @@ def render_to_image_from_jsonl(
     ax.set_xlim(0, field_size[0])
     ax.set_ylim(0, field_size[1])
     if start_frame is not None and end_frame is not None:
-        ax.set_title(f"Trajectories from frame {start_frame} to {end_frame}")
+        ax.set_title(f"Trajectories from time {frame_to_time(start_frame)} to {frame_to_time(end_frame)}")
     else:
         ax.set_title("Trajectories (full match)")
 
