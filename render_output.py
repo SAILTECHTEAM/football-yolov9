@@ -350,9 +350,37 @@ def load_and_merge_tracks(
                 with open(output_path, 'a') as out_f:
                     out_f.write(json.dumps(track_dict) + '\n')   
 
-def render_to_image_from_jsonl(jsonl_path, bg_img, field_size, min_track_length, output_path="trajectory_plot.png"):
+def frame_to_time(frame: int, fps: float = 29.97, format_output: bool = True) -> str:
+    """
+    Convert frame index to time based on FPS.
+    
+    Args:
+        frame (int): Frame index.
+        fps (float): Frames per second. Default is 29.97.
+        format_output (bool): If True, return formatted time (HH:MM:SS.ms), else return seconds.
+    
+    Returns:
+        str or float: Formatted timestamp or raw seconds.
+    """
+    seconds = frame / fps
+    if not format_output:
+        return seconds
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    return f"{hours:02}:{minutes:02}:{secs:06.3f}"  # includes milliseconds
+
+def render_to_image_from_jsonl(
+    jsonl_path,
+    bg_img,
+    field_size,
+    output_path="trajectory_plot.png",
+    start_frame: int = None,
+    end_frame: int = None
+):
     fig, ax = plt.subplots(figsize=(12, 7))
     ax.imshow(bg_img[..., ::-1], extent=[0, field_size[0], 0, field_size[1]])
+
     team_colors = {
         'eastern': 'blue',
         'easterngoalkeeper': 'green',
@@ -360,31 +388,43 @@ def render_to_image_from_jsonl(jsonl_path, bg_img, field_size, min_track_length,
         'kitcheegoalkeeper': 'orange',
         'referee': 'yellow',
         'ball': 'black',
-        'unsure': 'red',  # For relabeled tracks
+        'unsure': 'red',
     }
 
     with open(jsonl_path, 'r') as f:
         for line in f:
             track = json.loads(line)
+            frames = track.get("frames", [])
             points = np.array(track.get("projected", track.get("points", [])))
 
-            # Remove None points
-            points = np.array([pt for pt in points if pt is not None])
-            if len(points) < min_track_length:
-                continue
+            if len(frames) != len(points):
+                continue  # skip bad track
+
+            # Filter by selected time window
+            if start_frame is not None and end_frame is not None:
+                filtered = [
+                    (f, pt) for f, pt in zip(frames, points)
+                    if pt is not None and start_frame <= f <= end_frame
+                ]
+                if not filtered:
+                    continue
+                frames, points = zip(*filtered)
+                points = np.array(points)
+            else:
+                # fallback: remove None
+                points = np.array([pt for pt in points if pt is not None])
 
             xs, ys = points[:, 0], points[:, 1]
             color = team_colors.get(track["team"], 'gray')
             ax.plot(xs, ys, color=color, alpha=0.8)
 
-            # Draw last valid point
-            if len(xs) > 0 and len(ys) > 0:
-                ax.scatter(xs[-1], ys[-1], color=color)
-                ax.text(xs[-1], ys[-1], str(track["track_id"]), fontsize=8, color='black')
+            # Draw last point and label
+            ax.scatter(xs[-1], ys[-1], color=color)
+            ax.text(xs[-1], ys[-1], str(track["track_id"]), fontsize=8, color='black')
 
     ax.set_xlim(0, field_size[0])
     ax.set_ylim(0, field_size[1])
-    ax.set_title("Smoothed & Merged Trajectories")
+    ax.set_title(f"Trajectories from time {frame_to_time(start_frame)} to {frame_to_time(end_frame)}")
     plt.tight_layout()
     plt.savefig(output_path, dpi=300)
     plt.close()
@@ -845,23 +885,13 @@ def process_merged_tracks(
     max_merge_distance,
     window_size,
     threshold,
-    output_type,
     output_name,
-    fps=30
+    fps=29.97
 ):
     if output_name is None:
         output_name = os.path.splitext(os.path.basename(json_path))[0]
 
-    # Auto-generate full path with extension
-    if output_type == 'image':
-        output_path_image = f"{output_name}.png"
-    elif output_type == 'video':
-        output_path_video = f"{output_name}.mp4"
-    elif output_type == 'all':
-        output_path_image = f"{output_name}.png"
-        output_path_video = f"{output_name}.mp4"
-    else:
-        raise ValueError("Unsupported output type. Use 'image', 'video' or 'all'.")
+    output_path_video = f"{output_name}.mp4"
 
     # Shared logic
     bg_img = prepare_background_and_tracks(
@@ -871,22 +901,13 @@ def process_merged_tracks(
         window_size, threshold
     )
 
-    if output_type in ['image', 'all']:
-        render_to_image_from_jsonl(
-            jsonl_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
-            bg_img=bg_img,
-            field_size=field_size,
-            min_track_length=min_track_length,
-            output_path=output_path_image
-        )
-    if output_type in ['video', 'all']:
-        render_to_video_from_jsonl(
-            jsonl_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
-            bg_img=bg_img,
-            field_size=field_size,
-            output_path=output_path_video,
-            fps=fps
-        )
+    render_to_video_from_jsonl(
+        jsonl_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
+        bg_img=bg_img,
+        field_size=field_size,
+        output_path=output_path_video,
+        fps=fps
+    )
 
 
 if  __name__ == "__main__":
@@ -905,7 +926,6 @@ if  __name__ == "__main__":
         max_merge_distance=50,
         window_size=20,
         threshold=0.9,
-        output_type='all', # 'image', 'video', 'jsonl', or 'all'
         output_name='./runs/detect/test_4k-2h/team_tracking_output'  # without extension
     )
 
