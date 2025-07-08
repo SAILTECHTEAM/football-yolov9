@@ -376,7 +376,8 @@ def render_to_image_from_jsonl(
     field_size,
     output_path="trajectory_plot.png",
     start_frame: int = None,
-    end_frame: int = None
+    end_frame: int = None,
+    highlight_ids: List[str] = None  # 👈 new param to highlight suspicious tracks
 ):
     fig, ax = plt.subplots(figsize=(12, 7))
     ax.imshow(bg_img[..., ::-1], extent=[0, field_size[0], 0, field_size[1]])
@@ -388,12 +389,16 @@ def render_to_image_from_jsonl(
         'kitcheegoalkeeper': 'orange',
         'referee': 'yellow',
         'ball': 'black',
-        'unsure': 'red',
+        'unsure': 'gray',
+        'suspicious': 'red',  # red color for suspicious track
     }
+
+    highlight_ids = set(highlight_ids or [])  # ensure it's a set
 
     with open(jsonl_path, 'r') as f:
         for line in f:
             track = json.loads(line)
+            track_id = track["track_id"]
             frames = track.get("frames", [])
             points = np.array(track.get("projected", track.get("points", [])))
 
@@ -413,22 +418,33 @@ def render_to_image_from_jsonl(
             else:
                 # fallback: remove None
                 points = np.array([pt for pt in points if pt is not None])
+                if len(points) == 0:
+                    continue
 
             xs, ys = points[:, 0], points[:, 1]
-            color = team_colors.get(track["team"], 'gray')
-            ax.plot(xs, ys, color=color, alpha=0.8)
 
-            # Draw last point and label
+            # 🟥 If track is in highlight list, override color
+            if track_id in highlight_ids:
+                color = team_colors["suspicious"]
+            else:
+                color = team_colors.get(track.get("team", "unsure"), 'gray')
+
+            ax.plot(xs, ys, color=color, alpha=0.8)
             ax.scatter(xs[-1], ys[-1], color=color)
-            ax.text(xs[-1], ys[-1], str(track["track_id"]), fontsize=8, color='black')
+            ax.text(xs[-1], ys[-1], str(track_id), fontsize=8, color='black')
 
     ax.set_xlim(0, field_size[0])
     ax.set_ylim(0, field_size[1])
-    ax.set_title(f"Trajectories from time {frame_to_time(start_frame)} to {frame_to_time(end_frame)}")
+    if start_frame is not None and end_frame is not None:
+        ax.set_title(f"Trajectories from frame {start_frame} to {end_frame}")
+    else:
+        ax.set_title("Trajectories (full match)")
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=300)
     plt.close()
     print(f"✅ Saved image to: {output_path}")
+
 
 def render_to_video_from_jsonl(jsonl_path, bg_img, field_size, output_path, fps=29.97):
     height, width, _ = bg_img.shape

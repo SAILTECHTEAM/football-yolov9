@@ -11,6 +11,7 @@ if __name__ == "__main__":
     end_frame = 100251
     bg_img = cv2.imread(background_image_path)
     bg_img = cv2.resize(bg_img, field_size)
+    highlight_ids = ["22363a"]
     
     # Call the function to render the image
-    render_to_image_from_jsonl(jsonl_file_path, bg_img, field_size, output_image_path, start_frame, end_frame)
+    render_to_image_from_jsonl(jsonl_file_path, bg_img, field_size, output_image_path, start_frame, end_frame, highlight_ids=highlight_ids)
