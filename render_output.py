@@ -445,8 +445,16 @@ def render_to_image_from_jsonl(
     plt.close()
     print(f"✅ Saved image to: {output_path}")
 
-
-def render_to_video_from_jsonl(jsonl_path, bg_img, field_size, output_path, fps=29.97):
+def render_to_video_from_jsonl(
+    jsonl_path,
+    bg_img,
+    field_size,
+    output_path,
+    fps=29.97,
+    start_frame: int = None,
+    end_frame: int = None,
+    suspicious_track_ids: set = None
+):
     height, width, _ = bg_img.shape
     writer = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
@@ -457,23 +465,36 @@ def render_to_video_from_jsonl(jsonl_path, bg_img, field_size, output_path, fps=
         'kitcheegoalkeeper': (0, 165, 255),
         'referee': (0, 255, 255),
         'ball': (0, 0, 0),
-        'unsure': (0, 0, 255),  # For relabeled tracks
+        'unsure': (128, 128, 128),
+        'suspicious': (0, 0, 255),
     }
 
-    tracks = [json.loads(line) for line in open(jsonl_path)]
-    min_frame = 0
-    max_frame = max(max(t["frames"]) for t in tracks)
+    suspicious_track_ids = suspicious_track_ids or set()
 
+    tracks = [json.loads(line) for line in open(jsonl_path)]
+
+    # Determine valid frame range
+    all_frames = [f for t in tracks for f in t["frames"]]
+    min_frame = min(all_frames) if start_frame is None else start_frame
+    max_frame = max(all_frames) if end_frame is None else end_frame
+
+    # Index all objects by frame
     frame_to_objects = defaultdict(list)
     for t in tracks:
+        tid = t["track_id"]
+        team = t["team"]
+        if tid in suspicious_track_ids:
+            team = "suspicious"
+
         for i, f in enumerate(t["frames"]):
             if i >= len(t["projected"]):
                 continue
             pt = t["projected"][i]
             if pt is None:
                 continue
-            frame_to_objects[f].append((pt, t["track_id"], t["team"]))
+            frame_to_objects[f].append((pt, tid, team))
 
+    # Render video
     for f in range(min_frame, max_frame + 1):
         frame_img = bg_img.copy()
         for pt, tid, team in frame_to_objects.get(f, []):
