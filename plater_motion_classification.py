@@ -26,6 +26,7 @@ def detect_abnormal_tracks_from_jsonl(
     distance_threshold: float = 0.5,
     multi_ball_frames: set = None  # NEW: frames to exclude
 ):
+    # Load data
     with open(jsonl_path, 'r') as f:
         tracks = [json.loads(line) for line in f]
 
@@ -61,21 +62,35 @@ def detect_abnormal_tracks_from_jsonl(
             if pt_prev is None or pt_curr is None:
                 continue
 
-            # ⛔ Skip if either frame has multiple balls
             if f_prev in multi_ball_frames or f_curr in multi_ball_frames:
-                continue
-
-            player_vec = np.array(pt_curr) - np.array(pt_prev)
-            if np.linalg.norm(player_vec) < velocity_threshold:
                 continue
 
             if f_prev not in ball_by_frame or f_curr not in ball_by_frame:
                 continue
 
-            ball_vec = np.array(ball_by_frame[f_curr]) - np.array(ball_by_frame[f_prev])
+            # Get positions
+            player_curr = np.array(pt_curr)
+            player_prev = np.array(pt_prev)
+            ball_curr = np.array(ball_by_frame[f_curr])
+            ball_prev = np.array(ball_by_frame[f_prev])
+
+            # Check proximity
+            distance_to_ball = np.linalg.norm(player_curr - ball_curr)
+            if distance_to_ball > 200:
+                # print(f"Skipping frame {f_curr} for track {t['track_id']} due to distance to ball: {distance_to_ball:.2f}")
+                continue
+
+            # Compute player movement
+            player_vec = player_curr - player_prev
+            if np.linalg.norm(player_vec) < velocity_threshold:
+                continue
+
+            # Compute ball movement
+            ball_vec = ball_curr - ball_prev
             if np.linalg.norm(ball_vec) < velocity_threshold:
                 continue
 
+            # Compare directions
             angle = calculate_angle(player_vec, ball_vec)
             total_valid += 1
 
@@ -138,7 +153,7 @@ if __name__ == "__main__":
     min_valid_frames = 5
     conf_threshold = 0.7
     frame_threshold = 3
-    distance_threshold = 20
+    distance_threshold = 50
 
     multi_ball_frames = get_frames_with_multiple_balls(jsonl_path)
     # Detect abnormal tracks
@@ -154,9 +169,7 @@ if __name__ == "__main__":
     )
     
     # Output
-    print("Abnormal Tracks:", abnormal_tracks[:5])
-    print("Track Abnormal Frames:", {k: track_abnormal_frames[k] for k in abnormal_tracks[:5]})
+    print("Track Abnormal Frames (start and end only):", {k: (track_abnormal_frames[k][0], track_abnormal_frames[k][-1]) for k in abnormal_tracks})
     print("Abnormal Track Scores:", {k: track_confidences[k] for k in abnormal_tracks[:5]})
     print("Total Abnormal Tracks:", len(abnormal_tracks))
-
     print("Track Count (analyzed):", len(track_confidences))
