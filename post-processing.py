@@ -11,6 +11,7 @@ import time
 import ijson.backends.python as ijson_python
 from typing import List, Dict, Any, Tuple, Iterator, Union
 from heapq import nsmallest
+import argparse
 
 def assign_team_by_majority_vote(team_conf_list):
     team_count = defaultdict(float)
@@ -390,7 +391,6 @@ def render_to_image_from_jsonl(
         'referee': 'yellow',
         'ball': 'black',
         'unsure': 'gray',
-        'suspicious': 'red',  # red color for suspicious track
     }
 
     highlight_ids = set(highlight_ids or [])  # ensure it's a set
@@ -423,15 +423,12 @@ def render_to_image_from_jsonl(
 
             xs, ys = points[:, 0], points[:, 1]
 
-            # 🟥 If track is in highlight list, override color
-            if track_id in highlight_ids:
-                color = team_colors["suspicious"]
-            else:
-                color = team_colors.get(track.get("team", "unsure"), 'gray')
+            color = team_colors.get(track.get("team", "unsure"), 'gray')
 
             ax.plot(xs, ys, color=color, alpha=0.8)
             ax.scatter(xs[-1], ys[-1], color=color)
-            ax.text(xs[-1], ys[-1], str(track_id), fontsize=8, color='black')
+            label_color = 'red' if track_id in highlight_ids else 'black'
+            ax.text(xs[-1], ys[-1], str(track_id), fontsize=8, color=label_color)
 
     ax.set_xlim(0, field_size[0])
     ax.set_ylim(0, field_size[1])
@@ -466,7 +463,6 @@ def render_to_video_from_jsonl(
         'referee': (0, 255, 255),
         'ball': (0, 0, 0),
         'unsure': (128, 128, 128),
-        'suspicious': (0, 0, 255),
     }
 
     suspicious_track_ids = suspicious_track_ids or set()
@@ -483,9 +479,6 @@ def render_to_video_from_jsonl(
     for t in tracks:
         tid = t["track_id"]
         team = t["team"]
-        if tid in suspicious_track_ids:
-            team = "suspicious"
-
         for i, f in enumerate(t["frames"]):
             if i >= len(t["projected"]):
                 continue
@@ -500,9 +493,10 @@ def render_to_video_from_jsonl(
         for pt, tid, team in frame_to_objects.get(f, []):
             x, y = int(pt[0]), field_size[1] - int(pt[1])
             color = team_colors.get(team, (128, 128, 128))
+            text_color = (0, 0, 255) if tid in suspicious_track_ids else (0, 0, 0)
             cv2.circle(frame_img, (x, y), 5, color, -1)
             cv2.putText(frame_img, str(tid), (x + 6, y - 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, text_color, 1, cv2.LINE_AA)
         writer.write(frame_img)
 
     writer.release()
@@ -553,7 +547,7 @@ def remove_tracks_near_boundary_stream(
 def remove_static_ball_tracks(
     jsonl_path,
     output_jsonl_path,
-    movement_threshold=10  # in meters (10 = 1m if 0.1m units)
+    movement_threshold=20  # in meters (10 = 1m if 0.1m units)
 ):
     """
     Remove ball tracks that don't move significantly.
@@ -735,7 +729,7 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
 
     for team, windows in team_windows.items():
         while windows:
-            print(f"🔄 Processing team: {team}, remaining windows: {len(windows)}")
+            # print(f"🔄 Processing team: {team}, remaining windows: {len(windows)}")
             window = windows.pop(0)
             win_start, win_end = window["range"]
             count = window["count"]
@@ -876,7 +870,7 @@ def prepare_background_and_tracks(
     remove_static_ball_tracks(
         json_path.replace('.jsonl', '_merged_filtered_near_boundary.jsonl'),
         json_path.replace('.jsonl', '_merged_filtered.jsonl'),
-        movement_threshold=10  # in meters (10 = 1m if 0.1m units)
+        movement_threshold=20  # in meters (10 = 1m if 0.1m units)
     )
 
     detect_team_size_violations_streaming(
@@ -928,8 +922,9 @@ def process_merged_tracks(
     if output_name is None:
         output_name = os.path.splitext(os.path.basename(json_path))[0]
 
-    output_path_video = f"{output_name}.mp4"
+    # output_path_video = f"{output_name}.mp4"
 
+    start = time.time()
     # Shared logic
     bg_img = prepare_background_and_tracks(
         json_path, image_path, field_size,
@@ -937,34 +932,59 @@ def process_merged_tracks(
         max_merge_gap, max_merge_overlap_frames, max_merge_distance,
         window_size, threshold
     )
+    end = time.time()
+    print(f"✅ Processed tracks in {end - start:.2f} seconds")
 
-    render_to_video_from_jsonl(
-        jsonl_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
-        bg_img=bg_img,
-        field_size=field_size,
-        output_path=output_path_video,
-        fps=fps
-    )
+    # render_to_video_from_jsonl(
+    #     jsonl_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
+    #     bg_img=bg_img,
+    #     field_size=field_size,
+    #     output_path=output_path_video,
+    #     fps=fps
+    # )
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Process merged tracks from tracking JSONL")
+    parser.add_argument('--json-path', type=str, required=True, help='Path to the merged tracking JSONL file')
+    parser.add_argument('--image-path', type=str, required=True, help='Path to the field image')
+    parser.add_argument('--field-size', type=int, nargs=2, default=[1060, 660], help='Field size (length, width) as 0.1m')
+    parser.add_argument('--min-track-length', type=int, default=10, help='Minimum track length to keep')
+    parser.add_argument('--smoothing-window', type=int, default=90, help='Savitzky-Golay filter window size')
+    parser.add_argument('--polyorder', type=int, default=7, help='Polynomial order for smoothing')
+    parser.add_argument('--max-step', type=int, default=20, help='Max distance (in pixels) allowed per frame')
+    parser.add_argument('--max-merge-gap', type=int, default=20, help='Max allowed gap (frames) between mergeable tracks')
+    parser.add_argument('--max-merge-overlap-frames', type=int, default=15, help='Max allowed overlap for merging')
+    parser.add_argument('--max-merge-distance', type=int, default=50, help='Max spatial distance for merging')
+    parser.add_argument('--window-size', type=int, default=20, help='Window size for velocity consistency check')
+    parser.add_argument('--threshold', type=float, default=0.9, help='Threshold for velocity consistency')
+    parser.add_argument('--output-name', type=str, required=True, help='Base name of the output file (without extension)')
+    return parser.parse_args()
 
-if  __name__ == "__main__":
+def main():
+    args = parse_args()
     start = time.time()
 
     process_merged_tracks(
-        json_path="./runs/detect/test_4k-2h/team_tracking.jsonl",
-        image_path="./data/images/mongkok_football_field.png",
-        field_size=(1060, 660),
-        min_track_length=10,
-        smoothing_window=90,
-        polyorder=7,
-        max_step=20,
-        max_merge_gap=20,
-        max_merge_overlap_frames=15,
-        max_merge_distance=50,
-        window_size=20,
-        threshold=0.9,
-        output_name='./runs/detect/test_4k-2h/team_tracking_output'  # without extension
+        json_path=args.json_path,
+        image_path=args.image_path,
+        field_size=tuple(args.field_size),
+        min_track_length=args.min_track_length,
+        smoothing_window=args.smoothing_window,
+        polyorder=args.polyorder,
+        max_step=args.max_step,
+        max_merge_gap=args.max_merge_gap,
+        max_merge_overlap_frames=args.max_merge_overlap_frames,
+        max_merge_distance=args.max_merge_distance,
+        window_size=args.window_size,
+        threshold=args.threshold,
+        output_name=args.output_name
     )
 
     end = time.time()
     print(f"Execution time: {end - start:.2f} seconds")
+
+if __name__ == "__main__":
+    main()
+
+# example usage:
+# python3 render_output.py --json-path "./runs/detect/test_4k-2h-crop/team_tracking.jsonl" --image-path "./data/images/mongkok_football_field.png" --output-name './runs/detect/test_4k-2h-crop/team_tracking_output'

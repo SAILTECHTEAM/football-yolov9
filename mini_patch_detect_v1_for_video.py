@@ -386,6 +386,10 @@ def draw_detections(image, detections, class_names, color=(0, 255, 0)):
         cv2.putText(image, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
                     0.6, (255, 255, 255), 2)
 
+def parse_time_str(time_str: str) -> float:
+    """Convert hh:mm:ss string to seconds."""
+    h, m, s = map(int, time_str.strip().split(":"))
+    return h * 3600 + m * 60 + s
 
 class TrackJsonlStreamer:
     """
@@ -442,6 +446,7 @@ class TrackJsonlStreamer:
 def run(
         weights=ROOT / 'yolo.pt',  # model path or triton URL
         source=ROOT / 'data/images',  # file/dir/URL/glob/screen/0(webcam)
+        game_time=[0, 2700, 3600, 6300], # start time of first half seconds
         data=ROOT / 'data/coco.yaml',  # dataset.yaml path
         clothes_folder_path=ROOT / '',  # path to clothing features
         imgsz=(640, 640),  # inference size (height, width)
@@ -473,6 +478,32 @@ def run(
         ema_alpha = 0.5,  # EMA smoothing factor for bottom center
 ):
     
+    # Determine valid frame ranges (as set)
+    valid_frame_ids = set()
+
+    cap = cv2.VideoCapture(source)
+    fps = cap.get(cv2.CAP_PROP_FPS) if cap.isOpened() else 29.97  # default to 29.97 FPS if not available
+    
+    # Create tracker args manually
+    tracker_args = SimpleNamespace(
+        track_thresh=0.5,
+        track_buffer=30,
+        match_thresh=0.8,
+        mot20=False,
+        fps=fps  # assuming you already have video fps
+    )
+
+    if fps > 0:
+        fh_start = int((game_time[0]) * fps)
+        fh_end = int((game_time[1]) * fps)
+        sh_start = int((game_time[2]) * fps)
+        sh_end = int((game_time[3]) * fps)
+
+        valid_frame_ids.update(range(fh_start, fh_end + 1))
+        valid_frame_ids.update(range(sh_start, sh_end + 1))
+    else:
+        raise ValueError("FPS cannot be 0")
+
     # check homography points
     if homography_src_points is None or homography_dst_points is None:
         raise ValueError("Both homography source and destination points must be provided.")
@@ -483,15 +514,6 @@ def run(
         np.array(homography_src_points, dtype=np.float32),
         np.array(homography_dst_points, dtype=np.float32)
     )[0]
-    
-    # Create tracker args manually
-    tracker_args = SimpleNamespace(
-        track_thresh=0.5,
-        track_buffer=30,
-        match_thresh=0.8,
-        mot20=False,
-        fps=30  # assuming you already have video fps
-    )
 
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
@@ -507,13 +529,10 @@ def run(
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
-    cap = cv2.VideoCapture(source)
-    fps = cap.get(cv2.CAP_PROP_FPS) if cap.isOpened() else 30  # default to 30 FPS if not available
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    pbar = tqdm(total=total_frames, desc="Processing video", unit="frame")
-    frame_idx = 0
+    pbar = tqdm(total=len(valid_frame_ids), desc="Processing game-time frames", unit="frame")
     output_path = str(Path(save_dir) / ("after_gobalNMS_overlap_remove_annotated_" + Path(source).name))
 
     # init json
@@ -529,7 +548,7 @@ def run(
     if not nosave:
         print(f"🔄 Saving video to: {output_path}")
         out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
-    print(f"🔄 Saving tracking JSON to: {output_json_path}")
+    # print(f"🔄 Saving tracking JSON to: {output_json_path}")
     
     # Initialize tracker
     ball_tracker = BYTETracker(tracker_args, frame_rate=tracker_args.fps)
@@ -537,20 +556,30 @@ def run(
 
     # load the team reference features
     if clothes_folder_path and os.path.exists(clothes_folder_path):
-        print(f"🔍 Loading clothing features from: {clothes_folder_path}")
+        # print(f"🔍 Loading clothing features from: {clothes_folder_path}")
         team_histograms = load_team_histograms_from_folder(clothes_folder_path)
-        print(f"✅ Loaded {len(team_histograms)} team histograms.")
+        # print(f"✅ Loaded {len(team_histograms)} team histograms.")
     
+    video_frame_idx = 0  # original frame index (matches video)
+    processed_frame_idx = 0  # game-time processed frame index
+
     while cap.isOpened():
         ret, high_resolution_image = cap.read()
         if not ret:
             break
 
-        frame_idx += 1
-        if frame_idx % vid_stride != 0:
+        video_frame_idx += 1  # match actual video frame number
+
+        if video_frame_idx % vid_stride != 0:
             continue
 
-        # print(f"🔍 Processing frame {frame_idx}")
+        if video_frame_idx not in valid_frame_ids:
+            continue  # ⛔ skip frames not in game time
+
+        processed_frame_idx += 1  # ✅ only increase if frame is actually used
+
+
+        # print(f"🔍 Processing frame {processed_frame_idx}")
 
         images, offsets = get_image_patches(high_resolution_image, crop_size=imgsz[0], overlap=0.2)
 
@@ -722,12 +751,12 @@ def run(
                     team_conf = {}
 
                 # ⭐ update the streamer
-                json_streamer.update(track_id, frame_idx, bbox_out, team_conf, projected_position)
+                json_streamer.update(track_id, processed_frame_idx, bbox_out, team_conf, projected_position)
 
         # save json every N frames
         with dt[6]:
             # flush every N frames
-            json_streamer.maybe_flush(frame_idx)
+            json_streamer.maybe_flush(processed_frame_idx)
 
         # Draw results
         with dt[7]:
@@ -739,7 +768,7 @@ def run(
                 out.write(annotated_image)
 
         total_time = sum(dt[i].dt for i in range(len(dt)))
-        # print(f"Frame {frame_idx} total use: {total_time} (preprocessed: {dt[0].dt:.2f}s, inference: {dt[1].dt:.2f}s, NMS: {dt[2].dt:.2f}s, proprocess: {dt[3].dt:.2f}s, tracking & crop patches: {dt[4].dt:.2f}s, ReID: {dt[5].dt:.2f}s, Json: {dt[6].dt:.2f}s, Draw: {dt[7].dt:.2f}s)")
+        # print(f"Frame {processed_frame_idx} total use: {total_time} (preprocessed: {dt[0].dt:.2f}s, inference: {dt[1].dt:.2f}s, NMS: {dt[2].dt:.2f}s, proprocess: {dt[3].dt:.2f}s, tracking & crop patches: {dt[4].dt:.2f}s, ReID: {dt[5].dt:.2f}s, Json: {dt[6].dt:.2f}s, Draw: {dt[7].dt:.2f}s)")
         pbar.set_postfix({
             "pre": f"{dt[0].dt:.2f}s",
             "inf": f"{dt[1].dt:.2f}s",
@@ -773,6 +802,7 @@ def parse_opt():
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolo.pt', help='model path or triton URL')
     parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='file/dir/URL/glob/screen/0(webcam)')
+    parser.add_argument('--game-time', type=int, nargs=4, default=[0, 2700, 3600, 6300], help='start time of first half in seconds')
     parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='(optional) dataset.yaml path')
     parser.add_argument('--clothes-folder-path', type=str, default=ROOT / '', help='path to clothing features for assigning team IDs')
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
@@ -806,6 +836,7 @@ def parse_opt():
     parser.add_argument('--ema-alpha', type=float, default=0.5, help='EMA smoothing factor for bottom center')
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
+    opt.game_time = np.array(opt.game_time, dtype=np.int32).reshape(4)  # reshape to 1D array
     opt.homography_src_points = np.array(opt.homography_src_points, dtype=np.float32).reshape(4, 2)
     opt.homography_dst_points = np.array(opt.homography_dst_points, dtype=np.float32).reshape(4, 2)
     opt.homography_src_points = opt.homography_src_points.tolist()
@@ -821,9 +852,10 @@ def main(opt):
 
 if __name__ == "__main__":
     opt = parse_opt()
+    start_time = time.time()
     main(opt)
-
     print("Finished processing script for video patch detection and tracking.")
-
+    end_time = time.time()
+    print(f"Total execution time(HH:MM:SS): {time.strftime('%H:%M:%S', time.gmtime(end_time - start_time))}")
 # Example usage:
-# python3 mini_patch_detect_v1_for_video.py --source './data/video/test_sample/4k_football_test.mov' --img 640 --device 0 --weights './weight/yolov9-s.pt' --name test_4k --classes 0 32 --clothes-folder-path ./data/histograms/0525_test/ --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave
+# python3 mini_patch_detect_v1_for_video.py --source './data/video/test_sample/C0478.MP4' --game-time 317 3085 3982 6809 --img 640 --device 0 --weights './weight/yolov9-s.pt' --name test_4k --classes 0 32 --clothes-folder-path ./data/histograms/0525_test/ --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave

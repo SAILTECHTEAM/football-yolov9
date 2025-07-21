@@ -128,26 +128,32 @@ def detect_abnormal_tracks_from_jsonl(
                 except ValueError:
                     continue
 
-    return abnormal_tracks, track_abnormal_frames, track_confidences
+    suspicious_segments = {
+    k: (track_abnormal_frames[k][0], track_abnormal_frames[k][-1])
+    for k in abnormal_tracks
+    if len(track_abnormal_frames[k]) >= 2
+    }
+
+    return suspicious_segments, track_abnormal_frames, track_confidences
 
 def get_frames_with_multiple_balls(jsonl_path: str) -> set:
-    from collections import defaultdict
-    import json
-
     counter = defaultdict(int)
     with open(jsonl_path) as f:
         for line in f:
             t = json.loads(line)
             if t.get("team") != "ball":
                 continue
-            for f_id in t.get("frames", []):
-                counter[f_id] += 1
+            frames = t.get("frames", [])
+            projected = t.get("projected", [])
+            for f_id, pt in zip(frames, projected):
+                if pt is not None:
+                    counter[f_id] += 1
     return {f for f, count in counter.items() if count > 1}
 
 
 if __name__ == "__main__":
     # Load JSONL
-    jsonl_path = "./runs/detect/test_4k-2h/team_tracking_relabeled.jsonl"
+    jsonl_path = "./runs/detect/test_4k-2h-crop/team_tracking_relabeled.jsonl"
     angle_threshold = 120
     velocity_threshold = 1e-2
     min_valid_frames = 5
@@ -156,6 +162,8 @@ if __name__ == "__main__":
     distance_threshold = 50
 
     multi_ball_frames = get_frames_with_multiple_balls(jsonl_path)
+    print("Multi-ball frames detected:", len(multi_ball_frames))
+
     # Detect abnormal tracks
     abnormal_tracks, track_abnormal_frames, track_confidences = detect_abnormal_tracks_from_jsonl(
         jsonl_path,
@@ -169,7 +177,7 @@ if __name__ == "__main__":
     )
     
     # Output
-    print("Track Abnormal Frames (start and end only):", {k: (track_abnormal_frames[k][0], track_abnormal_frames[k][-1]) for k in abnormal_tracks})
-    print("Abnormal Track Scores:", {k: track_confidences[k] for k in abnormal_tracks[:5]})
-    print("Total Abnormal Tracks:", len(abnormal_tracks))
-    print("Track Count (analyzed):", len(track_confidences))
+    print("Track Abnormal Frames (start and end only):", abnormal_tracks)
+    # print("Abnormal Track Scores:", {k: track_confidences[k] for k in abnormal_tracks[:5]})
+    # print("Total Abnormal Tracks:", len(abnormal_tracks))
+    # print("Track Count (analyzed):", len(track_confidences))
