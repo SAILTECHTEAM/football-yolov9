@@ -446,7 +446,7 @@ class TrackJsonlStreamer:
 def run(
         weights=ROOT / 'yolo.pt',  # model path or triton URL
         source=ROOT / 'data/images',  # file/dir/URL/glob/screen/0(webcam)
-        game_time=[0, 2700, 3600, 6300], # start time of first half seconds
+        game_time=[0, 2700, 3600, 6300], # start and end time of first and second half (seconds)
         data=ROOT / 'data/coco.yaml',  # dataset.yaml path
         clothes_folder_path=ROOT / '',  # path to clothing features
         imgsz=(640, 640),  # inference size (height, width)
@@ -597,9 +597,7 @@ def run(
 
         # NMS
         with dt[2]:
-            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det) # this take a [[tensor]] and return a list of tensors
-            # print("Predictions after NMS:", len(pred)) # 32
-            # print(pred[0].shape) # torch.Size([0, 6])
+            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
 
         # proprocess predictions
         with dt[3]:
@@ -731,6 +729,8 @@ def run(
                     team_scores = match_histograms_to_teams(crop_hists, team_histograms)  # white mask example
                 else:
                     team_scores = [{} for _ in crop_hists]
+                    print("⚠️ No team histograms found, using empty scores.")
+                    break
 
             # Update tracking JSON records
             # Track current feature index to sync with crop detections
@@ -858,4 +858,4 @@ if __name__ == "__main__":
     end_time = time.time()
     print(f"Total execution time(HH:MM:SS): {time.strftime('%H:%M:%S', time.gmtime(end_time - start_time))}")
 # Example usage:
-# python3 mini_patch_detect_v1_for_video.py --source './data/video/test_sample/C0478.MP4' --game-time 317 3085 3982 6809 --img 640 --device 0 --weights './weight/yolov9-s.pt' --name test_4k --classes 0 32 --clothes-folder-path ./data/histograms/0525_test/ --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave
+# python3 mini_patch_detect_v1_for_video.py --source './data/video/test_sample/C0478.MP4' --game-time 317 3085 3982 6809 --img 640 --device 0 --weights './weight/yolov9-s-converted.pt' --name test_4k --classes 0 32 --clothes-folder-path ./data/histograms/0525/ --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave

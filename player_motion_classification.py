@@ -153,7 +153,7 @@ def get_frames_with_multiple_balls(jsonl_path: str) -> set:
 
 if __name__ == "__main__":
     # Load JSONL
-    jsonl_path = "./runs/detect/test_4k-2h-crop/team_tracking_relabeled.jsonl"
+    jsonl_path = "./runs/detect/test_4k/team_tracking_relabeled.jsonl"
     angle_threshold = 120
     velocity_threshold = 1e-2
     min_valid_frames = 5

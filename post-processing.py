@@ -870,7 +870,7 @@ def prepare_background_and_tracks(
     remove_static_ball_tracks(
         json_path.replace('.jsonl', '_merged_filtered_near_boundary.jsonl'),
         json_path.replace('.jsonl', '_merged_filtered.jsonl'),
-        movement_threshold=20  # in meters (10 = 1m if 0.1m units)
+        movement_threshold=30  # in meters (10 = 1m if 0.1m units)
     )
 
     detect_team_size_violations_streaming(
@@ -987,4 +987,4 @@ if __name__ == "__main__":
     main()
 
 # example usage:
-# python3 render_output.py --json-path "./runs/detect/test_4k-2h-crop/team_tracking.jsonl" --image-path "./data/images/mongkok_football_field.png" --output-name './runs/detect/test_4k-2h-crop/team_tracking_output'
+# python3 post-processing.py --json-path "./runs/detect/test_4k-2h-crop/team_tracking.jsonl" --image-path "./data/images/mongkok_football_field.png" --output-name './runs/detect/test_4k-2h-crop/team_tracking_output'

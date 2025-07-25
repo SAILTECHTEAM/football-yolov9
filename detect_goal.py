@@ -839,12 +839,5 @@ if __name__ == "__main__":
     main(opt)
 
 # sample usage
-# python3 detect_goal.py --weights "./weight/yolov9-c-converted.pt" --source "./data/video/param2/orginal.mp4" --name 'test_goal' --goal_image_coordinate 99 201 1822 221 1813 793 86 771  --goal_realworld_size 2100 700 --nosave
-
-# python3 detect_goal.py --weights "./weight/yolov9-c-converted.pt" --source "./data/video/param1/10-1.mp4" --name 'test_goal' --goal_image_coordinate 178 173 1730 139 1712 746 227 777  --goal_realworld_size 2100 700 --nosave
-
-# python3 detect_goal.py --weights "./weight/yolov9-c-converted.pt" --source "./data/video/C0026.mp4" --name 'real_goal' --goal_image_coordinate 355 330 1504 329 1499 710 365 712  --goal_realworld_size 2400 800 --nosave
-
-# python3 detect_goal.py --weights "./weight/yolov9-c-converted.pt" --source "./data/video/GX040011.mp4" --name 'real_goal2' --goal_image_coordinate 498 382 1415 387 1405 681 504 686  --goal_realworld_size 2400 800 --nosave
 
 # python3 detect_goal.py --weights "./weight/yolov9-c-converted.pt" --source "./data/video/GX010025.MP4" --name 'demo_video' --goal_image_coordinate 77 233 1665 247 1655 758 79 765 --goal_realworld_size 2400 800 --nosave --radar_data_path data/excel/PR_20250208_1739_session.csv 

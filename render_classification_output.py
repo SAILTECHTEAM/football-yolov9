@@ -194,6 +194,7 @@ def main(args):
     # Assume these functions are defined elsewhere
     multi_ball_frames = get_frames_with_multiple_balls(jsonl_path)
     print("Multi-ball frames detected:", len(multi_ball_frames))
+    # print(multi_ball_frames)  # Show first 5 for debugging
 
     suspicious_tracks, track_abnormal_frames, track_confidences = detect_abnormal_tracks_from_jsonl(
         jsonl_path,
@@ -254,4 +255,4 @@ if __name__ == "__main__":
     main(args)
 
 
-    # python3 render_classification_output.py --jsonl-path ./runs/detect/test_4k-2h-crop/team_tracking_relabeled.jsonl --video-paths ./data/video/test_sample/C0478.MP4 --bg-img-path ./data/images/mongkok_football_field.png --output-dir ./runs/detect/test_4k-2h-crop/suspicious-output --game-time 317 3085 3982 6809 
+# python3 render_classification_output.py --jsonl-path ./runs/detect/test_4k-2h-crop/team_tracking_relabeled.jsonl --video-paths ./data/video/test_sample/C0478.MP4 --bg-img-path ./data/images/mongkok_football_field.png --output-dir ./runs/detect/test_4k-2h-crop/suspicious-output --game-time 317 3085 3982 6809 
