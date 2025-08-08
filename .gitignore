@@ -9,3 +9,4 @@ runs/*
 *.png
 *.json
 *.docx
+*.npz

@@ -264,7 +264,7 @@ def hybrid_merge_stream_fixed(
     final_output.close()
     print(f"✅ Merged and saved to: {output_path}")
 
-def load_and_merge_tracks(
+def load_and_spilt_tracks(
     json_path,
     output_path,
     field_size,
@@ -291,10 +291,6 @@ def load_and_merge_tracks(
         max_merge_gap (int): Max frame gap between track ends to consider merging.
         max_merge_distance (float): Max distance in projected space to consider merging.
 
-
-    Returns:
-        merged_tracks (list): List of merged track dicts with keys 'track_id', 'team', 'frames', and 'points'.
-        bg_img (np.ndarray): The resized field background image.
     """
 
     track_dict = {}
@@ -834,7 +830,7 @@ def prepare_background_and_tracks(
     bg_img = cv2.resize(bg_img, field_size)
 
     # Merge and filter tracks
-    load_and_merge_tracks(
+    load_and_spilt_tracks(
         json_path=json_path,
         output_path=json_path.replace('.jsonl', '_spilt.jsonl'),
         field_size=field_size,

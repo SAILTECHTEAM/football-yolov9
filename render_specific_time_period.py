@@ -41,8 +41,8 @@ def render_period_with_correct_timing(
 if __name__ == "__main__":
 
     render_period_with_correct_timing(
-        start_frame=136079,
-        end_frame=137980,
+        start_frame=57873,
+        end_frame=58952,
         jsonl_path="./runs/detect/test_4k_converted/team_tracking_relabeled.jsonl",
         bg_img_path="./data/images/mongkok_football_field.png",
         video_paths=['./data/video/test_sample/C0478.MP4'],
