@@ -56,5 +56,3 @@ RUN pip3 install opencv-python seaborn \
 
 # You can also add an entry point to run a script by default (optional)
 # Example: ENTRYPOINT ["python", "train.py"]
-
-# testing
