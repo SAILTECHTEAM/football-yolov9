@@ -136,14 +136,14 @@ def run(
                 def slicer_callback(image_slice: np.ndarray):
                     with torch.no_grad():
                         h, w = image_slice.shape[:2]
-                                # Check if dimensions need padding to be multiples of 32
-                        need_padding = (h % 32 != 0) or (w % 32 != 0)
+                        # Check if dimensions need padding to be same as expected slice size (1280*1280)
+                        need_padding = (h != 1280) or (w != 1280)
                         if need_padding:
                             # Calculate padding needed
-                            pad_h = (32 - h % 32) % 32
-                            pad_w = (32 - w % 32) % 32
-                            
-                            # Apply padding
+                            pad_h = (1280 - h) if h < 1280 else 0
+                            pad_w = (1280 - w) if w < 1280 else 0
+
+                            # Apply padding (right and bottom)
                             padded_slice = cv2.copyMakeBorder(
                                 image_slice, 
                                 0, pad_h, 

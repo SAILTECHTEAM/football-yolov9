@@ -900,12 +900,25 @@ def non_max_suppression(
     """
 # Amendment according to this link: https://blog.csdn.net/zyq880625/article/details/144376669
     if isinstance(prediction, (list, tuple)):  # YOLO model in validation model, output = (inference_out, loss_out)
-        processed_predictions = []
-        for pred_tensor in prediction:
-            processed_tensor = pred_tensor[0]
-            processed_predictions.append(processed_tensor)
-        # prediction = prediction[0]  # select only inference output
-        prediction = processed_predictions[0]
+        # Check if we're in validation mode (with loss values)
+        if all(isinstance(p, torch.Tensor) for p in prediction):
+            # Simple list/tuple of tensors (inference mode)
+            prediction = prediction[0]  # Just take the first tensor
+        else:
+            # Let say 
+            try:
+                processed_predictions = []
+                for pred_tensor in prediction:
+                    # Check if this is a tensor or contains a tensor
+                    if isinstance(pred_tensor, torch.Tensor):
+                        processed_predictions.append(pred_tensor)
+                    else:
+                        # This is likely the (inference_out, loss_out) format
+                        processed_predictions.append(pred_tensor[0])
+                prediction = processed_predictions[0]
+            except (IndexError, TypeError):
+                # If anything goes wrong, fall back to the first element
+                prediction = prediction[0]
 
     device = prediction.device
     mps = 'mps' in device.type  # Apple MPS
