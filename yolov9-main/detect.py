@@ -122,6 +122,7 @@ def run(
     # Run inference
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
     seen, windows, dt = 0, [], (Profile(), Profile(), Profile())
+    tracker = sv.ByteTrack(minimum_consecutive_frames=3)
     for path, im, im0s, vid_cap, s in dataset:
         # Handle slice-based detection
         if use_slicer:
@@ -214,7 +215,7 @@ def run(
                 
                 # NMS - dt[2]
                 with dt[2]:
-                    pass
+                    detections = tracker.update_with_detections(detections)
                 
                 # Process results (similar to original)
                 p = Path(path) if isinstance(path, str) else Path(path[i])
