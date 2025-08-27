@@ -1,15 +1,11 @@
 import argparse
 import os
-import platform
 import sys
 from pathlib import Path
 from torchvision.ops import nms
-from ByteTrack.yolox.tracker.byte_tracker import BYTETracker
-from ByteTrack.yolox.tracker.byte_tracker import STrack
 from types import SimpleNamespace
 import numpy as np
-import torchreid
-from PIL import Image
+import supervision as sv
 import torchvision.transforms as T
 import torch.nn.functional as F
 import torch
@@ -33,6 +29,32 @@ from collections import defaultdict
 from numba import njit
 from homography_matrix import compute_homography, apply_homography_to_point
 from idenfity_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
+from utils.ball import BallTracker, BallAnnotator
+
+COLORS = ['#FF1493', '#00BFFF', '#FF6347', '#FFD700']
+
+BOX_ANNOTATOR = sv.BoxAnnotator(
+    color=sv.ColorPalette.from_hex(COLORS),
+    thickness=2
+)
+ELLIPSE_ANNOTATOR = sv.EllipseAnnotator(
+    color=sv.ColorPalette.from_hex(COLORS),
+    thickness=2
+)
+BOX_LABEL_ANNOTATOR = sv.LabelAnnotator(
+    color=sv.ColorPalette.from_hex(COLORS),
+    text_color=sv.Color.from_hex('#FFFFFF'),
+    text_padding=5,
+    text_thickness=1,
+)
+ELLIPSE_LABEL_ANNOTATOR = sv.LabelAnnotator(
+    color=sv.ColorPalette.from_hex(COLORS),
+    text_color=sv.Color.from_hex('#FFFFFF'),
+    text_padding=5,
+    text_thickness=1,
+    text_position=sv.Position.BOTTOM_CENTER,
+)
+
 
 def is_bbox_anomalous(curr_bbox, prev_bbox, height_thresh_ratio=0.5):
     curr_h = curr_bbox[3] - curr_bbox[1]
@@ -41,6 +63,7 @@ def is_bbox_anomalous(curr_bbox, prev_bbox, height_thresh_ratio=0.5):
         return False
     return curr_h < prev_h * height_thresh_ratio
 
+# Not used as this cropping is done in sv.InferenceSlicer()
 def crop_image_with_overlap(image, crop_size=640, overlap=0.2):
     """
     Split a large image into overlapping patches.
@@ -333,7 +356,7 @@ def remove_partially_enclosed_boxes_same_class(detections, area_ratio_thresh=0.6
 
     return detections[keep]
 
-# ---------------------
+# Replaced by with_nms from sv
 def simple_global_nms(dets, iou_thres=0.45, max_det=300):
     if dets.size(0) == 0:
         return dets
@@ -344,12 +367,14 @@ def simple_global_nms(dets, iou_thres=0.45, max_det=300):
     keep = nms(boxes, scores, iou_thres)
     return dets[keep[:max_det]]
 
+# Not used as this is done in sv.InferenceSlicer()
 def get_image_patches(image_4k, crop_size=640, overlap=0.2):
     patches = crop_image_with_overlap(image_4k, crop_size, overlap)
     images = [patch for patch, _ in patches]
     offsets = [offset for _, offset in patches]
     return images, offsets
 
+# Not used as this is done in sv.InferenceSlicer()
 def preprocess_images(images, device, fp16=False):
     batch = []
     for img in images:
@@ -476,6 +501,8 @@ def run(
         dnn=False,  # use OpenCV DNN for ONNX inference
         vid_stride=1,  # video frame-rate stride
         ema_alpha = 0.5,  # EMA smoothing factor for bottom center
+        slice_size=(640, 640),  # slice width and height
+        nms_threshold=0.1,  # NMS threshold for slicer
 ):
     
     # Determine valid frame ranges (as set)
@@ -533,14 +560,14 @@ def run(
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     pbar = tqdm(total=len(valid_frame_ids), desc="Processing game-time frames", unit="frame")
-    output_path = str(Path(save_dir) / ("after_gobalNMS_overlap_remove_annotated_" + Path(source).name))
+    output_path = str(Path(save_dir) / ("after_globalNMS_overlap_remove_annotated_" + Path(source).name))
 
     # init json
     output_json_path = str(Path(save_dir) / "team_tracking.jsonl")
 
     json_streamer = TrackJsonlStreamer(output_json_path,
-                                    flush_interval=500,
-                                    lost_thresh=100)  # tune as needed
+                                    flush_interval=50,
+                                    lost_thresh=10)  # tune as needed, 50 and 10 for 30 seconds video testing
     # # Initialize global dictionary once outside main loop if not already done
     # if 'team_json_records' not in globals():
     #     team_json_records = defaultdict(lambda: {'frame_id': [], 'team_conf': [], 'bbox': []})
@@ -551,8 +578,10 @@ def run(
     # print(f"🔄 Saving tracking JSON to: {output_json_path}")
     
     # Initialize tracker
-    ball_tracker = BYTETracker(tracker_args, frame_rate=tracker_args.fps)
-    person_tracker = BYTETracker(tracker_args, frame_rate=tracker_args.fps)
+    # ball_tracker = BYTETracker(tracker_args, frame_rate=tracker_args.fps)
+    # person_tracker = BYTETracker(tracker_args, frame_rate=tracker_args.fps)
+    ball_tracker = BallTracker(buffer_size=20)
+    person_tracker = sv.ByteTrack(minimum_consecutive_frames=3)
 
     # load the team reference features
     if clothes_folder_path and os.path.exists(clothes_folder_path):
@@ -562,6 +591,85 @@ def run(
     
     video_frame_idx = 0  # original frame index (matches video)
     processed_frame_idx = 0  # game-time processed frame index
+    bs = 1  # batch_size
+
+    # Create slicer callback dynamically to access the model, for sv.InferenceSlicer()
+    def slicer_callback(image_slice: np.ndarray):
+        with torch.no_grad():
+            h, w = image_slice.shape[:2]
+            # Check if dimensions need padding to be same as expected slice size (1280*1280)
+            need_padding = (h != 1280) or (w != 1280)
+            if need_padding:
+                # Calculate padding needed
+                pad_h = (1280 - h) if h < 1280 else 0
+                pad_w = (1280 - w) if w < 1280 else 0
+
+                # Apply padding (right and bottom)
+                padded_slice = cv2.copyMakeBorder(
+                    image_slice, 
+                    0, pad_h, 
+                    0, pad_w, 
+                    cv2.BORDER_CONSTANT,
+                    value=(114, 114, 114)  # Using gray color common in YOLO
+                )
+                # Use the padded image for further processing
+                image_slice = padded_slice
+                
+            # Convert image to tensor (similar to the original preprocessing)
+            img = torch.from_numpy(image_slice.transpose(2, 0, 1)).to(model.device)
+            img = img.half() if model.fp16 else img.float()  # uint8 to fp16/32
+            img /= 255  # 0 - 255 to 0.0 - 1.0
+            if len(img.shape) == 3:
+                img = img[None]  # expand for batch dim
+
+            # img = img.clone().detach()
+            # Run inference (similar to original inference)
+            pred = model(img, augment=augment)
+        
+        # Apply NMS (similar to original NMS)
+        pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+        
+        # Convert to supervision Detections format
+        if len(pred[0]) == 0:
+            return sv.Detections.empty()
+        
+        # Process and resize boxes to the slice coordinate system
+        boxes = pred[0][:, :4].cpu().numpy()  # xyxy format
+        confidences = pred[0][:, 4].cpu().numpy()
+        class_ids = pred[0][:, 5].cpu().numpy().astype(int)
+
+        # If we padded the image, we need to filter out detections in the padded area
+        if need_padding:
+            # Keep only boxes that are mainly in the original image area
+            valid_indices = []
+            for i, (x1, y1, x2, y2) in enumerate(boxes):
+                # Calculate box center
+                center_x = (x1 + x2) / 2
+                center_y = (y1 + y2) / 2
+                # Check if center is in the original image
+                if center_x < w and center_y < h:
+                    valid_indices.append(i)
+            
+            # Filter boxes, confidences, and class_ids
+            if valid_indices:
+                boxes = boxes[valid_indices]
+                confidences = confidences[valid_indices]
+                class_ids = class_ids[valid_indices]
+            else:
+                return sv.Detections.empty()
+
+        return sv.Detections(
+            xyxy=boxes,
+            confidence=confidences,
+            class_id=class_ids
+        )
+    
+    # Create slicer on-demand for each frame
+    overlap_ratio = (0.2, 0.2)  # overlap ratio for the slicer
+    overlap_wh = (slice_size[0] * overlap_ratio[0], slice_size[1] * overlap_ratio[1])
+    slicer = sv.InferenceSlicer(callback=slicer_callback, slice_wh=slice_size, overlap_ratio_wh=None, overlap_wh=overlap_wh)
+    # Warmup for more stable inference
+    model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
 
     while cap.isOpened():
         ret, high_resolution_image = cap.read()
@@ -581,59 +689,65 @@ def run(
 
         # print(f"🔍 Processing frame {processed_frame_idx}")
 
-        images, offsets = get_image_patches(high_resolution_image, crop_size=imgsz[0], overlap=0.2)
+        # images, offsets = get_image_patches(high_resolution_image, crop_size=imgsz[0], overlap=0.2)
 
         seen, windows, dt = 0, [], [Profile() for _ in range(8)]
         # for path, im, im0s, vid_cap, s in dataset:
         with dt[0]:
-            batch = preprocess_images(images, device, fp16=model.fp16)
+
+            # batch = preprocess_images(images, device, fp16=model.fp16)
+            pass
 
         # Inference
         with dt[1]:
-            pred = model(batch, augment=augment)
+            player_detections = slicer(high_resolution_image).with_nms(threshold=nms_threshold)
+            # pred = model(batch, augment=augment)
             # print("Predictions before NMS:", len(pred)) # 2
             # print(len(pred[0])) # 2
             # print(pred[0][0].shape) # torch.Size([32, 84, 8400])
 
         # NMS
         with dt[2]:
-            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+            pass
+            # pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
 
         # proprocess predictions
         with dt[3]:
-            start = time.time()  # reset timer
+
+            # start = time.time()  # reset timer
             # Make a copy of the original 4K image for drawing
             annotated_image = high_resolution_image.copy()
-            all_detections = []
-            ckp1 = time.time()  # checkpoint for copy image
+            pass # tbd
+            # all_detections = []
+            # ckp1 = time.time()  # checkpoint for copy image
 
-            # convert predictions to original image coordinates
-            for i, det in enumerate(pred):  # per image
-                x_offset, y_offset = offsets[i]
-                if det is not None and len(det):
-                    # Remap to original image coordinates
-                    det[:, [0, 2]] += x_offset
-                    det[:, [1, 3]] += y_offset
-                    all_detections.append(det)
-            ckp2 = time.time()  # checkpoint for remap
+            # # convert predictions to original image coordinates
+            # for i, det in enumerate(pred):  # per image
+            #     x_offset, y_offset = offsets[i]
+            #     if det is not None and len(det):
+            #         # Remap to original image coordinates
+            #         det[:, [0, 2]] += x_offset
+            #         det[:, [1, 3]] += y_offset
+            #         all_detections.append(det)
+            # ckp2 = time.time()  # checkpoint for remap
                 
-            if all_detections:
-                combined = torch.cat(all_detections, dim=0)  # shape [Total_Detections, 6]
-            else:
-                combined = torch.empty((0, 6), dtype=torch.float32, device=model.device)
-            # print the shape of combined
-            # print("Combined shape:", combined.shape)
+            # if all_detections:
+            #     combined = torch.cat(all_detections, dim=0)  # shape [Total_Detections, 6]
+            # else:
+            #     combined = torch.empty((0, 6), dtype=torch.float32, device=model.device)
+            # # print the shape of combined
+            # # print("Combined shape:", combined.shape)
 
-            ckp3 = time.time()  # checkpoint for combine
-            # Apply global NMS
-            if combined.shape[0] > 0:
-                final = simple_global_nms(combined, iou_thres=iou_thres, max_det=max_det)
-                ckp4 = time.time()  # checkpoint for NMS
-                final = remove_boxes_with_numba(final, area_ratio_thresh=0.6, containment_thresh=0.9)
-                ckp5 = time.time()  # checkpoint for remove enclosed boxes
-            else:
-                final = []
-            ckp6 = time.time()  # checkpoint for NMS
+            # ckp3 = time.time()  # checkpoint for combine
+            # # Apply global NMS
+            # if combined.shape[0] > 0:
+            #     final = simple_global_nms(combined, iou_thres=iou_thres, max_det=max_det)
+            #     ckp4 = time.time()  # checkpoint for NMS
+            #     final = remove_boxes_with_numba(final, area_ratio_thresh=0.6, containment_thresh=0.9)
+            #     ckp5 = time.time()  # checkpoint for remove enclosed boxes
+            # else:
+            #     final = []
+            # ckp6 = time.time()  # checkpoint for NMS
 
             # print(f"copy 4k imge took {ckp1 - start:.2f}s, remap {ckp2 - ckp1:.2f}s, combine {ckp3 - ckp2:.2f}s,  Gobal NMS {ckp4 - ckp3:.2f}s, remove enclosed boxes {ckp5 - ckp4:.2f}s, total {ckp6 - start:.2f}s")
             # copy 4k imge took 0.00s, remap 0.00s, combine 0.00s,  Gobal NMS 0.00s, remove enclosed boxes 0.75s, total 0.75s
@@ -642,17 +756,31 @@ def run(
             # the shape of final is [N, 6] where N is the number of detections, the 6 columns are [x1, y1, x2, y2, conf, cls]
             # print("Final detections after global NMS & remove enclosed boxes:", final.shape if isinstance(final, torch.Tensor) else len(final))
             # Filter by class
-            person_dets = final[final[:, 5] == 0]  # class 0 for person
-            ball_dets = final[final[:, 5] == 32]   # example class id for ball (change if needed)
-            person_dets_np = person_dets[:, :5].cpu().numpy() if person_dets.numel() else np.empty((0, 5))
-            ball_dets_np = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
+            # person_dets = final[final[:, 5] == 0]  # class 0 for person
+            # ball_dets = final[final[:, 5] == 32]   # example class id for ball (change if needed)
+            # person_dets = detections[detections.class_id in [1,2,3]] # class ids for player, goalkeeper and referee
+            # ball_dets = detections[detections.class_id == 0] # class id for sports ball
+            # person_dets_np = person_dets[:, :5].cpu().numpy() if person_dets.numel() else np.empty((0, 5))
+            # ball_dets_np = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
 
-            online_persons = person_tracker.update(person_dets_np, [height, width], [height, width])
-            online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
-
+            player_dets_np = np.hstack(
+                (
+                    player_detections.xyxy,
+                    player_detections.confidence[:, np.newaxis],
+                )
+            )
+            online_persons = person_tracker.update_with_tensors(player_dets_np)
+            online_balls = [] # for testing purpose only
+            # online_persons = person_tracker.update(person_dets_np, [height, width], [height, width])
+            # online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
+            
+            
+            # online_persons = person_tracker.update(person_dets_np, [height, width], [height, width])
+            # online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
             # print("Online persons after tracking:", len(online_persons))
             # print("Online ball after tracking:", len(online_balls))
             
+
             # Store all crop tensors and track info for matching
             crop_hists = []
             crop_track_ids = []
@@ -662,7 +790,7 @@ def run(
             final_detections = []
             for t in online_persons:
                 tlbr = t.tlbr  # (x1, y1, x2, y2)
-                track_id = t.track_id
+                track_id = t.external_track_id
                 conf = t.score
                 x1, y1, x2, y2 = tlbr
                 cx = (x1 + x2) / 2
@@ -698,39 +826,39 @@ def run(
                 cls = 0  # hardcode as person
                 final_detections.append((tlbr[0], tlbr[1], tlbr[2], tlbr[3], conf, cls, track_id, projected_position))
 
-                # Crop the clothing region
-                x1, y1, x2, y2 = map(int, [tlbr[0], tlbr[1], tlbr[2], tlbr[3]])
-                crop_img = crop_clothing_region(high_resolution_image, (x1, y1, x2, y2),top_ratio=0.2, bottom_ratio=0.5, left_ratio=0.25, right_ratio=0.75)
-                if crop_img.size == 0:
-                    continue  # skip empty crops
-                crop_hist = extract_color_histogram_with_specific_background_color(
-                    crop_img)  
-                crop_hists.append(crop_hist)
-                crop_track_ids.append(track_id) # may not be required, cause the index of crop_tensors is first N element of final_detections
+                # # Crop the clothing region
+                # x1, y1, x2, y2 = map(int, [tlbr[0], tlbr[1], tlbr[2], tlbr[3]])
+                # crop_img = crop_clothing_region(high_resolution_image, (x1, y1, x2, y2),top_ratio=0.2, bottom_ratio=0.5, left_ratio=0.25, right_ratio=0.75)
+                # if crop_img.size == 0:
+                #     continue  # skip empty crops
+                # crop_hist = extract_color_histogram_with_specific_background_color(
+                #     crop_img)  
+                # crop_hists.append(crop_hist)
+                # crop_track_ids.append(track_id) # may not be required, cause the index of crop_tensors is first N element of final_detections
 
-            for t in online_balls:
-                tlbr = t.tlbr
-                track_id = t.track_id
-                conf = t.score
-                cls = 32  # hardcode as ball
-                x1, y1, x2, y2 = tlbr
-                cx = (x1 + x2) / 2
-                cy = y2
+            # for t in online_balls:
+            #     tlbr = t.tlbr
+            #     track_id = t.track_id
+            #     conf = t.score
+            #     cls = 32  # hardcode as ball
+            #     x1, y1, x2, y2 = tlbr
+            #     cx = (x1 + x2) / 2
+            #     cy = y2
 
-                projected_position = apply_homography_to_point((cx, cy), H)  # (x, y) projected point
+            #     projected_position = apply_homography_to_point((cx, cy), H)  # (x, y) projected point
 
 
-                final_detections.append((tlbr[0], tlbr[1], tlbr[2], tlbr[3], conf, cls, track_id, projected_position))
+            #     final_detections.append((tlbr[0], tlbr[1], tlbr[2], tlbr[3], conf, cls, track_id, projected_position))
 
         with dt[5]:
-            if crop_hists:  # crop_images = list of color histograms for each person
-                # Load team histograms from file (or define in code)
-                if team_histograms:
-                    team_scores = match_histograms_to_teams(crop_hists, team_histograms)  # white mask example
-                else:
-                    team_scores = [{} for _ in crop_hists]
-                    print("⚠️ No team histograms found, using empty scores.")
-                    break
+            # if crop_hists:  # crop_images = list of color histograms for each person
+            #     # Load team histograms from file (or define in code)
+            #     if team_histograms:
+            #         team_scores = match_histograms_to_teams(crop_hists, team_histograms)  # white mask example
+            #     else:
+            #         team_scores = [{} for _ in crop_hists]
+            #         print("⚠️ No team histograms found, using empty scores.")
+            #         break
 
             # Update tracking JSON records
             # Track current feature index to sync with crop detections
@@ -740,7 +868,7 @@ def run(
                 x1, y1, x2, y2, conf, cls, track_id, projected_position  = det
                 bbox_out = [int(x1), int(y1), int(x2), int(y2), float(conf)]
 
-                if cls == 0:                              # person
+                if cls != 0:                              # person
                     if feature_index < len(team_scores):
                         team_conf = {k: float(v)
                                     for k, v in team_scores[feature_index].items()}
@@ -789,7 +917,7 @@ def run(
     if not nosave:
         cap.release()
         out.release()
-        cv2.destroyAllWindows()
+        # cv2.destroyAllWindows()
         print(f"✅ Saved video to: {output_path}")
         pbar.close()
 
@@ -834,6 +962,8 @@ def parse_opt():
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
     parser.add_argument('--vid-stride', type=int, default=1, help='video frame-rate stride')
     parser.add_argument('--ema-alpha', type=float, default=0.5, help='EMA smoothing factor for bottom center')
+    parser.add_argument('--slice-size', nargs='+', type=int, default=[640, 640], help='slice width and height')
+    parser.add_argument('--nms-threshold', type=float, default=0.1, help='NMS threshold for slicer')
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     opt.game_time = np.array(opt.game_time, dtype=np.int32).reshape(4)  # reshape to 1D array
