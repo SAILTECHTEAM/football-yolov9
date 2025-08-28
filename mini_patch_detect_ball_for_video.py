@@ -27,7 +27,7 @@ from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, smart_inference_mode
 from collections import defaultdict
 from numba import njit
-from yolov9.tools.homography_matrix import compute_homography, apply_homography_to_point
+from homography_matrix import compute_homography, apply_homography_to_point
 from idenfity_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
 from utils.ball import BallTracker, BallAnnotator
 
@@ -513,7 +513,7 @@ def run(
     # Create tracker args manually
     tracker_args = SimpleNamespace(
         track_thresh=0.5,
-        track_buffer=100,
+        track_buffer=30,
         match_thresh=0.8,
         mot20=False,
         fps=fps  # assuming you already have video fps
@@ -665,7 +665,7 @@ def run(
         )
     
     # Create slicer on-demand for each frame
-    overlap_ratio = (0.3, 0.3)  # overlap ratio for the slicer
+    overlap_ratio = (0.2, 0.2)  # overlap ratio for the slicer
     overlap_wh = (slice_size[0] * overlap_ratio[0], slice_size[1] * overlap_ratio[1])
     slicer = sv.InferenceSlicer(callback=slicer_callback, slice_wh=slice_size, overlap_ratio_wh=None, overlap_wh=overlap_wh)
     # Warmup for more stable inference
@@ -689,7 +689,7 @@ def run(
 
         # print(f"🔍 Processing frame {processed_frame_idx}")
 
-        # images, offsets = get_image_patches(high_resolution_image, crop_size=imgsz[0], overlap=0.3)
+        # images, offsets = get_image_patches(high_resolution_image, crop_size=imgsz[0], overlap=0.2)
 
         seen, windows, dt = 0, [], [Profile() for _ in range(8)]
         # for path, im, im0s, vid_cap, s in dataset:
@@ -717,16 +717,40 @@ def run(
             # start = time.time()  # reset timer
             # Make a copy of the original 4K image for drawing
             annotated_image = high_resolution_image.copy()
-            player_dets = np.hstack(
-                (
-                    player_detections.xyxy,
-                    player_detections.confidence[:, np.newaxis],
-                    player_detections.class_id[:, np.newaxis],
-                )
-            )
-            player_dets = torch.from_numpy(player_dets).to(device)
-            if player_dets.shape[0] > 0:
-                player_dets = remove_boxes_with_numba(player_dets, area_ratio_thresh=0.6, containment_thresh=0.9)
+            pass # tbd
+            # all_detections = []
+            # ckp1 = time.time()  # checkpoint for copy image
+
+            # # convert predictions to original image coordinates
+            # for i, det in enumerate(pred):  # per image
+            #     x_offset, y_offset = offsets[i]
+            #     if det is not None and len(det):
+            #         # Remap to original image coordinates
+            #         det[:, [0, 2]] += x_offset
+            #         det[:, [1, 3]] += y_offset
+            #         all_detections.append(det)
+            # ckp2 = time.time()  # checkpoint for remap
+                
+            # if all_detections:
+            #     combined = torch.cat(all_detections, dim=0)  # shape [Total_Detections, 6]
+            # else:
+            #     combined = torch.empty((0, 6), dtype=torch.float32, device=model.device)
+            # # print the shape of combined
+            # # print("Combined shape:", combined.shape)
+
+            # ckp3 = time.time()  # checkpoint for combine
+            # # Apply global NMS
+            # if combined.shape[0] > 0:
+            #     final = simple_global_nms(combined, iou_thres=iou_thres, max_det=max_det)
+            #     ckp4 = time.time()  # checkpoint for NMS
+            #     final = remove_boxes_with_numba(final, area_ratio_thresh=0.6, containment_thresh=0.9)
+            #     ckp5 = time.time()  # checkpoint for remove enclosed boxes
+            # else:
+            #     final = []
+            # ckp6 = time.time()  # checkpoint for NMS
+
+            # print(f"copy 4k imge took {ckp1 - start:.2f}s, remap {ckp2 - ckp1:.2f}s, combine {ckp3 - ckp2:.2f}s,  Gobal NMS {ckp4 - ckp3:.2f}s, remove enclosed boxes {ckp5 - ckp4:.2f}s, total {ckp6 - start:.2f}s")
+            # copy 4k imge took 0.00s, remap 0.00s, combine 0.00s,  Gobal NMS 0.00s, remove enclosed boxes 0.75s, total 0.75s
 
         with dt[4]:
             # the shape of final is [N, 6] where N is the number of detections, the 6 columns are [x1, y1, x2, y2, conf, cls]
@@ -739,8 +763,13 @@ def run(
             # person_dets_np = person_dets[:, :5].cpu().numpy() if person_dets.numel() else np.empty((0, 5))
             # ball_dets_np = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
 
-            player_dets = player_dets[:, :5].cpu().numpy() if player_dets.numel() else np.empty((0, 5))
-            online_persons = person_tracker.update_with_tensors(player_dets)
+            player_dets_np = np.hstack(
+                (
+                    player_detections.xyxy,
+                    player_detections.confidence[:, np.newaxis],
+                )
+            )
+            online_persons = person_tracker.update_with_tensors(player_dets_np)
             online_balls = [] # for testing purpose only
             # online_persons = person_tracker.update(person_dets_np, [height, width], [height, width])
             # online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
@@ -764,49 +793,37 @@ def run(
                 track_id = t.external_track_id
                 conf = t.score
                 x1, y1, x2, y2 = tlbr
-                # Compute bbox properties
-                curr_cx = (x1 + x2) / 2
-                curr_h = y2 - y1
+                cx = (x1 + x2) / 2
+                cy = y2
 
+                # Check for bbox height anomaly
+                use_previous = False
+                if hasattr(t, "prev_tlbr"):
+                    prev_h = t.prev_tlbr[3] - t.prev_tlbr[1]
+                    curr_h = tlbr[3] - tlbr[1]
+                    if prev_h > 0 and curr_h < prev_h * 0.9:
+                        use_previous = True # if current height is less than 50% of previous, use previous bbox
 
-                # Smooth bbox height and center x
-                if not hasattr(t, "smooth_h"):
-                    t.smooth_h = curr_h
-                    t.smooth_cx = curr_cx
+                if use_previous and hasattr(t, "prev_bottom_center"):
+                    cx, cy = t.prev_bottom_center
+
+                # EMA smoothing
+                if not hasattr(t, "smooth_bottom_center"):
+                    t.smooth_bottom_center = (cx, cy)
                 else:
-                    t.smooth_h = ema_alpha * curr_h + (1 - ema_alpha) * t.smooth_h
-                    t.smooth_cx = ema_alpha * curr_cx + (1 - ema_alpha) * t.smooth_cx
+                    px, py = t.smooth_bottom_center
+                    cx = ema_alpha * cx + (1 - ema_alpha) * px
+                    cy = ema_alpha * cy + (1 - ema_alpha) * py
+                    t.smooth_bottom_center = (cx, cy)
 
-                # Compute smoothed bottom center
-                smoothed_cx = t.smooth_cx
-                smoothed_y2 = y1 + t.smooth_h
-                cx, cy = smoothed_cx, smoothed_y2  # use these instead of raw values
 
-                # # smooth bottom center directly
-                # # Check for bbox height anomaly
-                # use_previous = False
-                # if hasattr(t, "prev_tlbr"):
-                #     prev_h = t.prev_tlbr[3] - t.prev_tlbr[1]
-                #     curr_h = tlbr[3] - tlbr[1]
-                #     if prev_h > 0 and curr_h < prev_h * 0.9:
-                #         use_previous = True # if current height is less than 50% of previous, use previous bbox
-                # if use_previous and hasattr(t, "prev_bottom_center"):
-                #     cx, cy = t.prev_bottom_center
-                # # EMA smoothing
-                # if not hasattr(t, "smooth_bottom_center"):
-                #     t.smooth_bottom_center = (cx, cy)
-                # else:
-                #     px, py = t.smooth_bottom_center
-                #     cx = ema_alpha * cx + (1 - ema_alpha) * px
-                #     cy = ema_alpha * cy + (1 - ema_alpha) * py
-                #     t.smooth_bottom_center = (cx, cy)
-                # # Store prev info for next frame
-                # t.prev_bottom_center = (cx, cy)
-                # t.prev_tlbr = tlbr
+                # Store prev info for next frame
+                t.prev_bottom_center = (cx, cy)
+                t.prev_tlbr = tlbr
 
                 projected_position = apply_homography_to_point((cx, cy), H)  # (x, y) projected point
 
-                cls = 0  # hardcode as person
+                cls = 2  # hardcode as person
                 final_detections.append((tlbr[0], tlbr[1], tlbr[2], tlbr[3], conf, cls, track_id, projected_position))
 
                 # # Crop the clothing region
@@ -851,7 +868,7 @@ def run(
                 x1, y1, x2, y2, conf, cls, track_id, projected_position  = det
                 bbox_out = [int(x1), int(y1), int(x2), int(y2), float(conf)]
 
-                if cls != 0:                              # person
+                if cls != 2:                              # person
                     if feature_index < len(team_scores):
                         team_conf = {k: float(v)
                                     for k, v in team_scores[feature_index].items()}

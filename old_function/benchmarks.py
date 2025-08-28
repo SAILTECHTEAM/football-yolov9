@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 # ROOT = ROOT.relative_to(Path.cwd())  # relative
 
-import export
+import yolov9.tools.export as export
 from models.experimental import attempt_load
 from models.yolo import SegmentationModel
 from segment.val import run as val_seg

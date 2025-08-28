@@ -11,6 +11,7 @@ import time
 import ijson.backends.python as ijson_python
 from typing import List, Dict, Any, Tuple, Iterator, Union
 from heapq import nsmallest
+from tools.remove_track_sharp import process_jsonl_detect_replace
 import argparse
 
 def assign_team_by_majority_vote(team_conf_list):
@@ -821,7 +822,8 @@ def prepare_background_and_tracks(
     max_merge_overlap_frames,
     max_merge_distance,
     window_size,
-    threshold
+    threshold,
+    detector_kwargs=None
 ):
     # Load and resize background
     bg_img = cv2.imread(image_path)
@@ -895,6 +897,13 @@ def prepare_background_and_tracks(
         conf_threshold=0.007,
         not_sure_label="unsure"
     )
+
+    process_jsonl_detect_replace(
+    input_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
+    output_path=json_path.replace('.jsonl', '_final.jsonl'),
+    detector_kwargs=detector_kwargs
+    )
+
     end_relabel = time.time()
     print(f"✅ Relabeled {relabel_count} tracks in {end_relabel - end_merged:.2f} seconds")
     return bg_img
@@ -913,7 +922,8 @@ def process_merged_tracks(
     window_size,
     threshold,
     output_name,
-    fps=29.97
+    fps=29.97,
+    detector_kwargs=None
 ):
     if output_name is None:
         output_name = os.path.splitext(os.path.basename(json_path))[0]
@@ -926,18 +936,11 @@ def process_merged_tracks(
         json_path, image_path, field_size,
         min_track_length, smoothing_window, polyorder, max_step,
         max_merge_gap, max_merge_overlap_frames, max_merge_distance,
-        window_size, threshold
+        window_size, threshold, detector_kwargs
     )
     end = time.time()
     print(f"✅ Processed tracks in {end - start:.2f} seconds")
 
-    # render_to_video_from_jsonl(
-    #     jsonl_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
-    #     bg_img=bg_img,
-    #     field_size=field_size,
-    #     output_path=output_path_video,
-    #     fps=fps
-    # )
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process merged tracks from tracking JSONL")
@@ -960,6 +963,23 @@ def main():
     args = parse_args()
     start = time.time()
 
+    # start with permissive gates; tighten later
+
+
+    DETECTOR = dict(
+        window_size=2201,
+        step=450,
+        prominence=2,
+        min_wave_len=0,
+        max_wave_len=60,
+        speed_std_factor=None,       # enable later (e.g., 0.5) if needed
+        smooth_window=0, savgol_poly=2,
+        min_steepness=0.1,
+        min_quad_curv=0.9,
+        min_monotonic_ratio=0.5,
+        max_gap_size=30
+    )
+
     process_merged_tracks(
         json_path=args.json_path,
         image_path=args.image_path,
@@ -973,7 +993,8 @@ def main():
         max_merge_distance=args.max_merge_distance,
         window_size=args.window_size,
         threshold=args.threshold,
-        output_name=args.output_name
+        output_name=args.output_name,
+        detector_kwargs=DETECTOR
     )
 
     end = time.time()

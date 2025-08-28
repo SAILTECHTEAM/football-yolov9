@@ -9,8 +9,8 @@ import onepose
 from idenfity_goalkeeper import extract_color_histogram_with_specific_background_color, extract_color_histogram_from_rotated_skelton, compare_histograms, load_histogram
 from goalkeeper_motion_classification import classify_goalkeeper_behavior
 from collections import deque
-from extract_datetime import get_video_start_time_and_fps, calculate_real_timestamp
-from extract_speed_data import find_max_speed_in_range
+from yolov9.tools.extract_datetime import get_video_start_time_and_fps, calculate_real_timestamp
+from yolov9.tools.extract_speed_data import find_max_speed_in_range
 from tqdm import tqdm
 
 FILE = Path(__file__).resolve()
