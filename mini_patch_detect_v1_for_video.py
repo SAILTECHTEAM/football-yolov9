@@ -507,7 +507,6 @@ def run(
     
     # Determine valid frame ranges (as set)
     valid_frame_ids = set()
-
     cap = cv2.VideoCapture(source)
     fps = cap.get(cv2.CAP_PROP_FPS) if cap.isOpened() else 29.97  # default to 29.97 FPS if not available
     
@@ -578,10 +577,8 @@ def run(
     # print(f"🔄 Saving tracking JSON to: {output_json_path}")
     
     # Initialize tracker
-    # ball_tracker = BYTETracker(tracker_args, frame_rate=tracker_args.fps)
-    # person_tracker = BYTETracker(tracker_args, frame_rate=tracker_args.fps)
     ball_tracker = BallTracker(buffer_size=20)
-    person_tracker = sv.ByteTrack(minimum_consecutive_frames=3)
+    person_tracker = sv.ByteTrack()
 
     # load the team reference features
     if clothes_folder_path and os.path.exists(clothes_folder_path):
@@ -597,12 +594,14 @@ def run(
     def slicer_callback(image_slice: np.ndarray):
         with torch.no_grad():
             h, w = image_slice.shape[:2]
+            img_size = imgsz[0] # 640/1280
             # Check if dimensions need padding to be same as expected slice size (1280*1280)
-            need_padding = (h != 1280) or (w != 1280)
+            need_padding = (h != img_size) or (w != img_size)
+            # print(f"Before padding: {image_slice.shape}")
             if need_padding:
                 # Calculate padding needed
-                pad_h = (1280 - h) if h < 1280 else 0
-                pad_w = (1280 - w) if w < 1280 else 0
+                pad_h = (img_size - h) if h < img_size else 0
+                pad_w = (img_size - w) if w < img_size else 0
 
                 # Apply padding (right and bottom)
                 padded_slice = cv2.copyMakeBorder(
@@ -614,6 +613,7 @@ def run(
                 )
                 # Use the padded image for further processing
                 image_slice = padded_slice
+                # print(f"After padding: {image_slice.shape}") # [640, 640, 3]
                 
             # Convert image to tensor (similar to the original preprocessing)
             img = torch.from_numpy(image_slice.transpose(2, 0, 1)).to(model.device)
@@ -717,40 +717,16 @@ def run(
             # start = time.time()  # reset timer
             # Make a copy of the original 4K image for drawing
             annotated_image = high_resolution_image.copy()
-            pass # tbd
-            # all_detections = []
-            # ckp1 = time.time()  # checkpoint for copy image
-
-            # # convert predictions to original image coordinates
-            # for i, det in enumerate(pred):  # per image
-            #     x_offset, y_offset = offsets[i]
-            #     if det is not None and len(det):
-            #         # Remap to original image coordinates
-            #         det[:, [0, 2]] += x_offset
-            #         det[:, [1, 3]] += y_offset
-            #         all_detections.append(det)
-            # ckp2 = time.time()  # checkpoint for remap
-                
-            # if all_detections:
-            #     combined = torch.cat(all_detections, dim=0)  # shape [Total_Detections, 6]
-            # else:
-            #     combined = torch.empty((0, 6), dtype=torch.float32, device=model.device)
-            # # print the shape of combined
-            # # print("Combined shape:", combined.shape)
-
-            # ckp3 = time.time()  # checkpoint for combine
-            # # Apply global NMS
-            # if combined.shape[0] > 0:
-            #     final = simple_global_nms(combined, iou_thres=iou_thres, max_det=max_det)
-            #     ckp4 = time.time()  # checkpoint for NMS
-            #     final = remove_boxes_with_numba(final, area_ratio_thresh=0.6, containment_thresh=0.9)
-            #     ckp5 = time.time()  # checkpoint for remove enclosed boxes
-            # else:
-            #     final = []
-            # ckp6 = time.time()  # checkpoint for NMS
-
-            # print(f"copy 4k imge took {ckp1 - start:.2f}s, remap {ckp2 - ckp1:.2f}s, combine {ckp3 - ckp2:.2f}s,  Gobal NMS {ckp4 - ckp3:.2f}s, remove enclosed boxes {ckp5 - ckp4:.2f}s, total {ckp6 - start:.2f}s")
-            # copy 4k imge took 0.00s, remap 0.00s, combine 0.00s,  Gobal NMS 0.00s, remove enclosed boxes 0.75s, total 0.75s
+            player_dets = np.hstack(
+                (
+                    player_detections.xyxy,
+                    player_detections.confidence[:, np.newaxis],
+                    player_detections.class_id[:, np.newaxis],
+                )
+            )
+            player_dets = torch.from_numpy(player_dets).to(device)
+            if player_dets.shape[0] > 0:
+                player_dets = remove_boxes_with_numba(player_dets, area_ratio_thresh=0.6, containment_thresh=0.9)
 
         with dt[4]:
             # the shape of final is [N, 6] where N is the number of detections, the 6 columns are [x1, y1, x2, y2, conf, cls]
@@ -763,13 +739,8 @@ def run(
             # person_dets_np = person_dets[:, :5].cpu().numpy() if person_dets.numel() else np.empty((0, 5))
             # ball_dets_np = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
 
-            player_dets_np = np.hstack(
-                (
-                    player_detections.xyxy,
-                    player_detections.confidence[:, np.newaxis],
-                )
-            )
-            online_persons = person_tracker.update_with_tensors(player_dets_np)
+            player_dets = player_dets[:, :5].cpu().numpy() if player_dets.numel() else np.empty((0, 5))
+            online_persons = person_tracker.update_with_tensors(player_dets)
             online_balls = [] # for testing purpose only
             # online_persons = person_tracker.update(person_dets_np, [height, width], [height, width])
             # online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
@@ -855,7 +826,7 @@ def run(
             #     # Load team histograms from file (or define in code)
             #     if team_histograms:
             #         team_scores = match_histograms_to_teams(crop_hists, team_histograms)  # white mask example
-            #     else:
+           #     else:
             #         team_scores = [{} for _ in crop_hists]
             #         print("⚠️ No team histograms found, using empty scores.")
             #         break
@@ -879,7 +850,7 @@ def run(
                     team_conf = {}
 
                 # ⭐ update the streamer
-                json_streamer.update(track_id, processed_frame_idx, bbox_out, team_conf, projected_position)
+                json_streamer.update(track_id, processed_frame_idx, bbox_out, team_conf, projected_position) 
 
         # save json every N frames
         with dt[6]:
