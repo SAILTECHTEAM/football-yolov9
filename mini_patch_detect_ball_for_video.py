@@ -28,7 +28,7 @@ from utils.torch_utils import select_device, smart_inference_mode
 from collections import defaultdict
 from numba import njit
 from tools.homography_matrix import compute_homography, apply_homography_to_point
-from idenfity_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
+from identify_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
 from utils.ball import BallTracker, BallAnnotator
 
 COLORS = ['#FF1493', '#00BFFF', '#FF6347', '#FFD700']

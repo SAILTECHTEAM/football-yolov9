@@ -29,32 +29,6 @@ from collections import defaultdict
 from numba import njit
 from tools.homography_matrix import compute_homography, apply_homography_to_point
 from identify_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
-# from utils.ball import BallTracker, BallAnnotator
-
-COLORS = ['#FF1493', '#00BFFF', '#FF6347', '#FFD700']
-
-BOX_ANNOTATOR = sv.BoxAnnotator(
-    color=sv.ColorPalette.from_hex(COLORS),
-    thickness=2
-)
-ELLIPSE_ANNOTATOR = sv.EllipseAnnotator(
-    color=sv.ColorPalette.from_hex(COLORS),
-    thickness=2
-)
-BOX_LABEL_ANNOTATOR = sv.LabelAnnotator(
-    color=sv.ColorPalette.from_hex(COLORS),
-    text_color=sv.Color.from_hex('#FFFFFF'),
-    text_padding=5,
-    text_thickness=1,
-)
-ELLIPSE_LABEL_ANNOTATOR = sv.LabelAnnotator(
-    color=sv.ColorPalette.from_hex(COLORS),
-    text_color=sv.Color.from_hex('#FFFFFF'),
-    text_padding=5,
-    text_thickness=1,
-    text_position=sv.Position.BOTTOM_CENTER,
-)
-
 
 def is_bbox_anomalous(curr_bbox, prev_bbox, height_thresh_ratio=0.5):
     curr_h = curr_bbox[3] - curr_bbox[1]
@@ -664,7 +638,7 @@ def run(
         )
     
     # Create slicer on-demand for each frame
-    overlap_ratio = (0.3, 0.3)  # overlap ratio for the slicer
+    overlap_ratio = (0.2, 0.2)  # overlap ratio for the slicer
     overlap_wh = (slice_size[0] * overlap_ratio[0], slice_size[1] * overlap_ratio[1])
     slicer = sv.InferenceSlicer(callback=slicer_callback, slice_wh=slice_size, overlap_ratio_wh=None, overlap_wh=overlap_wh)
     # Warmup for more stable inference

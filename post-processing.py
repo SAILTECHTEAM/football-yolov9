@@ -899,10 +899,10 @@ def prepare_background_and_tracks(
     )
 
     process_jsonl_detect_replace(
-    input_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
-    output_path=json_path.replace('.jsonl', '_final.jsonl'),
-    detector_kwargs=detector_kwargs
-    )
+        input_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
+        output_path=json_path.replace('.jsonl', '_final.jsonl'),
+        detector_kwargs=detector_kwargs
+     )
 
     end_relabel = time.time()
     print(f"✅ Relabeled {relabel_count} tracks in {end_relabel - end_merged:.2f} seconds")
@@ -964,8 +964,6 @@ def main():
     start = time.time()
 
     # start with permissive gates; tighten later
-
-
     DETECTOR = dict(
         window_size=2201,
         step=450,

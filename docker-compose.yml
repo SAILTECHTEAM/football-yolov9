@@ -1,26 +1,18 @@
-# docker-compose.yml
-version: "3.8"
-
 services:
   yolov9:
     build:
-      context: .  # Directory containing the Dockerfile
-      dockerfile: Dockerfile  # Name of your Dockerfile
+      context: .
+      dockerfile: Dockerfile
+    image: pytorch/pytorch:2.8.0-cuda12.6-cudnn9-devel
     container_name: yolov9
-    restart: unless-stopped
-    runtime: nvidia  # Use NVIDIA runtime for GPU support
-    shm_size: '32g'  # Set shared memory size to 64GB
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all  # Make all GPUs visible to the container
-      - DISPLAY=${DISPLAY}
-      - QT_QPA_PLATFORM_PLUGIN_PATH=/opt/conda/lib/python3.8/site-packages/cv2/qt/plugins
-      - QT_QPA_PLATFORM=xcb
-    devices:
-      - "/dev/ttyS3:/dev/ttyS3"  # Map the host COM port to the container (adjust ttyS3 as needed)
+    runtime: nvidia  # Use NVIDIA runtime
     volumes:
-      - ../dataset/:/coco/  # Mount the local COCO dataset path
-      - ../:/yolov9  # Mount the local code directory
-      - /tmp/.X11-unix:/tmp/.X11-unix  # Mount the X11 socket for GUI
-    working_dir: /yolov9  # Set working directory inside container
-    stdin_open: true  # Equivalent to `-i` to keep STDIN open
-    tty: true  # Allocate a pseudo-TTY
+      - ~/yolov9:/yolov9
+     # - /tmp/.X11-unix:/tmp/.X11-unix  # Mount X11 socket for OpenCV GUI, no use if the device does not support GUI
+     # - ~/yolov9/sports/examples/soccer/notebooks/datasets/football-players-detection-10/:/coco/
+    shm_size: 16g
+    tty: true
+    stdin_open: true
+    environment:
+     # - DISPLAY=$DISPLAY
+      - NVIDIA_VISIBLE_DEVICES=all
