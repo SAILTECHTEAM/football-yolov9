@@ -29,6 +29,8 @@ from collections import defaultdict
 from numba import njit
 from tools.homography_matrix import compute_homography, apply_homography_to_point
 from identify_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
+from utils.ball import BallTracker, BallAnnotator
+
 
 def is_bbox_anomalous(curr_bbox, prev_bbox, height_thresh_ratio=0.5):
     curr_h = curr_bbox[3] - curr_bbox[1]
@@ -81,68 +83,6 @@ def crop_image_with_overlap(image, crop_size=640, overlap=0.2):
 
     return patches
 
-def match_features_to_teams_in_memory(crop_features, team_data):
-    team_features = team_data['features']
-    team_names = team_data['filenames']
-    team_features = F.normalize(team_features, dim=1)
-
-    results = []
-
-    for crop in crop_features:
-        crop = F.normalize(crop.unsqueeze(0), dim=1)  # [1, 512]
-        sims = torch.mm(team_features, crop.T).squeeze(1)  # [M]
-
-        # 分類到 team
-        team_scores = {}
-        for team, sim in zip(team_names, sims):
-            team_key = os.path.basename(team).split('_')[0]
-            team_scores.setdefault(team_key, []).append(sim.item())
-
-        # 對每個 team 做平均
-        team_avg_scores = {team: sum(scores)/len(scores) for team, scores in team_scores.items()}
-        results.append(team_avg_scores)  # 儲存每個人對每隊的分數
-
-    return results
-
-def crop_clothing_region(image, bbox, 
-                         top_ratio=0.25, bottom_ratio=0.45, 
-                         left_ratio=0.3, right_ratio=0.7):
-    """
-    Crop only the clothing region (centered shirt area) from a person bounding box.
-
-    Args:
-        image: input image (NumPy array)
-        bbox: (x1, y1, x2, y2)
-        top_ratio: vertical start (0 = top, 1 = bottom)
-        bottom_ratio: vertical end
-        left_ratio: horizontal start (0 = left, 1 = right)
-        right_ratio: horizontal end
-        
-    Returns:
-        cropped_image: central shirt region
-    """
-    x1, y1, x2, y2 = map(int, bbox)
-    w = x2 - x1
-    h = y2 - y1
-
-    # Vertical bounds
-    new_y1 = y1 + int(h * top_ratio)
-    new_y2 = y1 + int(h * bottom_ratio)
-
-    # Horizontal bounds
-    new_x1 = x1 + int(w * left_ratio)
-    new_x2 = x1 + int(w * right_ratio)
-
-    # Clip to image bounds
-    new_x1 = max(new_x1, 0)
-    new_x2 = min(new_x2, image.shape[1])
-    new_y1 = max(new_y1, 0)
-    new_y2 = min(new_y2, image.shape[0])
-
-    cropped = image[new_y1:new_y2, new_x1:new_x2]
-    return cropped
-
-#----------------------
 @njit
 def _remove_enclosed_numba(dets, area_thresh, containment_thresh):
     N = dets.shape[0]
@@ -373,7 +313,8 @@ def draw_detections(image, detections, class_names, color=(0, 255, 0)):
             x1, y1, x2, y2, conf, cls = det
             track_id = None
         else:
-            x1, y1, x2, y2, conf, cls, track_id ,projected_position = det
+            x1, y1, x2, y2, conf, cls, projected_position = det
+            track_id = None
 
         x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
         cls = int(cls)
@@ -390,54 +331,40 @@ def parse_time_str(time_str: str) -> float:
     h, m, s = map(int, time_str.strip().split(":"))
     return h * 3600 + m * 60 + s
 
+# Amended for ball tracking
 class TrackJsonlStreamer:
     """
-    Streams per-track data to disk as JSONL.
-    Each track is written as a single line once it becomes stale.
-    More efficient and streaming-friendly than JSON array.
+    Streams per-frame data to disk as JSONL.
+    Each frame with ball detection is written as a single line.
     """
-    def __init__(self, out_path: str, flush_interval: int = 500, lost_thresh: int = 100):
+    def __init__(self, out_path: str, flush_interval: int = 50):
         self.out_path = Path(out_path)
         self.flush_interval = flush_interval
-        self.lost_thresh = lost_thresh
-        self.records = defaultdict(lambda: {
-            "track_id": None,
-            "frame_id": [],
-            "team_conf": [],
-            "bbox": [],
-            "projected": [],
-        })
-        self.last_seen = {}
+        self.buffer = []
         self.fh = self.out_path.open("w")
 
-    def update(self, tid, frame_idx, bbox, team_conf, proj_pt):
-        rec = self.records[tid]
-        if rec["track_id"] is None:
-            rec["track_id"] = tid
-        rec["frame_id"].append(frame_idx)
-        rec["team_conf"].append(team_conf)
-        rec["bbox"].append(bbox)
-        rec["projected"].append(proj_pt)
-        self.last_seen[tid] = frame_idx
+    def update(self, tid, frame_idx, bbox, proj_pt):
+        # Create a record for this specific frame
+        record = {
+            "frame_id": frame_idx,
+            "bbox": bbox,
+            "projected": proj_pt
+        }
+        self.buffer.append(record)
 
     def maybe_flush(self, frame_idx):
-        if frame_idx % self.flush_interval != 0:
-            return
+        if frame_idx % self.flush_interval == 0 and self.buffer:
+            self._write_buffer()
 
-        stale = [tid for tid, last in self.last_seen.items()
-                 if frame_idx - last > self.lost_thresh]
-
-        for tid in stale:
-            self._write_record(self.records.pop(tid))
-            self.last_seen.pop(tid, None)
-
-    def _write_record(self, rec):
-        json.dump(rec, self.fh, ensure_ascii=False)
-        self.fh.write("\n")  # write as JSONL
+    def _write_buffer(self):
+        for record in self.buffer:
+            json.dump(record, self.fh, ensure_ascii=False)
+            self.fh.write("\n")  # write as JSONL
+        self.buffer = []
 
     def close(self):
-        for rec in self.records.values():
-            self._write_record(rec)
+        if self.buffer:
+            self._write_buffer()
         self.fh.close()
 
 
@@ -486,9 +413,10 @@ def run(
     
     # Create tracker args manually
     tracker_args = SimpleNamespace(
-        track_activation_threshold=0.5,
-        lost_track_buffer=100,
-        minimum_matching_threshold=0.8,
+        track_thresh=0.5,
+        track_buffer=100,
+        match_thresh=0.8,
+        mot20=False,
         fps=fps  # assuming you already have video fps
     )
 
@@ -531,14 +459,13 @@ def run(
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    output_path = str(Path(save_dir) / ("after_globalNMS_overlap_remove_annotated_" + Path(source).name))
+    output_path = str(Path(save_dir) / ("after_globalNMS_overlap_remove_annotated_ball" + Path(source).name))
 
     # init json
-    output_json_path = str(Path(save_dir) / "team_tracking.jsonl")
+    output_json_path = str(Path(save_dir) / "ball_tracking.jsonl")
 
     json_streamer = TrackJsonlStreamer(output_json_path,
-                                    flush_interval=500,
-                                    lost_thresh=100)  # tune as needed
+                                    flush_interval=50)  # tune as needed, 50 and 10 for 30 seconds video testing
     # # Initialize global dictionary once outside main loop if not already done
     # if 'team_json_records' not in globals():
     #     team_json_records = defaultdict(lambda: {'frame_id': [], 'team_conf': [], 'bbox': []})
@@ -549,14 +476,7 @@ def run(
     # print(f"🔄 Saving tracking JSON to: {output_json_path}")
     
     # Initialize tracker
-    # ball_tracker = BallTracker(buffer_size=20)
-    person_tracker = sv.ByteTrack(track_activation_threshold=0.5, lost_track_buffer=100, minimum_matching_threshold=0.8, frame_rate=fps)
-
-    # load the team reference features
-    if clothes_folder_path and os.path.exists(clothes_folder_path):
-        # print(f"🔍 Loading clothing features from: {clothes_folder_path}")
-        team_histograms = load_team_histograms_from_folder(clothes_folder_path)
-        # print(f"✅ Loaded {len(team_histograms)} team histograms.")
+    ball_tracker = BallTracker(buffer_size=20)
     
     video_frame_idx = 0  # original frame index (matches video)
     processed_frame_idx = 0  # game-time processed frame index
@@ -588,21 +508,20 @@ def run(
                 # print(f"After padding: {image_slice.shape}") # [640, 640, 3]
                 
             # Convert image to tensor (similar to the original preprocessing)
-            img = cv2.cvtColor(image_slice, cv2.COLOR_BGR2RGB)
-            img = torch.from_numpy(img).permute(2, 0, 1).float()  # [H, W, C] → [C, H, W]
-            img /= 255.0  # 0 - 255 to 0.0 - 1.0
-            img = img.half() if model.fp16 else img  # uint8 to fp16/32
+            img = torch.from_numpy(image_slice.transpose(2, 0, 1)).to(model.device)
+            img = img.half() if model.fp16 else img.float()  # uint8 to fp16/32
+            img /= 255  # 0 - 255 to 0.0 - 1.0
             if len(img.shape) == 3:
                 img = img[None]  # expand for batch dim
 
-            img = img.to(model.device)
+            # img = img.clone().detach()
             # Run inference (similar to original inference)
             pred = model(img, augment=augment)
         
         # Apply NMS (similar to original NMS)
         pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
-
-        # Convert to supervision Detections format if no detections
+        
+        # Convert to supervision Detections format
         if len(pred[0]) == 0:
             return sv.Detections.empty()
         
@@ -645,6 +564,7 @@ def run(
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
 
     pbar = tqdm(total=len(valid_frame_ids), desc="Processing game-time frames", unit="frame", bar_format='{l_bar}{bar:20}{r_bar}{bar:-20b}')
+
     while cap.isOpened():
         ret, high_resolution_image = cap.read()
         if not ret:
@@ -674,7 +594,7 @@ def run(
 
         # Inference
         with dt[1]:
-            player_detections = slicer(high_resolution_image).with_nms(threshold=nms_threshold)
+            ball_detections = slicer(high_resolution_image).with_nms(threshold=nms_threshold)
             # pred = model(batch, augment=augment)
             # print("Predictions before NMS:", len(pred)) # 2
             # print(len(pred[0])) # 2
@@ -691,16 +611,16 @@ def run(
             # start = time.time()  # reset timer
             # Make a copy of the original 4K image for drawing
             annotated_image = high_resolution_image.copy()
-            player_dets = np.hstack(
+            ball_dets = np.hstack(
                 (
-                    player_detections.xyxy,
-                    player_detections.confidence[:, np.newaxis],
-                    player_detections.class_id[:, np.newaxis],
+                    ball_detections.xyxy,
+                    ball_detections.confidence[:, np.newaxis],
+                    ball_detections.class_id[:, np.newaxis],
                 )
             )
-            player_dets = torch.from_numpy(player_dets).to(device)
-            if player_dets.shape[0] > 0:
-                player_dets = remove_boxes_with_numba(player_dets, area_ratio_thresh=0.6, containment_thresh=0.9)
+            ball_dets = torch.from_numpy(ball_dets).to(device)
+            if ball_dets.shape[0] > 0:
+                ball_dets = remove_boxes_with_numba(ball_dets, area_ratio_thresh=0.6, containment_thresh=0.9)
 
         with dt[4]:
             # the shape of final is [N, 6] where N is the number of detections, the 6 columns are [x1, y1, x2, y2, conf, cls]
@@ -713,9 +633,9 @@ def run(
             # person_dets_np = person_dets[:, :5].cpu().numpy() if person_dets.numel() else np.empty((0, 5))
             # ball_dets_np = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
 
-            player_dets = player_dets[:, :5].cpu().numpy() if player_dets.numel() else np.empty((0, 5))
-            online_persons = person_tracker.update_with_tensors(player_dets)
-            online_balls = [] # for testing purpose only
+            ball_dets = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
+            online_balls = ball_tracker.update(ball_dets)
+
             # online_persons = person_tracker.update(person_dets_np, [height, width], [height, width])
             # online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
             
@@ -724,76 +644,21 @@ def run(
             # online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
             # print("Online persons after tracking:", len(online_persons))
             # print("Online ball after tracking:", len(online_balls))
-            
-
-            # Store all crop tensors and track info for matching
-            crop_hists = []
-            crop_track_ids = []
-            frame_crop_features = []
 
             # Format detections with track ID
             final_detections = []
-            for t in online_persons:
-                tlbr = t.tlbr  # (x1, y1, x2, y2)
-                track_id = t.external_track_id
-                conf = t.score
+            for t in online_balls:
+                tlbr = t[:4]
+                conf = t[4]
                 x1, y1, x2, y2 = tlbr
                 # Compute bbox properties
-                curr_cx = (x1 + x2) / 2
-                curr_h = y2 - y1
-
-
-                # Smooth bbox height and center x
-                if not hasattr(t, "smooth_h"):
-                    t.smooth_h = curr_h
-                    t.smooth_cx = curr_cx
-                else:
-                    t.smooth_h = ema_alpha * curr_h + (1 - ema_alpha) * t.smooth_h
-                    t.smooth_cx = ema_alpha * curr_cx + (1 - ema_alpha) * t.smooth_cx
-
-                # Compute smoothed bottom center
-                smoothed_cx = t.smooth_cx
-                smoothed_y2 = y1 + t.smooth_h
-                cx, cy = smoothed_cx, smoothed_y2  # use these instead of raw values
-                # hasattr(t, "smooth_h"):
-                #    print(f"Track ID: {track_id}, Smoothed Height: {t.smooth_h}, Smoothed Center X: {t.smooth_cx}")
-
-                # # smooth bottom center directly
-                # # Check for bbox height anomaly
-                # use_previous = False
-                # if hasattr(t, "prev_tlbr"):
-                #     prev_h = t.prev_tlbr[3] - t.prev_tlbr[1]
-                #     curr_h = tlbr[3] - tlbr[1]
-                #     if prev_h > 0 and curr_h < prev_h * 0.9:
-                #         use_previous = True # if current height is less than 50% of previous, use previous bbox
-                # if use_previous and hasattr(t, "prev_bottom_center"):
-                #     cx, cy = t.prev_bottom_center
-                # # EMA smoothing
-                # if not hasattr(t, "smooth_bottom_center"):
-                #     t.smooth_bottom_center = (cx, cy)
-                # else:
-                #     px, py = t.smooth_bottom_center
-                #     cx = ema_alpha * cx + (1 - ema_alpha) * px
-                #     cy = ema_alpha * cy + (1 - ema_alpha) * py
-                #     t.smooth_bottom_center = (cx, cy)
-                # # Store prev info for next frame
-                # t.prev_bottom_center = (cx, cy)
-                # t.prev_tlbr = tlbr
+                cx = (x1 + x2) / 2
+                cy = y2
 
                 projected_position = apply_homography_to_point((cx, cy), H)  # (x, y) projected point
 
-                cls = 0  # hardcode as person
-                final_detections.append((tlbr[0], tlbr[1], tlbr[2], tlbr[3], conf, cls, track_id, projected_position))
-
-                # Crop the clothing region
-                x1, y1, x2, y2 = map(int, [tlbr[0], tlbr[1], tlbr[2], tlbr[3]])
-                crop_img = crop_clothing_region(high_resolution_image, (x1, y1, x2, y2),top_ratio=0.2, bottom_ratio=0.5, left_ratio=0.25, right_ratio=0.75)
-                if crop_img.size == 0:
-                    continue  # skip empty crops
-                crop_hist = extract_color_histogram_with_specific_background_color(
-                    crop_img)  
-                crop_hists.append(crop_hist)
-                crop_track_ids.append(track_id) # may not be required, cause the index of crop_tensors is first N element of final_detections
+                cls = 0  # hardcode as ball
+                final_detections.append((tlbr[0], tlbr[1], tlbr[2], tlbr[3], conf, cls, projected_position)) # no need track id for ball
 
             # for t in online_balls:
             #     tlbr = t.tlbr
@@ -810,35 +675,17 @@ def run(
             #     final_detections.append((tlbr[0], tlbr[1], tlbr[2], tlbr[3], conf, cls, track_id, projected_position))
 
         with dt[5]:
-            if crop_hists:  # crop_images = list of color histograms for each person
-                # Load team histograms from file (or define in code)
-                if team_histograms:
-                    team_scores = match_histograms_to_teams(crop_hists, team_histograms)  # white mask example
-                else:
-                    team_scores = [{} for _ in crop_hists]
-                    print("⚠️ No team histograms found, using empty scores.")
-                    break
 
             # Update tracking JSON records
             # Track current feature index to sync with crop detections
             feature_index = 0
 
             for det in final_detections:
-                x1, y1, x2, y2, conf, cls, track_id, projected_position  = det
+                x1, y1, x2, y2, conf, cls, projected_position  = det
                 bbox_out = [int(x1), int(y1), int(x2), int(y2), float(conf)]
 
-                if cls == 0:                              # person
-                    if feature_index < len(team_scores):
-                        team_conf = {k: float(v)
-                                    for k, v in team_scores[feature_index].items()}
-                        feature_index += 1
-                    else:
-                        team_conf = {}
-                else:                                     # ball
-                    team_conf = {}
-
                 # ⭐ update the streamer
-                json_streamer.update(track_id, processed_frame_idx, bbox_out, team_conf, projected_position) 
+                json_streamer.update(None, processed_frame_idx, bbox_out, {}, projected_position) # Currently put 2 placeholders first, later change the json format for saving
 
         # save json every N frames
         with dt[6]:
@@ -857,12 +704,12 @@ def run(
         total_time = sum(dt[i].dt for i in range(len(dt)))
         # print(f"Frame {processed_frame_idx} total use: {total_time} (preprocessed: {dt[0].dt:.2f}s, inference: {dt[1].dt:.2f}s, NMS: {dt[2].dt:.2f}s, proprocess: {dt[3].dt:.2f}s, tracking & crop patches: {dt[4].dt:.2f}s, ReID: {dt[5].dt:.2f}s, Json: {dt[6].dt:.2f}s, Draw: {dt[7].dt:.2f}s)")
         pbar.set_postfix({
-            # "pre": f"{dt[0].dt:.2f}s",
+            "pre": f"{dt[0].dt:.2f}s",
             "inf": f"{dt[1].dt:.2f}s",
-            # "nms": f"{dt[2].dt:.2f}s",
+            "nms": f"{dt[2].dt:.2f}s",
             "proc": f"{dt[3].dt:.2f}s",
             "trk": f"{dt[4].dt:.2f}s",
-            # "reid": f"{dt[5].dt:.2f}s",
+            "reid": f"{dt[5].dt:.2f}s",
             "json": f"{dt[6].dt:.2f}s",
             "draw": f"{dt[7].dt:.2f}s",
             "total": f"{total_time:.2f}s"
@@ -876,10 +723,9 @@ def run(
     if not nosave:
         cap.release()
         out.release()
-        if view_img:
-            cv2.destroyAllWindows()
-        pbar.close()
+        # cv2.destroyAllWindows()
         print(f"✅ Saved video to: {output_path}")
+        pbar.close()
 
     # close streamer → writes remaining tracks & final ‘]’
     json_streamer.close()
@@ -892,7 +738,6 @@ def parse_opt():
     parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='file/dir/URL/glob/screen/0(webcam)')
     parser.add_argument('--game-time', type=int, nargs=4, default=[0, 2700, 3600, 6300], help='start time of first half in seconds')
     parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='(optional) dataset.yaml path')
-    parser.add_argument('--clothes-folder-path', type=str, default=ROOT / '', help='path to clothing features for assigning team IDs')
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.45, help='NMS IoU threshold')
@@ -948,4 +793,4 @@ if __name__ == "__main__":
     end_time = time.time()
     print(f"Total execution time(HH:MM:SS): {time.strftime('%H:%M:%S', time.gmtime(end_time - start_time))}")
 # Example usage:
-# python3 mini_patch_detect_v1_for_video.py --source './data/video/test_sample/C0478.MP4' --game-time 317 3085 3982 6809 --img 640 --device 0 --weights './weight/yolov9-s-converted.pt' --name test_4k --classes 0 32 --clothes-folder-path ./data/histograms/0525/ --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave
+# python3 mini_patch_detect_ball_for_video.py --source './data/video/test_sample/C0478.MP4' --game-time 317 3085 3982 6809 --img 640 --device 0 --weights './weight/yolov9-s-converted.pt' --name test_4k --classes 0 32 --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave

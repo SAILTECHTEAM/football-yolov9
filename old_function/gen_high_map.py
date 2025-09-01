@@ -16,7 +16,7 @@ def load_jsonl(path):
 
 def is_person_track(track):
     """A track is considered a person if any team_conf entry is non-empty."""
-    return any(bool(conf) for conf in track.get("team_conf", []))
+    return any(len(conf) > 0 for conf in track.get("team_conf", []))
 
 def extract_height_and_position(data, conf_thresh=0.3, outlier_thresh=2000):
     heights = []
@@ -107,7 +107,7 @@ def plot_height_map(avg_height_map, x_bins, y_bins):
     plt.grid(True)
     plt.show()
 
-def get_expected_height(x, y):
+def get_expected_height(x, y, height_map, x_bins, y_bins):
     """
     Given a projected (x, y) coordinate, return the expected height from the grid.
     """
@@ -167,7 +167,7 @@ if __name__ == "__main__":
     height_map = data["height_map"]
     x_bins = data["x_bins"]
     y_bins = data["y_bins"]
-    expected= get_expected_height(530, 330)  # Example usage
+    expected= get_expected_height(530, 330, height_map, x_bins, y_bins)  # Example usage
     print(f"Expected height at : {expected}")
     # plot_height_map(height_map, x_bins, y_bins)
 

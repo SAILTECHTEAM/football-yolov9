@@ -41,13 +41,13 @@ def render_period_with_correct_timing(
 if __name__ == "__main__":
 
     render_period_with_correct_timing(
-        start_frame=57873,
-        end_frame=58952,
-        jsonl_path="./runs/detect/test_4k_converted/team_tracking_relabeled.jsonl",
-        bg_img_path="./data/images/mongkok_football_field.png",
-        video_paths=['./data/video/test_sample/C0478.MP4'],
-        game_time=[(317, 3085, 3982, 6809)],  # (game_start, half_end, second_start, game_end) in seconds
-        output_dir='./runs/detect/',
+        start_frame=0,
+        end_frame=1080,
+        jsonl_path="../runs/detect/test_4k_player_640/team_tracking_final.jsonl",
+        bg_img_path="../data/images/mongkok_football_field.png",
+        video_paths=['../data/video/test_sample/period_57873_58952_cam0.mp4'],
+        game_time=[(0, 0, 0, 36)],  # (game_start, half_end, second_start, game_end) in seconds
+        output_dir='../runs/detect/test_4k_player_640',
         field_size=(1060, 660),
     )
     

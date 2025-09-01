@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 import numpy as np
 import onepose
-from idenfity_goalkeeper import extract_color_histogram_with_specific_background_color, extract_color_histogram_from_rotated_skelton, compare_histograms, load_histogram
+from identify_goalkeeper import extract_color_histogram_with_specific_background_color, extract_color_histogram_from_rotated_skelton, compare_histograms, load_histogram
 from goalkeeper_motion_classification import classify_goalkeeper_behavior
 from tqdm import tqdm
 
