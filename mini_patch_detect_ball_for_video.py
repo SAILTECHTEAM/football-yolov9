@@ -31,30 +31,6 @@ from tools.homography_matrix import compute_homography, apply_homography_to_poin
 from identify_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
 from utils.ball import BallTracker, BallAnnotator
 
-COLORS = ['#FF1493', '#00BFFF', '#FF6347', '#FFD700']
-
-BOX_ANNOTATOR = sv.BoxAnnotator(
-    color=sv.ColorPalette.from_hex(COLORS),
-    thickness=2
-)
-ELLIPSE_ANNOTATOR = sv.EllipseAnnotator(
-    color=sv.ColorPalette.from_hex(COLORS),
-    thickness=2
-)
-BOX_LABEL_ANNOTATOR = sv.LabelAnnotator(
-    color=sv.ColorPalette.from_hex(COLORS),
-    text_color=sv.Color.from_hex('#FFFFFF'),
-    text_padding=5,
-    text_thickness=1,
-)
-ELLIPSE_LABEL_ANNOTATOR = sv.LabelAnnotator(
-    color=sv.ColorPalette.from_hex(COLORS),
-    text_color=sv.Color.from_hex('#FFFFFF'),
-    text_padding=5,
-    text_thickness=1,
-    text_position=sv.Position.BOTTOM_CENTER,
-)
-
 
 def is_bbox_anomalous(curr_bbox, prev_bbox, height_thresh_ratio=0.5):
     curr_h = curr_bbox[3] - curr_bbox[1]
@@ -355,54 +331,40 @@ def parse_time_str(time_str: str) -> float:
     h, m, s = map(int, time_str.strip().split(":"))
     return h * 3600 + m * 60 + s
 
+# Amended for ball tracking
 class TrackJsonlStreamer:
     """
-    Streams per-track data to disk as JSONL.
-    Each track is written as a single line once it becomes stale.
-    More efficient and streaming-friendly than JSON array.
+    Streams per-frame data to disk as JSONL.
+    Each frame with ball detection is written as a single line.
     """
-    def __init__(self, out_path: str, flush_interval: int = 500, lost_thresh: int = 100):
+    def __init__(self, out_path: str, flush_interval: int = 50):
         self.out_path = Path(out_path)
         self.flush_interval = flush_interval
-        self.lost_thresh = lost_thresh
-        self.records = defaultdict(lambda: {
-            "track_id": None,
-            "frame_id": [],
-            "team_conf": [],
-            "bbox": [],
-            "projected": [],
-        })
-        self.last_seen = {}
+        self.buffer = []
         self.fh = self.out_path.open("w")
 
-    def update(self, tid, frame_idx, bbox, team_conf, proj_pt):
-        rec = self.records[tid]
-        if rec["track_id"] is None:
-            rec["track_id"] = tid
-        rec["frame_id"].append(frame_idx)
-        rec["team_conf"].append(team_conf)
-        rec["bbox"].append(bbox)
-        rec["projected"].append(proj_pt)
-        self.last_seen[tid] = frame_idx
+    def update(self, tid, frame_idx, bbox, proj_pt):
+        # Create a record for this specific frame
+        record = {
+            "frame_id": frame_idx,
+            "bbox": bbox,
+            "projected": proj_pt
+        }
+        self.buffer.append(record)
 
     def maybe_flush(self, frame_idx):
-        if frame_idx % self.flush_interval != 0:
-            return
+        if frame_idx % self.flush_interval == 0 and self.buffer:
+            self._write_buffer()
 
-        stale = [tid for tid, last in self.last_seen.items()
-                 if frame_idx - last > self.lost_thresh]
-
-        for tid in stale:
-            self._write_record(self.records.pop(tid))
-            self.last_seen.pop(tid, None)
-
-    def _write_record(self, rec):
-        json.dump(rec, self.fh, ensure_ascii=False)
-        self.fh.write("\n")  # write as JSONL
+    def _write_buffer(self):
+        for record in self.buffer:
+            json.dump(record, self.fh, ensure_ascii=False)
+            self.fh.write("\n")  # write as JSONL
+        self.buffer = []
 
     def close(self):
-        for rec in self.records.values():
-            self._write_record(rec)
+        if self.buffer:
+            self._write_buffer()
         self.fh.close()
 
 
@@ -441,7 +403,7 @@ def run(
         vid_stride=1,  # video frame-rate stride
         ema_alpha = 0.5,  # EMA smoothing factor for bottom center
         slice_size=(640, 640),  # slice width and height
-        nms_threshold=0.1,  # NMS threshold for slicer
+        nms_threshold=0.45,  # NMS threshold for slicer
 ):
     
     # Determine valid frame ranges (as set)
@@ -503,8 +465,7 @@ def run(
     output_json_path = str(Path(save_dir) / "ball_tracking.jsonl")
 
     json_streamer = TrackJsonlStreamer(output_json_path,
-                                    flush_interval=50,
-                                    lost_thresh=10)  # tune as needed, 50 and 10 for 30 seconds video testing
+                                    flush_interval=50)  # tune as needed, 50 and 10 for 30 seconds video testing
     # # Initialize global dictionary once outside main loop if not already done
     # if 'team_json_records' not in globals():
     #     team_json_records = defaultdict(lambda: {'frame_id': [], 'team_conf': [], 'bbox': []})
@@ -596,7 +557,7 @@ def run(
         )
     
     # Create slicer on-demand for each frame
-    overlap_ratio = (0.3, 0.3)  # overlap ratio for the slicer
+    overlap_ratio = (0.2, 0.2)  # overlap ratio for the slicer
     overlap_wh = (slice_size[0] * overlap_ratio[0], slice_size[1] * overlap_ratio[1])
     slicer = sv.InferenceSlicer(callback=slicer_callback, slice_wh=slice_size, overlap_ratio_wh=None, overlap_wh=overlap_wh)
     # Warmup for more stable inference
@@ -673,8 +634,7 @@ def run(
             # ball_dets_np = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
 
             ball_dets = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
-            # online_balls = ball_dets
-            # online_balls = ball_tracker.update(ball_dets)
+            online_balls = ball_tracker.update(ball_dets)
 
             # online_persons = person_tracker.update(person_dets_np, [height, width], [height, width])
             # online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
@@ -684,16 +644,10 @@ def run(
             # online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
             # print("Online persons after tracking:", len(online_persons))
             # print("Online ball after tracking:", len(online_balls))
-            
-
-            # Store all crop tensors and track info for matching
-            crop_hists = []
-            crop_track_ids = []
-            frame_crop_features = []
 
             # Format detections with track ID
             final_detections = []
-            for t in ball_dets:
+            for t in online_balls:
                 tlbr = t[:4]
                 conf = t[4]
                 x1, y1, x2, y2 = tlbr
@@ -750,12 +704,12 @@ def run(
         total_time = sum(dt[i].dt for i in range(len(dt)))
         # print(f"Frame {processed_frame_idx} total use: {total_time} (preprocessed: {dt[0].dt:.2f}s, inference: {dt[1].dt:.2f}s, NMS: {dt[2].dt:.2f}s, proprocess: {dt[3].dt:.2f}s, tracking & crop patches: {dt[4].dt:.2f}s, ReID: {dt[5].dt:.2f}s, Json: {dt[6].dt:.2f}s, Draw: {dt[7].dt:.2f}s)")
         pbar.set_postfix({
-            # "pre": f"{dt[0].dt:.2f}s",
+            "pre": f"{dt[0].dt:.2f}s",
             "inf": f"{dt[1].dt:.2f}s",
-            # "nms": f"{dt[2].dt:.2f}s",
+            "nms": f"{dt[2].dt:.2f}s",
             "proc": f"{dt[3].dt:.2f}s",
             "trk": f"{dt[4].dt:.2f}s",
-            # "reid": f"{dt[5].dt:.2f}s",
+            "reid": f"{dt[5].dt:.2f}s",
             "json": f"{dt[6].dt:.2f}s",
             "draw": f"{dt[7].dt:.2f}s",
             "total": f"{total_time:.2f}s"
@@ -814,7 +768,7 @@ def parse_opt():
     parser.add_argument('--vid-stride', type=int, default=1, help='video frame-rate stride')
     parser.add_argument('--ema-alpha', type=float, default=0.5, help='EMA smoothing factor for bottom center')
     parser.add_argument('--slice-size', nargs='+', type=int, default=[640, 640], help='slice width and height')
-    parser.add_argument('--nms-threshold', type=float, default=0.1, help='NMS threshold for slicer')
+    parser.add_argument('--nms-threshold', type=float, default=0.45, help='NMS threshold for slicer')
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     opt.game_time = np.array(opt.game_time, dtype=np.int32).reshape(4)  # reshape to 1D array
