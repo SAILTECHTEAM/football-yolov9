@@ -545,7 +545,7 @@ def run(
 
     if not nosave:
         print(f"🔄 Saving video to: {output_path}")
-        out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+        out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'H264'), fps, (width, height))
     # print(f"🔄 Saving tracking JSON to: {output_json_path}")
     
     # Initialize tracker

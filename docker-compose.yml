@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: pytorch/pytorch:2.8.0-cuda12.6-cudnn9-devel
+    image: yolov9-football:latest
     container_name: yolov9
     runtime: nvidia  # Use NVIDIA runtime
     volumes:
