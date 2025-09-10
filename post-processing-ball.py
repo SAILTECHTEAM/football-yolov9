@@ -843,22 +843,42 @@ def prepare_background_and_tracks(
         raise FileNotFoundError(f"Failed to load image: {image_path}")
     bg_img = cv2.resize(bg_img, field_size)
 
+    filter_static_and_multiple_balls(
+        json_path, 
+        json_path.replace('.jsonl', '_filtered.jsonl'),
+    )
 
     remove_ball_false_detection(
-        json_path, 
-        json_path.replace('.jsonl', '_filtered.jsonl')
+        json_path.replace('.jsonl', '_filtered.jsonl'),
+        json_path.replace('.jsonl', '_removed.jsonl')
     )
 
     smoothen_ball_tracking(
-        json_path.replace('.jsonl', '_filtered.jsonl'), 
+        json_path.replace('.jsonl', '_removed.jsonl'), 
         json_path.replace('.jsonl', '_smoothed.jsonl'),
         field_size
     )
 
-    convert_ball_tracking_format_with_gaps(
+    convert_ball_tracking_format(
         json_path.replace('.jsonl', '_smoothed.jsonl'),
+        json_path.replace('.jsonl', '_smoothed_temp.jsonl'),
+    )
+
+    process_jsonl_detect_replace(
+        json_path.replace('.jsonl', '_smoothed_temp.jsonl'),
+        json_path.replace('.jsonl', '_processed.jsonl'),
+        detector_kwargs=detector_kwargs,
+        overwrite_projected=True
+    )
+
+    refine_ball_tracking_with_ransac(
+        json_path.replace('.jsonl', '_processed.jsonl'),
+        json_path.replace('.jsonl', '_refined.jsonl'),
+    )
+
+    convert_ball_tracking_format(
+        json_path.replace('.jsonl', '_refined.jsonl'),
         json_path.replace('.jsonl', '_final.jsonl'),
-        max_frame_gap=10
     )
 
     return bg_img
@@ -896,7 +916,7 @@ def process_merged_tracks(
     end = time.time()
     print(f"✅ Processed tracks in {end - start:.2f} seconds")
 
-def convert_ball_tracking_format_with_gaps(json_path, output_path, max_frame_gap=10):
+def convert_ball_tracking_format(json_path, output_path, max_frame_gap=10):
     """
     Convert input ball tracking JSONL with per-frame data to a consolidated track format.
     
@@ -907,7 +927,6 @@ def convert_ball_tracking_format_with_gaps(json_path, output_path, max_frame_gap
     The input format is:
     {
         "frame_id": 1,
-        "bbox": [[x1, y1, x2, y2, conf], ...], 
         "projected": [[x, y], ...]
     }
     
@@ -963,7 +982,7 @@ def convert_ball_tracking_format_with_gaps(json_path, output_path, max_frame_gap
         with open(output_path, 'w') as out_f:
             out_f.write(json.dumps(output_track) + '\n')
         
-        print(f"✅ Converted {len(frames)} frames to ball track in {output_path}")
+        # print(f"✅ Converted {len(frames)} frames to ball track in {output_path}")
     else:
         print("⚠️ No valid frames found to convert")
 
@@ -987,14 +1006,21 @@ def convert_ball_tracking_json_to_numpy(json_file):
             if line.strip():  # Skip empty lines
                 try:
                     data = json.loads(line)
-                    frame_id = data.get('frame_id')
-                    
-                    # Extract the projected coordinates (x, y)
-                    if 'projected' in data:
-                        x, y = data['projected']
+                    if 'frame_id' in data: # Format in {frame_id, x, y}
+                        frame_id = data.get('frame_id')
                         
-                        # Add to our list as [frame_id, x, y]
-                        ball_positions.append([frame_id, x, y])
+                        # Extract the projected coordinates (x, y)
+                        if 'projected' in data:
+                            x, y = data['projected']
+                            
+                            # Add to our list as [frame_id, x, y]
+                            ball_positions.append([frame_id, x, y])
+                    elif 'frames' in data: # Format in {track_id, team, frame_range, frames, projected}
+                        frames = data.get('frames', [])
+                        projected = data.get('projected', [])
+                        for f, p in zip(frames, projected):
+                            if p is not None and len(p) == 2:
+                                ball_positions.append([f, p[0], p[1]])
                 except json.JSONDecodeError:
                     print(f"Skipping invalid JSON line: {line}")
                 except Exception as e:
@@ -1014,7 +1040,7 @@ def convert_ball_tracking_numpy_to_json(numpy_arr, output_file):
     Convert ball tracking data from NumPy format back to JSONL format.
 
     Args:
-        numpy_arr (np.ndarray): Array containing ball tracking data
+        numpy_arr (np.ndarray): Array containing ball tracking data [[frame_id, x, y], ...]
         output_file (str): Path to save the output JSONL file
 
     Returns:
@@ -1030,14 +1056,269 @@ def convert_ball_tracking_numpy_to_json(numpy_arr, output_file):
             })
             file.write(json_line + "\n")
 
-    print(f"Converted ball positions from NumPy array to JSONL format")
-    print(f"Saved to {output_file}")
+    # print(f"Converted ball positions from NumPy array to JSONL format")
+    # print(f"Saved to {output_file}")
 
-def remove_ball_false_detection(json_path, save_path, field_size=[1060, 660]):
+def filter_multiple_detections(ball_xy, max_speed=150, static_threshold=5, window_size=5, field_size=(1060, 660)):
+    """
+    Filter out false ball detections when multiple candidates exist in the same frame.
+    
+    Parameters:
+    -----------
+    ball_xy : np.ndarray
+        Array with shape (n, 3) where each row is [frame_idx, x, y]
+    max_speed : float
+        Maximum plausible speed of the ball (pixels/frame)
+    static_threshold : float
+        Minimum movement required to not be considered static
+    window_size : int
+        Size of window to analyze for trajectory consistency
+        
+    Returns:
+    --------
+    np.ndarray
+        Filtered ball_xy with only one detection per frame
+    """
+    # Group detections by frame
+    frame_to_detections = defaultdict(list)
+    for i in range(len(ball_xy)):
+        frame_id = int(ball_xy[i, 0])
+        frame_to_detections[frame_id].append((i, ball_xy[i, 1:]))
+    
+    # Initialize Kalman filter for trajectory prediction
+    kf = KalmanFilter(dim_x=4, dim_z=2)  # State: [x, y, vx, vy], Measurement: [x, y]
+    dt = 1.0  # Time step (1 frame)
+    
+    # State transition matrix (constant velocity model)
+    kf.F = np.array([
+        [1, 0, dt, 0],
+        [0, 1, 0, dt],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+    ])
+    
+    # Measurement matrix (we only observe position, not velocity)
+    kf.H = np.array([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0]
+    ])
+    
+    # Initial state uncertainty
+    kf.P *= 100
+    
+    # Measurement noise
+    kf.R = np.diag([50, 50])
+    
+    # Process noise
+    kf.Q = np.eye(4) * 10
+    
+    # Track frame-to-frame movement for each detection path
+    movements = defaultdict(list)
+    
+    # Create a mask for points to keep
+    keep_indices = []
+    last_position = None
+    
+    # Process frames in order
+    sorted_frames = sorted(frame_to_detections.keys())
+    
+    # Initialize with the first frame
+    if sorted_frames:
+        first_frame = sorted_frames[0]
+        # If only one detection in first frame, use it
+        if len(frame_to_detections[first_frame]) == 1:
+            idx, pos = frame_to_detections[first_frame][0]
+            keep_indices.append(idx)
+            last_position = pos
+            # Initialize Kalman filter
+            kf.x = np.array([[pos[0]], [pos[1]], [0], [0]])
+        # If multiple detections, use the one closest to the center
+        else:
+            center = np.array([field_size[0] / 2, field_size[1] / 2])  # Approximate field center based on size of field [1060, 660]
+            dists = [np.linalg.norm(pos - center) for _, pos in frame_to_detections[first_frame]]
+            best_idx = np.argmin(dists)
+            idx, pos = frame_to_detections[first_frame][best_idx]
+            keep_indices.append(idx)
+            last_position = pos
+            # Initialize Kalman filter
+            kf.x = np.array([[pos[0]], [pos[1]], [0], [0]])
+    
+    # Process remaining frames
+    for i in range(1, len(sorted_frames)):
+        current_frame = sorted_frames[i]
+        detections = frame_to_detections[current_frame]
+        
+        # If only one detection in this frame, easy case
+        if len(detections) == 1:
+            idx, pos = detections[0]
+            
+            # Check if this is a plausible continuation
+            if last_position is not None:
+                distance = np.linalg.norm(pos - last_position)
+                if distance > max_speed:
+                    # Skip implausibly fast movements
+                    continue
+            
+            keep_indices.append(idx)
+            last_position = pos
+            
+            # Update Kalman filter
+            kf.predict()
+            kf.update(pos)
+            
+        # If multiple detections, choose the most likely one
+        else:
+            # Predict next position using Kalman filter
+            kf.predict()
+            predicted_pos = kf.x[:2].flatten()
+            
+            # Score each detection based on multiple criteria
+            scores = []
+            for idx, pos in detections:
+                # 1. Distance from predicted position
+                pred_distance = np.linalg.norm(pos - predicted_pos)
+                
+                # 2. Check if this is a static detection point
+                static_score = 0
+                for prev_frame in range(max(0, current_frame-window_size), current_frame):
+                    if prev_frame in frame_to_detections:
+                        for _, prev_pos in frame_to_detections[prev_frame]:
+                            if np.linalg.norm(pos - prev_pos) < static_threshold:
+                                static_score += 1
+                
+                # 3. Distance from previous position
+                if last_position is not None:
+                    prev_distance = np.linalg.norm(pos - last_position)
+                    # Heavily penalize positions too far from previous
+                    if prev_distance > max_speed:
+                        prev_distance_score = 1000  # Large penalty
+                    else:
+                        prev_distance_score = prev_distance
+                else:
+                    prev_distance_score = 0
+                
+                # Combined score (lower is better)
+                score = pred_distance + (static_score * 50) + prev_distance_score
+                scores.append((idx, score))
+            
+            # Choose detection with lowest score
+            scores.sort(key=lambda x: x[1])
+            best_idx, _ = scores[0]
+            best_pos = ball_xy[best_idx, 1:]
+            
+            keep_indices.append(best_idx)
+            last_position = best_pos
+            
+            # Update Kalman filter with chosen position
+            kf.update(best_pos)
+    
+    # Return the filtered array
+    return ball_xy[keep_indices]
+
+def remove_detections_near_high_density_region(ball_xy, field_size=(1060, 660), 
+                           bin_size=(20, 20), primary_threshold=8, 
+                           secondary_threshold=4, neighbor_radius=2):
+    """
+    Density-based filter with multi-level thresholding and spatial awareness.
+    Divide the football field into grids, allocate all detections to their respective grids,
+    identify high-density grids, and remove points in and around these grids.
+
+    Parameters:
+    -----------
+    ball_xy : np.ndarray
+        Array with shape (n, 3) where each row is [frame_idx, x, y]
+    field_size : list
+        Size of the football field [width, height]
+    bin_size : tuple
+        Size of histogram bins (x, y)
+    primary_threshold : int
+        Primary threshold for high-density regions
+    secondary_threshold : int
+        Secondary threshold for neighboring regions
+    neighbor_radius : int
+        Radius for considering neighboring bins
+        
+    Returns:
+    --------
+    filtered_ball_xy : np.ndarray
+        Filtered ball tracking data with high-density points removed
+    """
+    # Create a 2D histogram as before
+    x_bins = np.linspace(0, field_size[0], int(field_size[0]/bin_size[0])+1)
+    y_bins = np.linspace(0, field_size[1], int(field_size[1]/bin_size[1])+1)
+    
+    hist, x_edges, y_edges = np.histogram2d(
+        ball_xy[:, 1], ball_xy[:, 2], 
+        bins=[x_bins, y_bins]
+    )
+    
+    # Find the bin for each data point
+    x_indices = np.digitize(ball_xy[:, 1], x_edges) - 1
+    y_indices = np.digitize(ball_xy[:, 2], y_edges) - 1
+    
+    # Bound indices to valid range
+    x_indices = np.clip(x_indices, 0, len(x_edges)-2)
+    y_indices = np.clip(y_indices, 0, len(y_edges)-2)
+    
+    # Create masks for primary and extended regions
+    primary_mask = np.zeros(len(ball_xy), dtype=bool)
+    extended_mask = np.zeros(len(ball_xy), dtype=bool)
+    
+    # Check density for each point and its neighborhood
+    for i in range(len(ball_xy)):
+        xi, yi = x_indices[i], y_indices[i]
+        
+        # Check if this point is in a high-density bin
+        if hist[xi, yi] >= primary_threshold:
+            primary_mask[i] = True
+            continue
+            
+        # Check neighborhood for secondary threshold
+        x_min, x_max = max(0, xi-neighbor_radius), min(hist.shape[0]-1, xi+neighbor_radius)
+        y_min, y_max = max(0, yi-neighbor_radius), min(hist.shape[1]-1, yi+neighbor_radius)
+        
+        neighborhood = hist[x_min:x_max+1, y_min:y_max+1]
+        if np.any(neighborhood >= primary_threshold) and hist[xi, yi] >= secondary_threshold:
+            extended_mask[i] = True
+    
+    # Combine masks for complete filtering
+    remove_mask = primary_mask | extended_mask
+    
+    # # Visualize before and after
+    # plt.figure(figsize=(12, 6))
+    
+    # plt.subplot(1, 2, 1)
+    # plt.scatter(ball_xy[:, 1], ball_xy[:, 2], c=ball_xy[:, 0], s=2, cmap='viridis')
+    # plt.scatter(ball_xy[remove_mask, 1], ball_xy[remove_mask, 2], 
+    #            c='red', s=10, alpha=0.5, marker='x')
+    # plt.title(f'Original with Removed Points ({np.sum(remove_mask)} points)')
+    # plt.axis('equal')
+    
+    # plt.subplot(1, 2, 2)
+    # keep_mask = ~remove_mask
+    # plt.scatter(ball_xy[keep_mask, 1], ball_xy[keep_mask, 2], 
+    #            c=ball_xy[keep_mask, 0], s=2, cmap='viridis')
+    # plt.title(f'Filtered ({np.sum(keep_mask)} points)')
+    # plt.axis('equal')
+    
+    # plt.tight_layout()
+    # plt.show()
+    
+    return ball_xy[~remove_mask]
+
+def filter_static_and_multiple_balls(
+    json_path,
+    save_path,
+    field_size=(1060, 660), # Standard football field size in 0.1m units
+    bin_size=(5, 5),        # smaller bins for finer resolution
+    primary_threshold=50, 
+    secondary_threshold=10,
+    neighbor_radius=10,
+    max_speed=120,          # Adjust based on max ball speed in your videos
+    static_threshold=5,     # Minimum movement to not be considered static
+    window_size=7):         # Look back this many frames to check for static patterns
+
     ball_xy = convert_ball_tracking_json_to_numpy(json_path)
-
-    # get the first frame
-    first_frame = ball_xy[ball_xy[:, 0] == np.min(ball_xy[:, 0])]
 
     # sort ball_xy
     ball_xy = ball_xy[np.argsort(ball_xy[:, 0])]
@@ -1046,6 +1327,28 @@ def remove_ball_false_detection(json_path, save_path, field_size=[1060, 660]):
     ball_xy = ball_xy[(ball_xy[:, 1] >= 0) & (ball_xy[:, 1] <= field_size[0])]
     # Filter out elements with y < 0 or y > 660
     ball_xy = ball_xy[(ball_xy[:, 2] >= 0) & (ball_xy[:, 2] <= field_size[1])]
+
+    filtered_ball_xy = remove_detections_near_high_density_region(
+        ball_xy,
+        field_size=field_size,
+        bin_size=bin_size,
+        primary_threshold=primary_threshold,
+        secondary_threshold=secondary_threshold,
+        neighbor_radius=neighbor_radius,
+    )
+
+    filtered_ball_xy = filter_multiple_detections(
+        filtered_ball_xy,
+        max_speed=max_speed,
+        static_threshold=static_threshold,
+        window_size=window_size
+    )
+
+    convert_ball_tracking_numpy_to_json(filtered_ball_xy, save_path)
+
+
+def remove_ball_false_detection(json_path, save_path, field_size=[1060, 660]):
+    ball_xy = convert_ball_tracking_json_to_numpy(json_path)
 
     fs = 30 # frame rate
     Xraw = ball_xy.copy()
@@ -1261,6 +1564,15 @@ def smoothen_ball_tracking(json_path, save_path, field_size=[1060, 660]):
     if i_loop == max_iterations - 1:
         print(f"Reached maximum iterations ({max_iterations}) without convergence")
     
+    ball_xy_smooth = np.column_stack((frames, traj))
+    convert_ball_tracking_numpy_to_json(ball_xy_smooth, save_path)
+
+
+def refine_ball_tracking_with_ransac(json_path, save_path):
+    ball_xy = convert_ball_tracking_json_to_numpy(json_path)
+    traj = ball_xy[:,1:]
+    frames = ball_xy[:,0].astype(np.int16)
+
     all_ins=[]
 
     traj_reg = traj.copy()
@@ -1326,25 +1638,26 @@ def smoothen_ball_tracking(json_path, save_path, field_size=[1060, 660]):
     else:
         all_ins = np.array([])
 
-    fs = 30
-    acc = np.linalg.norm(d2_ball, axis=1)
-    peaks, properties = find_peaks(acc, distance= int(0.8*fs), prominence=10)
+    # fs = 30
+    # acc = np.linalg.norm(d2_ball, axis=1)
+    # peaks, properties = find_peaks(acc, distance= int(0.8*fs), prominence=10)
 
     debs = np.sort(np.array([seg[0] for seg in ins]))
     ends = np.sort(np.array([seg[-1] for seg in ins]))
 
-    peaks_in = []
-    for end, deb in zip(ends[:-1], debs[1:]):
-        in_between = np.logical_and(peaks >= end + 8, peaks <= deb - 8)
-        peaks_in.append(peaks[in_between])
-    new_pts = np.hstack(peaks_in)
+    # peaks_in = []
+    # for end, deb in zip(ends[:-1], debs[1:]):
+    #     in_between = np.logical_and(peaks >= end + 8, peaks <= deb - 8)
+    #     peaks_in.append(peaks[in_between])
+    # new_pts = np.hstack(peaks_in)
+    new_pts = []
 
     vertices = np.hstack((debs, ends, new_pts, [1, frames[-1]]))
     vertices = np.sort(np.unique(vertices)).astype(np.int16)
 
     f = interpolate.interp1d(vertices, traj[vertices-1], axis=0, fill_value='extrapolate')
     ball_radar = f(frames)
-    ball_xy_final = np.column_stack((frames, ball_radar))
+    ball_xy_final = np.column_stack((frames, traj))
     convert_ball_tracking_numpy_to_json(ball_xy_final, save_path)
 
 
@@ -1371,19 +1684,19 @@ def main():
     args = parse_args()
     start = time.time()
 
-    # start with permissive gates; tighten later
-    DETECTOR = dict(
-        window_size=2201,
-        step=450,
-        prominence=2,
-        min_wave_len=0,
+    BALL_DETECTOR = dict(
+        window_size=501,
+        step=250,
+        prominence=7,
+        min_wave_len=10,
         max_wave_len=60,
-        speed_std_factor=None,       # enable later (e.g., 0.5) if needed
-        smooth_window=0, savgol_poly=2,
-        min_steepness=0.1,
-        min_quad_curv=0.9,
-        min_monotonic_ratio=0.5,
-        max_gap_size=30
+        speed_std_factor=0.7,
+        smooth_window=7,
+        savgol_poly=2,
+        min_steepness=0.2,
+        min_quad_curv=0.7,
+        min_monotonic_ratio=0.7,
+        max_gap_size=5
     )
 
     process_merged_tracks(
@@ -1400,7 +1713,7 @@ def main():
         window_size=args.window_size,
         threshold=args.threshold,
         output_name=args.output_name,
-        detector_kwargs=DETECTOR
+        detector_kwargs=BALL_DETECTOR
     )
 
     end = time.time()
