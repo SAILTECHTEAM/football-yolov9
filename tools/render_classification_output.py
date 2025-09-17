@@ -38,7 +38,7 @@ def crop_video_frames(video_path: str, start_frame: int, end_frame: int, output_
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    fourcc = cv2.VideoWriter_fourcc(*'H264')
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -158,7 +158,7 @@ def render_segments_to_images_and_videos(
         # === 🎥 Render Video ===
         height, width, _ = bg_img.shape
         video_path = os.path.join(track_output_dir, f"{track_id}.mp4")
-        writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'H264'), fps, (width, height))
+        writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
 
         for f in range(start_f, end_f + 1):
             frame_img = bg_img.copy()

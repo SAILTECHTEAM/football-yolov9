@@ -27,7 +27,7 @@ from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, smart_inference_mode
 from collections import defaultdict
 from numba import njit
-from tools.homography_matrix import compute_homography, apply_homography_to_point
+from tools.extract_homography_matrix import compute_homography, apply_homography_to_point
 from identify_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
 from utils.ball import BallTracker, BallAnnotator
 
@@ -343,7 +343,7 @@ class TrackJsonlStreamer:
         self.buffer = []
         self.fh = self.out_path.open("w")
 
-    def update(self, tid, frame_idx, bbox, proj_pt):
+    def update(self, frame_idx, bbox, proj_pt):
         # Create a record for this specific frame
         record = {
             "frame_id": frame_idx,
@@ -374,7 +374,6 @@ def run(
         source=ROOT / 'data/images',  # file/dir/URL/glob/screen/0(webcam)
         game_time=[0, 2700, 3600, 6300], # start and end time of first and second half (seconds)
         data=ROOT / 'data/coco.yaml',  # dataset.yaml path
-        clothes_folder_path=ROOT / '',  # path to clothing features
         imgsz=(640, 640),  # inference size (height, width)
         conf_thres=0.25,  # confidence threshold
         iou_thres=0.45,  # NMS IOU threshold
@@ -465,18 +464,18 @@ def run(
     output_json_path = str(Path(save_dir) / "ball_tracking.jsonl")
 
     json_streamer = TrackJsonlStreamer(output_json_path,
-                                    flush_interval=50)  # tune as needed, 50 and 10 for 30 seconds video testing
+                                    flush_interval=500)  # tune as needed, 50 and 10 for 30 seconds video testing
     # # Initialize global dictionary once outside main loop if not already done
     # if 'team_json_records' not in globals():
     #     team_json_records = defaultdict(lambda: {'frame_id': [], 'team_conf': [], 'bbox': []})
 
     if not nosave:
         print(f"🔄 Saving video to: {output_path}")
-        out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'H264'), fps, (width, height))
+        out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
     # print(f"🔄 Saving tracking JSON to: {output_json_path}")
     
     # Initialize tracker
-    ball_tracker = BallTracker(buffer_size=20)
+    # ball_tracker = BallTracker(buffer_size=20)
     
     video_frame_idx = 0  # original frame index (matches video)
     processed_frame_idx = 0  # game-time processed frame index
@@ -565,8 +564,11 @@ def run(
 
     pbar = tqdm(total=len(valid_frame_ids), desc="Processing game-time frames", unit="frame", bar_format='{l_bar}{bar:20}{r_bar}{bar:-20b}')
 
+    # cap.set(cv2.CAP_PROP_POS_FRAMES, 157763)  # for testing purpose, start from frame 57080 (note: start time: 317seconds*29.97fps=9500, 9500+47580=57080)
+    # processed_frame_idx = 121380  # for testing purpose, start from frame 47580
     while cap.isOpened():
         ret, high_resolution_image = cap.read()
+        # print(f"🔍 Processing frame {video_frame_idx}")
         if not ret:
             break
 
@@ -607,20 +609,20 @@ def run(
 
         # proprocess predictions
         with dt[3]:
-
+            pass
             # start = time.time()  # reset timer
             # Make a copy of the original 4K image for drawing
             annotated_image = high_resolution_image.copy()
-            ball_dets = np.hstack(
-                (
-                    ball_detections.xyxy,
-                    ball_detections.confidence[:, np.newaxis],
-                    ball_detections.class_id[:, np.newaxis],
-                )
-            )
-            ball_dets = torch.from_numpy(ball_dets).to(device)
-            if ball_dets.shape[0] > 0:
-                ball_dets = remove_boxes_with_numba(ball_dets, area_ratio_thresh=0.6, containment_thresh=0.9)
+            # ball_dets = np.hstack(
+            #     (
+            #         ball_detections.xyxy,
+            #         ball_detections.confidence[:, np.newaxis],
+            #         ball_detections.class_id[:, np.newaxis],
+            #     )
+            # )
+            # ball_dets = torch.from_numpy(ball_dets).to(device)
+            # if ball_dets.shape[0] > 0:
+            #     ball_dets = remove_boxes_with_numba(ball_dets, area_ratio_thresh=0.6, containment_thresh=0.9)
 
         with dt[4]:
             # the shape of final is [N, 6] where N is the number of detections, the 6 columns are [x1, y1, x2, y2, conf, cls]
@@ -633,8 +635,15 @@ def run(
             # person_dets_np = person_dets[:, :5].cpu().numpy() if person_dets.numel() else np.empty((0, 5))
             # ball_dets_np = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
 
-            ball_dets = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
-            online_balls = ball_tracker.update(ball_dets)
+            # ball_dets = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
+            # ball_detections = ball_tracker.update(ball_detections)
+            online_balls = np.hstack(
+                (
+                    ball_detections.xyxy,
+                    ball_detections.confidence[:, np.newaxis],
+                    ball_detections.class_id[:, np.newaxis],
+                )
+            )
 
             # online_persons = person_tracker.update(person_dets_np, [height, width], [height, width])
             # online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
@@ -685,7 +694,7 @@ def run(
                 bbox_out = [int(x1), int(y1), int(x2), int(y2), float(conf)]
 
                 # ⭐ update the streamer
-                json_streamer.update(None, processed_frame_idx, bbox_out, {}, projected_position) # Currently put 2 placeholders first, later change the json format for saving
+                json_streamer.update(processed_frame_idx, bbox_out, projected_position)
 
         # save json every N frames
         with dt[6]:

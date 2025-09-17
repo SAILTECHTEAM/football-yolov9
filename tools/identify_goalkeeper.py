@@ -329,7 +329,7 @@ def run(image, histogram_save_path):
     goalkeeper_hist_from_image = extract_color_histogram_with_specific_background_color(goalkeeper_clothe_image)
     
     # Plot the histogram
-    # plot_hsv_histogram(goalkeeper_hist_from_image, bins=tuple(args.bins))
+    plot_hsv_histogram(goalkeeper_hist_from_image)
     
     # Save the histogram
     save_histogram(goalkeeper_hist_from_image, histogram_save_path)

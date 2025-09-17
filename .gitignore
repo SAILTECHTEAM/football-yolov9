@@ -10,3 +10,4 @@ runs/*
 *.json
 *.docx
 *.npz
+weight/*

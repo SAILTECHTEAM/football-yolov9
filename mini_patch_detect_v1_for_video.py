@@ -27,7 +27,7 @@ from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, smart_inference_mode
 from collections import defaultdict
 from numba import njit
-from tools.homography_matrix import compute_homography, apply_homography_to_point
+from tools.extract_homography_matrix import compute_homography, apply_homography_to_point
 from identify_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
 
 def is_bbox_anomalous(curr_bbox, prev_bbox, height_thresh_ratio=0.5):

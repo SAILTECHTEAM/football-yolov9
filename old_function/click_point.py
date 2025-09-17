@@ -37,4 +37,4 @@ def click_points_on_video(video_path):
     return points
 
 if __name__ == "__main__":
-    points = click_points_on_video("data/video/test_sample/4k_football_test.mov")
+    points = click_points_on_video("../runs/detect/demo_video/clips/0025/GX010025_clip_001.mp4")

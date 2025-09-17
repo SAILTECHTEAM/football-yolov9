@@ -23,3 +23,133 @@ cd tools
 python render_specific_period.py
 ```
 
+## Goalkeeper Pipeline
+
+🧤 Goalkeeper Behavior Classification Pipeline
+
+This pipeline extracts goalkeeper clips, tracks players and the ball, and classifies goalkeeper behaviors using homography and radar speed data.
+
+
+Prepare Input Videos
+
+Select all clips of the goalkeeper (e.g., first half or second half).
+
+⚠️ GoPro automatically splits recordings into multiple clips (GX010025.mp4, GX020025.mp4, …). Put all clips belonging to the same session into a single folder.
+
+1️⃣ Compute Homography Matrix
+
+Before running detection, compute the homography matrix that maps video coordinates to real-world goal coordinates.
+
+python3 compute_homography.py \
+  --src "86,242 1658,258 1644,766 100,771" \
+  --dst "0,0 640,0 640,213 0,213" \
+  --out ./runs/detect/demo_video/homography_matrix.npy
+
+This will print and save a file like:
+
+Homography Matrix:
+ [[ 2.45e+00 -1.20e-02 -2.11e+02]
+  [ 2.13e-02  1.60e+00 -3.50e+02]
+  [ 2.70e-05 -1.20e-05  1.00e+00]]
+Saved matrix to ./runs/detect/demo_video/homography_matrix.npy
+
+2️⃣ Detect Goal Clips
+
+Run detection on all goalkeeper video clips (e.g., GoPro splits them into GX010025, GX020025, etc.).
+The script will filter goal clips and output detection results in JSONL format.
+
+python3 detect_goal_v2.py \
+  --weights "./weight/yolov9-s-converted.pt" \
+  --source "./data/video/GX010025_clips/" \
+  --name "demo_video" \
+  --nosave \
+  --radar_data_path ./data/excel/PR_20250208_1739_session.csv \
+  --homography_path ./runs/detect/demo_video/homography_matrix.npy
+
+3️⃣ Track Players and Ball
+
+Next, run detections_to_tracks_and_scores.py on the folder of detection JSONLs.
+
+Uses ByteTrack to track all detected players.
+
+Tracks the ball by nearest detection (fused track).
+
+Assigns team scores using goalkeeper histogram .npy.
+
+Outputs:
+
+xxxxx_clip_00x.cls_0.tracks.jsonl → tracked players (with skeleton + team score).
+
+xxxxx_clip_00x.cls_32.tracks.jsonl → tracked ball.
+
+python3 detections_to_tracks_and_scores.py \
+  --clips-root ./runs/detect/demo_video/clips/0025/ \
+  --hist ./data/histograms/gk01.npy
+
+4️⃣ Render Tracks on Video
+
+Use render_track_on_video.py to visualize results.
+
+Draws skeletons on the goalkeeper.
+
+Draws bounding boxes for other players and the ball.
+
+Works with a root folder containing all clips and JSONLs, or a single video + its JSONLs.
+
+Example:
+
+python3 render_track_on_video.py \
+  --root ./runs/detect/demo_video/clips/0025/
+
+5️⃣ Classify Goalkeeper Behaviors
+
+Finally, classify goalkeeper behaviors using the tracks, radar speed, and homography matrix.
+The script processes all clips in a folder and prints tags or saves per-clip JSON results.
+
+python3 analyze_goalkeeper_behavior.py \
+  --root ./runs/detect/demo_video/clips/0025/ \
+  --speeds 30,31,32,33,34,35 \
+  --out-dir ./runs/detect/demo_video/analysis \
+  --homography ./runs/detect/demo_video/homography_matrix.npy
+
+
+Output example (XXX_clip_001.analysis.json):
+
+{
+  "warped": true,
+  "gk_tid": 1,
+  "ball_tid": -1,
+  "fps": 29.97,
+  "ball_speed": 30.0,
+  "speed_units": "km/h",
+  "tags": [
+    0
+  ],
+  "clip_id": "GX010025_clip_001",
+  "people_tracks_jsonl": "runs/detect/demo_video/clips/0025/GX010025_clip_001.cls_0.tracks.jsonl",
+  "ball_tracks_jsonl": "runs/detect/demo_video/clips/0025/GX010025_clip_001.cls_32.tracks.jsonl"
+}
+
+
+    Classifies goalkeeper behavior for three cases:
+    - Class 0 : No any bellow class detected.
+    - Class 1 & 2 & 11: Ball is far from skeleton, and goalkeeper's movement is limited.
+    - Class 3: Goalkeeper's last 5-frame average center is farther from the ball than the first 5-frame average center.
+    - Class 4 & 12 : Ball above the skeleton ear point but low or not jump to catch the ball.
+    - Class 5: Ball above the skeleton ear point but low or not raise elbow above ear to catch the ball.
+    - Class 6: Elbow angle is below the threshold (degrees) when the ball is in the shoulder-centered area.
+    - Class 7: Elbow angle is decreasing over time when the ball is in the shoulder-centered area.
+    - Class 8: Ball speed is below the threshold (km/h).
+    - Class 9: low speed & ball is in the shoulder-centered area.
+    - Class 10: Ball is within the area formed by skeleton points.
+
+
+👉 Summary of Workflow
+
+Input Clips → detect_goal_v2.py → detections (JSONL)
+
+Detections → detections_to_tracks_and_scores.py → tracks (players + ball)
+
+Tracks → render_track_on_video.py → video with overlays
+
+Tracks + Radar Speeds → analyze_goalkeeper_behavior.py → behavior tags

@@ -85,7 +85,7 @@ def classify_goalkeeper_behavior(
                 ball_upper_mid = [(wx1 + wx2) / 2, wy1]
                 ball_size = (wx2 - wx1) * (wy2 - wy1)
 
-            if detection['cls'] == 0 and detection['score'] > 0:  # Goalkeeper
+            if detection['cls'] == 0 and (detection.get('score') or 0.0) > 0:
                 seen_goalkeeper = True
                 goalkeeper_skeleton = detection['keypoints']
 
