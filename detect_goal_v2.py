@@ -432,7 +432,7 @@ def _scan_pass(
                     # trigger logic
                     if det_result and int(det_result['cls']) == int(ball_cls_id):
                         wx1, wy1, wx2, wy2 = det_result['bbox_warp']
-                        if (wx2 - wx1) >= 70 and (wy2 - wy1) >= 70:
+                        if (wx2 - wx1) >= 22 or (wy2 - wy1) >= 22:
                             triggered = True
 
             if triggered:

@@ -23,8 +23,11 @@ RUN apt-get update && apt-get install -y \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav \
     && rm -rf /var/lib/apt/lists/*
-# # Uninstall opencv-python in the original image if any (no cv2 prebuilt in this image)
-# RUN pip uninstall -y opencv-python opencv-python-headless
+
+RUN apt-get update && apt-get install -y git
+
+# # Uninstall opencv-python in the original image if any
+RUN pip uninstall -y opencv-python opencv-python-headless
 
 # Download and build OpenCV from source
 RUN wget -O opencv.zip https://github.com/opencv/opencv/archive/4.12.0.zip && \
@@ -49,7 +52,18 @@ RUN wget -O opencv.zip https://github.com/opencv/opencv/archive/4.12.0.zip && \
 # Copy requirements file
 COPY requirements.txt .
 
-# # Install Python dependencies
+
+RUN cd .. && \
+    git clone https://github.com/open-mmlab/mmcv.git && \
+    cd mmcv && \
+    git checkout v1.3.9 && \
+    pip install -e . && \
+    cd .. && \
+    git clone https://github.com/ViTAE-Transformer/ViTPose.git && \
+    cd ViTPose && \
+    pip install -v -e .
+
+# Install Python dependencies
 RUN pip install -r requirements.txt
 
 # Set default command to launch interactive bash shell

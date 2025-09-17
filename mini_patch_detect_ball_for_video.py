@@ -28,7 +28,7 @@ from utils.torch_utils import select_device, smart_inference_mode
 from collections import defaultdict
 from numba import njit
 from tools.extract_homography_matrix import compute_homography, apply_homography_to_point
-from identify_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
+from tools.identify_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
 from utils.ball import BallTracker, BallAnnotator
 
 
@@ -481,7 +481,7 @@ def run(
     processed_frame_idx = 0  # game-time processed frame index
     bs = 1  # batch_size
 
-    # Create slicer callback dynamically to access the model, for sv.InferenceSlicer()
+    # Create slicer callback dynamically to access the model, for sv.InferenceSlicer() minipatch processing 
     def slicer_callback(image_slice: np.ndarray):
         with torch.no_grad():
             h, w = image_slice.shape[:2]
@@ -585,58 +585,20 @@ def run(
 
         # print(f"🔍 Processing frame {processed_frame_idx}")
 
-        # images, offsets = get_image_patches(high_resolution_image, crop_size=imgsz[0], overlap=0.3)
 
-        seen, windows, dt = 0, [], [Profile() for _ in range(8)]
-        # for path, im, im0s, vid_cap, s in dataset:
-        with dt[0]:
-
-            # batch = preprocess_images(images, device, fp16=model.fp16)
-            pass
+        seen, windows, dt = 0, [], [Profile() for _ in range(5)]  # profiling times
 
         # Inference
-        with dt[1]:
+        with dt[0]:
             ball_detections = slicer(high_resolution_image).with_nms(threshold=nms_threshold)
             # pred = model(batch, augment=augment)
             # print("Predictions before NMS:", len(pred)) # 2
             # print(len(pred[0])) # 2
             # print(pred[0][0].shape) # torch.Size([32, 84, 8400])
-
-        # NMS
-        with dt[2]:
-            pass
-            # pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
-
-        # proprocess predictions
-        with dt[3]:
-            pass
-            # start = time.time()  # reset timer
-            # Make a copy of the original 4K image for drawing
             annotated_image = high_resolution_image.copy()
-            # ball_dets = np.hstack(
-            #     (
-            #         ball_detections.xyxy,
-            #         ball_detections.confidence[:, np.newaxis],
-            #         ball_detections.class_id[:, np.newaxis],
-            #     )
-            # )
-            # ball_dets = torch.from_numpy(ball_dets).to(device)
-            # if ball_dets.shape[0] > 0:
-            #     ball_dets = remove_boxes_with_numba(ball_dets, area_ratio_thresh=0.6, containment_thresh=0.9)
 
-        with dt[4]:
-            # the shape of final is [N, 6] where N is the number of detections, the 6 columns are [x1, y1, x2, y2, conf, cls]
-            # print("Final detections after global NMS & remove enclosed boxes:", final.shape if isinstance(final, torch.Tensor) else len(final))
-            # Filter by class
-            # person_dets = final[final[:, 5] == 0]  # class 0 for person
-            # ball_dets = final[final[:, 5] == 32]   # example class id for ball (change if needed)
-            # person_dets = detections[detections.class_id in [1,2,3]] # class ids for player, goalkeeper and referee
-            # ball_dets = detections[detections.class_id == 0] # class id for sports ball
-            # person_dets_np = person_dets[:, :5].cpu().numpy() if person_dets.numel() else np.empty((0, 5))
-            # ball_dets_np = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
-
-            # ball_dets = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
-            # ball_detections = ball_tracker.update(ball_detections)
+        with dt[1]:
+            # The shape of online_balls is [N, 6] where N is the number of detections, the 6 columns are [x1, y1, x2, y2, conf, cls]
             online_balls = np.hstack(
                 (
                     ball_detections.xyxy,
@@ -645,16 +607,7 @@ def run(
                 )
             )
 
-            # online_persons = person_tracker.update(person_dets_np, [height, width], [height, width])
-            # online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
-            
-            
-            # online_persons = person_tracker.update(person_dets_np, [height, width], [height, width])
-            # online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
-            # print("Online persons after tracking:", len(online_persons))
-            # print("Online ball after tracking:", len(online_balls))
-
-            # Format detections with track ID
+            # Format ball detections
             final_detections = []
             for t in online_balls:
                 tlbr = t[:4]
@@ -683,11 +636,9 @@ def run(
 
             #     final_detections.append((tlbr[0], tlbr[1], tlbr[2], tlbr[3], conf, cls, track_id, projected_position))
 
-        with dt[5]:
+        with dt[2]:
 
             # Update tracking JSON records
-            # Track current feature index to sync with crop detections
-            feature_index = 0
 
             for det in final_detections:
                 x1, y1, x2, y2, conf, cls, projected_position  = det
@@ -697,12 +648,12 @@ def run(
                 json_streamer.update(processed_frame_idx, bbox_out, projected_position)
 
         # save json every N frames
-        with dt[6]:
+        with dt[3]:
             # flush every N frames
             json_streamer.maybe_flush(processed_frame_idx)
 
         # Draw results
-        with dt[7]:
+        with dt[4]:
             if not nosave or view_img:
                 # print("team_scores: ",team_scores, )
                 draw_detections(annotated_image, final_detections, names)
@@ -713,14 +664,12 @@ def run(
         total_time = sum(dt[i].dt for i in range(len(dt)))
         # print(f"Frame {processed_frame_idx} total use: {total_time} (preprocessed: {dt[0].dt:.2f}s, inference: {dt[1].dt:.2f}s, NMS: {dt[2].dt:.2f}s, proprocess: {dt[3].dt:.2f}s, tracking & crop patches: {dt[4].dt:.2f}s, ReID: {dt[5].dt:.2f}s, Json: {dt[6].dt:.2f}s, Draw: {dt[7].dt:.2f}s)")
         pbar.set_postfix({
-            "pre": f"{dt[0].dt:.2f}s",
-            "inf": f"{dt[1].dt:.2f}s",
-            "nms": f"{dt[2].dt:.2f}s",
-            "proc": f"{dt[3].dt:.2f}s",
-            "trk": f"{dt[4].dt:.2f}s",
-            "reid": f"{dt[5].dt:.2f}s",
-            "json": f"{dt[6].dt:.2f}s",
-            "draw": f"{dt[7].dt:.2f}s",
+
+            "inf": f"{dt[0].dt:.2f}s",
+            "trk": f"{dt[1].dt:.2f}s",
+            "reid": f"{dt[2].dt:.2f}s",
+            "json": f"{dt[3].dt:.2f}s",
+            "draw": f"{dt[4].dt:.2f}s",
             "total": f"{total_time:.2f}s"
         })
         pbar.update(1)
@@ -802,4 +751,4 @@ if __name__ == "__main__":
     end_time = time.time()
     print(f"Total execution time(HH:MM:SS): {time.strftime('%H:%M:%S', time.gmtime(end_time - start_time))}")
 # Example usage:
-# python3 mini_patch_detect_ball_for_video.py --source './data/video/test_sample/C0478.MP4' --game-time 317 3085 3982 6809 --img 640 --device 0 --weights './weight/yolov9-s-converted.pt' --name test_4k --classes 0 32 --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave
+# python3 mini_patch_detect_ball_for_video.py --source './data/video/test_sample/C0478.MP4' --game-time 317 3085 3982 6809 --img 640 --device 0 --weights './weight/yolov9-s-converted.pt' --name test_4k_ball_640 --classes 0 --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave

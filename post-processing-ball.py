@@ -26,6 +26,8 @@ from scipy.linalg import expm
 from filterpy.kalman import KalmanFilter
 from filterpy.common import Q_discrete_white_noise
 
+#--- Player tracking specific functions (not yet combined into this script)--#
+
 def assign_team_by_majority_vote(team_conf_list):
     team_count = defaultdict(float)
     for conf in team_conf_list:
@@ -822,99 +824,8 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
     print(f"✅ Relabeled {relabel_count} tracks.")
     return relabel_count
 
-def prepare_background_and_tracks(
-    json_path,
-    image_path,
-    field_size,
-    min_track_length,
-    smoothing_window,
-    polyorder,
-    max_step,
-    max_merge_gap,
-    max_merge_overlap_frames,
-    max_merge_distance,
-    window_size,
-    threshold,
-    detector_kwargs=None
-):
-    # Load and resize background
-    bg_img = cv2.imread(image_path)
-    if bg_img is None:
-        raise FileNotFoundError(f"Failed to load image: {image_path}")
-    bg_img = cv2.resize(bg_img, field_size)
 
-    filter_static_and_multiple_balls(
-        json_path, 
-        json_path.replace('.jsonl', '_filtered.jsonl'),
-    )
-
-    remove_ball_false_detection(
-        json_path.replace('.jsonl', '_filtered.jsonl'),
-        json_path.replace('.jsonl', '_removed.jsonl')
-    )
-
-    smoothen_ball_tracking(
-        json_path.replace('.jsonl', '_removed.jsonl'), 
-        json_path.replace('.jsonl', '_smoothed.jsonl'),
-        field_size
-    )
-
-    convert_ball_tracking_format(
-        json_path.replace('.jsonl', '_smoothed.jsonl'),
-        json_path.replace('.jsonl', '_smoothed_temp.jsonl'),
-    )
-
-    process_jsonl_detect_replace(
-        json_path.replace('.jsonl', '_smoothed_temp.jsonl'),
-        json_path.replace('.jsonl', '_processed.jsonl'),
-        detector_kwargs=detector_kwargs,
-        overwrite_projected=True
-    )
-
-    refine_ball_tracking_with_ransac(
-        json_path.replace('.jsonl', '_processed.jsonl'),
-        json_path.replace('.jsonl', '_refined.jsonl'),
-    )
-
-    convert_ball_tracking_format(
-        json_path.replace('.jsonl', '_refined.jsonl'),
-        json_path.replace('.jsonl', '_final.jsonl'),
-    )
-
-    return bg_img
-
-def process_merged_tracks(
-    json_path,
-    image_path,
-    field_size,
-    min_track_length,
-    smoothing_window,
-    polyorder,
-    max_step,
-    max_merge_gap,
-    max_merge_overlap_frames,
-    max_merge_distance,
-    window_size,
-    threshold,
-    output_name,
-    fps=29.97,
-    detector_kwargs=None
-):
-    if output_name is None:
-        output_name = os.path.splitext(os.path.basename(json_path))[0]
-
-    # output_path_video = f"{output_name}.mp4"
-
-    start = time.time()
-    # Shared logic
-    bg_img = prepare_background_and_tracks(
-        json_path, image_path, field_size,
-        min_track_length, smoothing_window, polyorder, max_step,
-        max_merge_gap, max_merge_overlap_frames, max_merge_distance,
-        window_size, threshold, detector_kwargs
-    )
-    end = time.time()
-    print(f"✅ Processed tracks in {end - start:.2f} seconds")
+#--- Ball tracking specific functions --#
 
 def convert_ball_tracking_format(json_path, output_path, max_frame_gap=10):
     """
@@ -1337,15 +1248,15 @@ def filter_static_and_multiple_balls(
         neighbor_radius=neighbor_radius,
     )
 
-    filtered_ball_xy = filter_multiple_detections(
-        filtered_ball_xy,
-        max_speed=max_speed,
-        static_threshold=static_threshold,
-        window_size=window_size
-    )
+    # filtered_ball_xy = filter_multiple_detections(
+    #     filtered_ball_xy,
+    #     max_speed=max_speed,
+    #     static_threshold=static_threshold,
+    #     window_size=window_size
+    # )
 
     convert_ball_tracking_numpy_to_json(filtered_ball_xy, save_path)
-
+    print(f"Done filtering static and multiple balls.")
 
 def remove_ball_false_detection(json_path, save_path, field_size=[1060, 660]):
     ball_xy = convert_ball_tracking_json_to_numpy(json_path)
@@ -1382,8 +1293,7 @@ def remove_ball_false_detection(json_path, save_path, field_size=[1060, 660]):
     ball_xy_val = np.delete(ball_xy, outs, axis=0)
 
     convert_ball_tracking_numpy_to_json(ball_xy_val, save_path)
-    # print(f"Saved filtered ball tracking data to {save_path}")
-
+    print(f"Done removing false detections.")
 
 def remove_static_clusters(ball_xy, time_window=30, spatial_threshold=10, min_points=5, max_displacement=20):
     """
@@ -1467,11 +1377,9 @@ def remove_static_clusters(ball_xy, time_window=30, spatial_threshold=10, min_po
     # Return the filtered data
     return filtered_ball_xy[keep_mask]
 
-
-def smoothen_ball_tracking(json_path, save_path, field_size=[1060, 660]):
+def smoothen_ball_tracking(json_path, save_path, field_size=[1060, 660], detector_kwargs={}):
     ball_xy = convert_ball_tracking_json_to_numpy(json_path)
 
-    first_frame =  ball_xy[ball_xy[:, 0] == np.min(ball_xy[:, 0])]
     filtered_ball_xy = remove_static_clusters(
         ball_xy, 
         time_window=30,  # Adjust based on your frame rate
@@ -1479,16 +1387,6 @@ def smoothen_ball_tracking(json_path, save_path, field_size=[1060, 660]):
         min_points=5,  # Minimum points to consider a cluster
         max_displacement=10  # Maximum allowed movement within a static cluster
     )
-    # Append the first frame to the filtered data if the first frame is not already included
-    if not np.any(np.all(filtered_ball_xy == first_frame, axis=1)):
-        filtered_ball_xy = np.vstack([first_frame, filtered_ball_xy])
-    # Get the actual frame range from the filtered data
-    min_frame = int(filtered_ball_xy[:, 0].min())
-    max_frame = int(filtered_ball_xy[:, 0].max())
-
-    f = interpolate.interp1d(filtered_ball_xy[:,0], filtered_ball_xy[:,1:], axis=0, fill_value='extrapolate')
-    frames = np.arange(min_frame, max_frame + 1)
-    ball_int = f(frames)
 
     # Kalman Filter setup
     dim_x = 4
@@ -1507,7 +1405,8 @@ def smoothen_ball_tracking(json_path, save_path, field_size=[1060, 660]):
     varQ = 10
     f.Q = Q_discrete_white_noise(dim=dim_x, dt=dt, var=varQ**2)
 
-    zs = ball_int[:,1].copy()
+    frames = filtered_ball_xy[:,0].copy()
+    zs = filtered_ball_xy[:,1].copy()
     f.x = np.zeros((dim_x,1))
     f.x[0,0] = zs[0]
     mu, cov, _, _ = f.batch_filter(zs)
@@ -1516,11 +1415,12 @@ def smoothen_ball_tracking(json_path, save_path, field_size=[1060, 660]):
     traj = xs.squeeze()[:,0]
     deltas = traj - zs
 
-    ball_int_save = ball_int.copy()
     prev_thresholds = np.array([np.inf, np.inf])  # Initialize with large values
     threshold_change_tolerance = 0.05  # 5% change tolerance
     max_iterations = 10  # Safety cap on iterations
 
+    ball_int = filtered_ball_xy[:,1:].copy()
+    print("Starting iterative Kalman filtering and outlier removal...")
     for i_loop in range(max_iterations):
         for i in range(2):
             zs = ball_int[:,i].copy()
@@ -1536,7 +1436,7 @@ def smoothen_ball_tracking(json_path, save_path, field_size=[1060, 660]):
                 traj = np.vstack((traj, xs.squeeze()[:,0])).T
                 d_ball = np.vstack((d_ball, xs.squeeze()[:,1])).T
                 d2_ball = np.vstack((d2_ball, xs.squeeze()[:,2])).T
-                
+
         deltas = np.abs(traj - ball_int)
         thresholds = 5 * np.median(deltas, axis=0)
         
@@ -1565,28 +1465,161 @@ def smoothen_ball_tracking(json_path, save_path, field_size=[1060, 660]):
         print(f"Reached maximum iterations ({max_iterations}) without convergence")
     
     ball_xy_smooth = np.column_stack((frames, traj))
-    convert_ball_tracking_numpy_to_json(ball_xy_smooth, save_path)
+    # Save intermediate smoothed results
+    convert_ball_tracking_numpy_to_json(ball_xy_smooth, json_path.replace('.jsonl', '_smoothed.jsonl'))
 
+    # Convert the intermediate file to suitable format for next function
+    convert_ball_tracking_format(
+        json_path.replace('.jsonl', '_smoothed.jsonl'),
+        json_path.replace('.jsonl', '_smoothed_temp.jsonl'),
+        )
 
-def refine_ball_tracking_with_ransac(json_path, save_path):
-    ball_xy = convert_ball_tracking_json_to_numpy(json_path)
-    traj = ball_xy[:,1:]
-    frames = ball_xy[:,0].astype(np.int16)
+    if not detector_kwargs:
+        detector_kwargs = dict(
+            window_size=501,
+            step=250,
+            prominence=7,
+            min_wave_len=10,
+            max_wave_len=60,
+            speed_std_factor=0.7,
+            smooth_window=7,
+            savgol_poly=2,
+            min_steepness=0.2,
+            min_quad_curv=0.7,
+            min_monotonic_ratio=0.7,
+            max_gap_size=5
+        )
+    
+    # Sharp change detection and correction
+    process_jsonl_detect_replace(
+        json_path.replace('.jsonl', '_smoothed_temp.jsonl'),
+        json_path.replace('.jsonl', '_processed.jsonl'),
+        detector_kwargs=detector_kwargs,
+        overwrite_projected=True
+    )
 
-    all_ins=[]
+    # Retrieve the trajectory after sharp change correction
+    ball_temp = convert_ball_tracking_json_to_numpy(json_path.replace('.jsonl', '_processed.jsonl'))
+    traj = ball_temp[:,1:]
+    frames = ball_temp[:,0]
 
-    traj_reg = traj.copy()
-    reg_frames = frames.copy()
-    ins = []
-    long_seg = True
+    # RANSAC to find linear segments
+    all_ins, ins = process_trajectory_in_chunks(
+        traj, 
+        frames,
+        chunk_size=2000,  # Adjust based on memory and performance
+        overlap=200,      # Ensure we don't miss segments at boundaries
+        segment_threshold=8,
+    )
+
+    # all_ins_indices = np.searchsorted(frames, all_ins)
+    # plt.scatter(traj[:,0], traj[:,1], s=0.2)
+    # plt.scatter(traj[all_ins_indices,0], traj[all_ins_indices,1], s=0.5)
+    # plt.axis('equal')
+    # plt.axis('off')
+    # plt.show()
+
+    fs = 30
+    acc = np.linalg.norm(d2_ball, axis=1)
+    peaks, properties = find_peaks(acc, distance= int(0.8*fs), prominence=10)
+
+    debs = np.sort(np.array([seg[0] for seg in ins]))
+    ends = np.sort(np.array([seg[-1] for seg in ins]))
+
+    peaks += filtered_ball_xy[0][0].astype(int) # adjust to real frame numbers
+    peaks_in = []
+    for end, deb in zip(ends[:-1], debs[1:]):
+        in_between = np.logical_and(peaks >= end + 8, peaks <= deb - 8)
+        peaks_in.append(peaks[in_between])
+    new_pts = np.hstack(peaks_in)
+
+    vertices = np.hstack((debs, ends, new_pts, [1, frames[-1]]))
+    vertices = np.sort(np.unique(vertices)).astype(np.int16)
+    vertices_indices =  np.searchsorted(frames, vertices)
+    f = interpolate.interp1d(vertices, traj[vertices_indices], axis=0, fill_value='extrapolate')
+    ball_radar = f(frames)
+    ball_xy_final = np.column_stack((frames, ball_radar))
+    convert_ball_tracking_numpy_to_json(ball_xy_final, save_path)
+
+def process_trajectory_in_chunks(
+    traj, 
+    frames, 
+    chunk_size=2000, 
+    overlap=200, 
+    segment_threshold=8, 
+):
+    """
+    Process a long trajectory by breaking it into overlapping chunks.
+    
+    Parameters:
+    -----------
+    traj : np.ndarray
+        Array with shape (n, 2) containing x,y coordinates
+    frames : np.ndarray
+        Array with shape (n,) containing frame indices
+    chunk_size : int
+        Number of points to process in each chunk
+    overlap : int
+        Number of points to overlap between consecutive chunks
+    segment_threshold : float
+        Residual threshold for RANSAC
+    
+    Returns:
+    --------
+    np.ndarray
+        Combined array of frame indices where line segments were detected
+    """
+    all_segments = []
+    n_points = len(traj)
+    
+    # Process data in chunks with overlap
+    for start_idx in range(0, n_points, chunk_size - overlap):
+        end_idx = min(start_idx + chunk_size, n_points)
+        
+        # Extract chunk
+        chunk_traj = traj[start_idx:end_idx]
+        chunk_frames = frames[start_idx:end_idx]
+        
+        # print(f"Processing chunk {start_idx}-{end_idx} ({len(chunk_traj)} points)")
+        
+        # Skip if chunk is too small
+        if len(chunk_traj) < 10:  # Minimum size for meaningful processing
+            continue
+            
+        # Process this chunk using your existing algorithm
+        chunk_segments = process_single_chunk(chunk_traj, chunk_frames, 
+                                              segment_threshold)
+        
+        if len(chunk_segments) > 0:
+            # Map segment frames back to original frame indices if needed
+            all_segments.extend(chunk_segments)
+    
+    # Combine and remove duplicates
+    if all_segments:
+        combined = np.concatenate(all_segments)
+        combined = np.unique(combined)
+        return combined, all_segments
+    else:
+        return np.array([]), []
+
+def process_single_chunk(traj_chunk, frames_chunk, segment_threshold=8):
+    """
+    Process a single chunk to find line segments.
+    This is your existing algorithm, adapted to work on a chunk.
+    """
+    chunk_segments = []
+    
+    traj_reg = traj_chunk.copy()
+    reg_frames = frames_chunk.copy()
     i = 0
-    while long_seg and len(traj_reg) > 2:  # Add check for minimum points
-
+    
+    while len(traj_reg) > 2:
         # Check if enough points remain
         if len(traj_reg) < 3:
             break
             
-        reg1 = RANSACRegressor(random_state=i, residual_threshold = 10 )
+        # Try x -> y regression
+        reg1 = RANSACRegressor(random_state=i, residual_threshold=segment_threshold)
         reg1.fit(traj_reg[:,0].reshape(-1,1), traj_reg[:,1])
         frames_in_reg_1 = reg_frames[reg1.inlier_mask_]
         
@@ -1594,12 +1627,14 @@ def refine_ball_tracking_with_ransac(json_path, save_path):
         if len(frames_in_reg_1) == 0:
             break
 
+        # Cluster inliers to find continuous segments
         clustering1 = AgglomerativeClustering(n_clusters=None, linkage='single', 
-                                            distance_threshold=5)
+                                            distance_threshold=3)
         clustering1.fit(frames_in_reg_1.reshape(-1,1))
         labs1, n_in_labs1 = np.unique(clustering1.labels_, return_counts=True)
         
-        reg2 = RANSACRegressor(random_state=i, residual_threshold = 10 )
+        # Try y -> x regression
+        reg2 = RANSACRegressor(random_state=i, residual_threshold=segment_threshold)
         reg2.fit(traj_reg[:,1].reshape(-1,1), traj_reg[:,0])
         frames_in_reg_2 = reg_frames[reg2.inlier_mask_]
         
@@ -1607,61 +1642,150 @@ def refine_ball_tracking_with_ransac(json_path, save_path):
         if len(frames_in_reg_2) == 0:
             break
 
+        # Cluster these inliers
         clustering2 = AgglomerativeClustering(n_clusters=None, linkage='single', 
-                                            distance_threshold=5)
+                                            distance_threshold=3)
         clustering2.fit(frames_in_reg_2.reshape(-1,1))
         labs2, n_in_labs2 = np.unique(clustering2.labels_, return_counts=True)
         
+        # Find maximum segment length
         n_max = max(n_in_labs1.max() if len(n_in_labs1) > 0 else 0, 
                     n_in_labs2.max() if len(n_in_labs2) > 0 else 0)
-        long_seg = n_max > 25
         
-        if long_seg:
-            
-            if (len(n_in_labs1) > 0 and len(n_in_labs2) > 0 and 
-                n_in_labs1.max() > n_in_labs2.max()) or len(n_in_labs2) == 0:
-                new_ins = frames_in_reg_1[clustering1.labels_== np.argmax(n_in_labs1)].astype(np.int16)
-            else:
-                new_ins = frames_in_reg_2[clustering2.labels_== np.argmax(n_in_labs2)].astype(np.int16)
-        
-            ins.append(new_ins)
-            indexes = np.searchsorted(reg_frames, new_ins)
-            reg_frames = np.delete(reg_frames, indexes)
-            traj_reg = np.delete(traj_reg, indexes, axis=0)
-            i += 1
-        else:
+        # Check if any significant segment was found
+        if n_max <= 25:
             break
+        
+        # Select the best segment
+        if (len(n_in_labs1) > 0 and len(n_in_labs2) > 0 and 
+            n_in_labs1.max() > n_in_labs2.max()) or len(n_in_labs2) == 0:
+            new_seg = frames_in_reg_1[clustering1.labels_ == np.argmax(n_in_labs1)].astype(int)
+        else:
+            new_seg = frames_in_reg_2[clustering2.labels_ == np.argmax(n_in_labs2)].astype(int)
+        
+        # Add to results
+        chunk_segments.append(new_seg)
+        
+        # Remove detected segment from the data
+        indexes = np.searchsorted(reg_frames, new_seg)
+        reg_frames = np.delete(reg_frames, indexes)
+        traj_reg = np.delete(traj_reg, indexes, axis=0)
+        i += 1
+    
+    return chunk_segments
 
-    # Make sure we have at least one segment before trying to stack
-    if len(ins) > 0:
-        all_ins = np.hstack(ins)
-    else:
-        all_ins = np.array([])
+# Combine JSONL files of player and ball tracking
+def combine_jsonl_files_streaming(file1_path, file2_path, output_path):
+    """
+    Combines two JSONL files by appending file2 after file1 in a streaming fashion.
+    More memory efficient for large files.
+    """
+    count1 = 0
+    count2 = 0
+    
+    with open(output_path, 'w') as out_file:
+        # Copy contents from file1
+        with open(file1_path, 'r') as f1:
+            for line in f1:
+                if line.strip():  # Skip empty lines
+                    out_file.write(line)
+                    count1 += 1
+        
+        # Append contents from file2
+        with open(file2_path, 'r') as f2:
+            for line in f2:
+                if line.strip():  # Skip empty lines
+                    out_file.write(line)
+                    count2 += 1
+    
+    print(f"Successfully combined files:")
+    print(f"- {file1_path}: {count1} records")
+    print(f"- {file2_path}: {count2} records")
+    print(f"- {output_path}: {count1 + count2} records total")
 
-    # fs = 30
-    # acc = np.linalg.norm(d2_ball, axis=1)
-    # peaks, properties = find_peaks(acc, distance= int(0.8*fs), prominence=10)
+def prepare_background_and_tracks(
+    json_path,
+    image_path,
+    field_size,
+    min_track_length,
+    smoothing_window,
+    polyorder,
+    max_step,
+    max_merge_gap,
+    max_merge_overlap_frames,
+    max_merge_distance,
+    window_size,
+    threshold,
+    detector_kwargs=None
+):
+    # Load and resize background
+    bg_img = cv2.imread(image_path)
+    if bg_img is None:
+        raise FileNotFoundError(f"Failed to load image: {image_path}")
+    bg_img = cv2.resize(bg_img, field_size)
 
-    debs = np.sort(np.array([seg[0] for seg in ins]))
-    ends = np.sort(np.array([seg[-1] for seg in ins]))
+    filter_static_and_multiple_balls(
+        json_path, 
+        json_path.replace('.jsonl', '_filtered.jsonl'),
+    )
 
-    # peaks_in = []
-    # for end, deb in zip(ends[:-1], debs[1:]):
-    #     in_between = np.logical_and(peaks >= end + 8, peaks <= deb - 8)
-    #     peaks_in.append(peaks[in_between])
-    # new_pts = np.hstack(peaks_in)
-    new_pts = []
+    remove_ball_false_detection(
+        json_path.replace('.jsonl', '_filtered.jsonl'),
+        json_path.replace('.jsonl', '_removed.jsonl')
+    )
 
-    vertices = np.hstack((debs, ends, new_pts, [1, frames[-1]]))
-    vertices = np.sort(np.unique(vertices)).astype(np.int16)
+    smoothen_ball_tracking(
+        json_path.replace('.jsonl', '_removed.jsonl'), 
+        json_path.replace('.jsonl', '_smoothed.jsonl'),
+        field_size,
+        detector_kwargs=detector_kwargs,
+    )
 
-    f = interpolate.interp1d(vertices, traj[vertices-1], axis=0, fill_value='extrapolate')
-    ball_radar = f(frames)
-    ball_xy_final = np.column_stack((frames, traj))
-    convert_ball_tracking_numpy_to_json(ball_xy_final, save_path)
+    convert_ball_tracking_format(
+        json_path.replace('.jsonl', '_smoothed.jsonl'),
+        json_path.replace('.jsonl', '_final.jsonl'),
+    )
 
+    combine_jsonl_files_streaming(
+        file1_path=json_path.replace('ball_tracking.jsonl', 'team_tracking_final.jsonl'),
+        file2_path=json_path.replace('.jsonl', '_final.jsonl'),
+        output_path=json_path.replace('ball_tracking.jsonl', 'team_ball_tracking_final.jsonl')
+    )
 
+    return bg_img
 
+def process_merged_tracks(
+    json_path,
+    image_path,
+    field_size,
+    min_track_length,
+    smoothing_window,
+    polyorder,
+    max_step,
+    max_merge_gap,
+    max_merge_overlap_frames,
+    max_merge_distance,
+    window_size,
+    threshold,
+    output_name,
+    fps=29.97,
+    detector_kwargs=None
+):
+    if output_name is None:
+        output_name = os.path.splitext(os.path.basename(json_path))[0]
+
+    # output_path_video = f"{output_name}.mp4"
+
+    start = time.time()
+    # Shared logic
+    bg_img = prepare_background_and_tracks(
+        json_path, image_path, field_size,
+        min_track_length, smoothing_window, polyorder, max_step,
+        max_merge_gap, max_merge_overlap_frames, max_merge_distance,
+        window_size, threshold, detector_kwargs
+    )
+    end = time.time()
+    print(f"✅ Processed tracks in {end - start:.2f} seconds")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process merged tracks from tracking JSONL")

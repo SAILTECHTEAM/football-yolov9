@@ -1,20 +1,26 @@
-# Example usage:
-# python3 mini_patch_detect_v1_for_video.py --source './data/video/test_sample/C0478.MP4' --game-time 317 3085 3982 6809 --img 640 --device 0 --weights './weight/yolov9-s-converted.pt' --name test_4k --classes 0 32 --clothes-folder-path ./data/histograms/0525/ --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave
-
-# yolov9-s weights trained on football player detection dataset (not used as pretrained coco weight is better)
-
-# python3 mini_patch_detect_v1_for_video.py --source '../videos/period_57873_58952_cam0.mp4'  --img 1280 --device 0 --weights '../checkpoint/yolov9-s-converted_ball_detection_1280_20250822.pt' --name test_4k  --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave
-# output: Processing game-time frames:  13%|▉      | 4/30 [00:07<00:45,  1.73s/frame, pre=0.00s, inf=1.57s, nms=0.00s, proc=0.01s, trk=0.00s, reid=0.00s, json=0.00s, draw=0.06s, total=1.64s (time calculated according to dt[i])
-
 # Inference on player detection and tracking
-python3 mini_patch_detect_v1_for_video_original.py --source './data/video/test_sample/period_57873_58952_cam0.mp4' --game-time 0 0 0 36 --img 640 --device 0 --weights './weight/yolov9-s-converted.pt' --name test_4k_player_640 --classes 0 --clothes-folder-path ./data/histograms/0525/ --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave
+python3 mini_patch_detect_v1_for_video.py --source './data/video/test_sample/period_57873_58952_cam0.mp4' --game-time 0 0 0 36 --img 640 --device 0 --weights './weight/yolov9-s-converted.pt' --name test_4k_player_640 --classes 0 --clothes-folder-path ./data/histograms/0525/ --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave
 
 # Run post-processing on player tracks
-python3 post-processing.py --json-path "./runs/detect/test_4k_player_640_numba_20250829_final/team_tracking.jsonl" --image-path "./data/images/mongkok_football_field.png" --output-name './runs/detect/test_4k_player_640_numba_20250829_final/team_tracking_output'
+python3 post-processing.py --json-path "./runs/detect/test_4k_player_640/team_tracking.jsonl" --image-path "./data/images/mongkok_football_field.png" --output-name './runs/detect/test_4k_player_640/team_tracking_output'
 
-python3 render_specific_time_period.py
-### Changelog
-# person_tracker sv.ByteTrack
-# sv.InferenceSlicer to replace get_images_patches, crop_image_with_overlap, simple_global_nms 
-# (differences in patches: sv.InferenceSlicer gets the image patches on the edges by padding to the slice_size)
-# (original method collects the patches near the edge by adjusting the last offest to fit the edge of the high resolution image)
+# Inference on ball detection
+python3 mini_patch_detect_ball_for_video.py --source './data/video/test_sample/C0478.MP4' --game-time 317 3085 3982 6809 --img 640 --device 0 --weights './weight/yolov9-s-converted_ball_detection_1280_20250822.pt' --name test_4k_ball_640_whole_match_20250905 --classes 0 --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave
+
+# Run post-processing on ball tracks
+python3 post-processing-ball.py --json-path "./runs/detect/test_4k_ball_640/ball_tracking.jsonl" --image-path "./data/images/mongkok_football_field.png" --output-name './runs/detect/test_4k_ball_640/ball_tracking_output'
+
+# Render classification output
+python render_classification_output.py --jsonl-path "../runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" --video-paths '../data/video/test_sample/C0478.MP4' --video-paths ../data/video/test_sample/C0478.MP4 --bg-img-path ../data/images/mongkok_football_field.png --output-dir "../runs/detect/test_4k_player_640_numba_20250829_final/suspicious-output" --game-time 0 0 0 36
+
+# Goalkeper
+python3 detect_goal_v2.py --weights "./weight/yolov9-s-converted.pt" --source "./data/video/GX010025_clips/" --name "demo_video" --nosave --radar_data_path ./data/excel/PR_20250208_1739_session.csv --homography_path ./runs/detect/demo_video/homography_matrix.npy
+
+python3 detections_to_tracks_and_scores.py --clips-root ./runs/detect/demo_video/clips/0025/ --hist ./data/histograms/gk01.npy
+
+python3 render_track_on_video.py --root ./runs/detect/demo_video_22cm/clips/0025/
+
+python3 analyze_goalkeeper_behavior.py --root ./runs/detect/demo_video_22cm/clips/0025/ --speeds 30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45 --out-dir ./runs/detect/demo_video_22cm/analysis --homography ./runs/detect/demo_video_22cm/homography_matrix.npy
+
+# Render specific time period (For checking tracking quality in specific time period)
+# python3 render_specific_time_period.py

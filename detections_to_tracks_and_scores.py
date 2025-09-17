@@ -12,7 +12,10 @@ from collections import defaultdict, OrderedDict
 from multiprocessing import Pool, cpu_count
 from tools.identify_goalkeeper import extract_color_histogram_with_specific_background_color, extract_color_histogram_from_rotated_skelton, compare_histograms, load_histogram
 # ByteTrack
-from ByteTrack.yolox.tracker.byte_tracker import BYTETracker
+import supervision as sv
+
+from mmpose.apis import init_pose_model, inference_top_down_pose_model, vis_pose_result
+from mmpose.datasets import DatasetInfo
 
 # limit threaded libs to keep CPU sane
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -24,9 +27,19 @@ cv2.setNumThreads(1)
 
 def load_pose_model():
     """
-    Load the OnePose model (or other pose model).
+    Load the ViTPose model instead of OnePose.
     """
-    pose_model = onepose.create_model('ViTPose_huge_simple_coco').to("cuda")
+    # Configuration paths for ViTPose
+    pose_config = '/ViTPose/configs/body/2d_kpt_sview_rgb_img/topdown_heatmap/coco/ViTPose_huge_simple_coco_256x192.py'
+    pose_checkpoint = '/ViTPose/checkpoints/vitpose-h-simple.pth'
+    
+    # Initialize the pose model
+    pose_model = init_pose_model(
+        pose_config, 
+        pose_checkpoint, 
+        device='cuda'
+    )
+    
     return pose_model
 
 
@@ -36,31 +49,50 @@ def handle_pose_estimation(
     pose_model
 ):
     """
-    Crops the region for a person and runs pose estimation (OnePose).
+    Crops the region for a person and runs pose estimation using ViTPose.
     Returns:
-      keypoints_dict: the original dictionary from the model (with 'points' and 'confidence')
-      clamped_keypoints: final coords (warped if perspective) for visualization.
+      keypoints_dict: the original dictionary with 'points' and 'confidence'
+      clamped_keypoints: final coords for visualization.
     """
-    x1_safe, y1_safe = max(0, x1), max(0, y1)
-    x2_safe = min(im0s.shape[1], x2)
-    y2_safe = min(im0s.shape[0], y2)
+    x1_safe, y1_safe = max(0, int(x1)), max(0, int(y1))
+    x2_safe = min(im0s.shape[1], int(x2))
+    y2_safe = min(im0s.shape[0], int(y2))
 
     # If bounding box too small, skip
     if (x2_safe - x1_safe) < 10 or (y2_safe - y1_safe) < 10:
         return None, []
 
-    cropped_img = im0s[y1_safe:y2_safe, x1_safe:x2_safe]
-    keypoints_dict = pose_model(cropped_img)  # must return { 'points': Nx2, 'confidence': Nx1 }
-    points = keypoints_dict['points']         # shape: Nx2
-    confidences = keypoints_dict['confidence']  # shape: Nx1
-
-    # Shift from local crop to original image coords
-    for idx in range(len(points)):
-        points[idx][0] += x1_safe
-        points[idx][1] += y1_safe
-
-
-    # Return the original coords
+    # Prepare person detection result for ViTPose format
+    person_result = [{'bbox': [x1_safe, y1_safe, x2_safe, y2_safe, 1.0]}]
+    
+    # Get dataset info
+    dataset_info = pose_model.cfg.data.test.dataset_info
+    dataset_info = DatasetInfo(dataset_info)
+    
+    # Run inference
+    pose_results, _ = inference_top_down_pose_model(
+        pose_model,
+        im0s,
+        person_result,
+        bbox_thr=0.0,  # Already filtered
+        format='xyxy',
+        dataset_info=dataset_info
+    )
+    
+    if not pose_results:
+        return None, []
+    
+    # Extract keypoints and scores from ViTPose format
+    keypoints = pose_results[0]['keypoints']  # shape: Nx3 (x, y, score)
+    points = keypoints[:, :2]  # shape: Nx2
+    confidences = keypoints[:, 2]  # shape: Nx1
+    
+    # Create return structure to match expected format
+    keypoints_dict = {
+        'points': points,
+        'confidence': confidences
+    }
+    
     return keypoints_dict, points
 
 # ------------ ffprobe helpers ------------
@@ -445,7 +477,7 @@ def process_single_detection(
             x1, y1, x2, y2,
             pose_model
         )
-        if keypoints_dict and warped_points is not None:
+        if keypoints_dict and len(warped_points) > 0:
             detection_result['keypoints'] = warped_points
             detection_result['keypoints_conf'] = keypoints_dict['confidence']
 
@@ -544,13 +576,12 @@ def process_one_file(jsonl_path: Path, args) -> str:
 
         # normal tracker + writer for non-ball classes
         tr_args = SimpleNamespace(
-            track_thresh=args.track_thresh,
-            track_buffer=args.track_buffer,
-            match_thresh=args.match_thresh,
-            mot20=False,
-            fps=fps
+            track_activation_threshold=args.track_thresh,
+            lost_track_buffer=args.track_buffer,
+            minimum_matching_threshold=args.match_thresh,
+            frame_rate=fps
         )
-        trackers[(ci,cn)] = BYTETracker(tr_args, frame_rate=fps)
+        trackers[(ci,cn)] = sv.ByteTrack(**vars(tr_args))
         writers[(ci,cn)]  = TrackJsonlStreamer(
             out_path, meta_head,
             flush_interval=args.flush_interval,
@@ -593,18 +624,12 @@ def process_one_file(jsonl_path: Path, args) -> str:
             boxes, scores, det_list = select_class_dets(dets, ci, cn, args.det_conf)
 
             if len(det_list) == 0:
-                try:
-                    tracker.update(np.zeros((0,5), np.float32), imsz, imsz)
-                except ZeroDivisionError:
-                    tracker.update(np.zeros((0,5), np.float32), [1,1], [1,1])
+                tracker.update_with_tensors(np.zeros((0,5), np.float32))
                 writers[(ci,cn)].maybe_flush(cf)
                 continue
 
             det_np = np.concatenate([boxes, scores[:,None]], axis=1)
-            try:
-                online = tracker.update(det_np, imsz, imsz)
-            except ZeroDivisionError:
-                online = tracker.update(det_np, [1,1], [1,1])
+            online = tracker.update_with_tensors(det_np)
 
             if not online:
                 writers[(ci,cn)].maybe_flush(cf)
@@ -621,7 +646,7 @@ def process_one_file(jsonl_path: Path, args) -> str:
                     arr = np.asarray(t, np.float32).ravel()
                     box = arr[:4]
                 tlbrs.append(box)
-                tids.append(int(t.track_id))
+                tids.append(int(t.external_track_id))
             tlbrs = np.stack(tlbrs, axis=0) if len(tlbrs) else np.zeros((0,4), np.float32)
 
             # associate to pick conf + proj
