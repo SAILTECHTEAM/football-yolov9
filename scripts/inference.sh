@@ -24,3 +24,5 @@ python3 analyze_goalkeeper_behavior.py --root ./runs/detect/demo_video_22cm/clip
 
 # Render specific time period (For checking tracking quality in specific time period)
 # python3 render_specific_time_period.py
+
+# Side note: second half starts at around frame 82960

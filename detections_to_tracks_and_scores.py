@@ -2,8 +2,6 @@
 import os, json, glob, argparse, math, subprocess, gc
 import numpy as np
 import cv2
-# pose model (OnePose)
-import onepose
 import joblib
 
 from pathlib import Path

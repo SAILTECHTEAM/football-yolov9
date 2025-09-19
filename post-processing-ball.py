@@ -1259,6 +1259,22 @@ def filter_static_and_multiple_balls(
     print(f"Done filtering static and multiple balls.")
 
 def remove_ball_false_detection(json_path, save_path, field_size=[1060, 660]):
+    """
+    Remove false ball detections using Agglomerative Clustering.
+
+    Parameters:
+    -----------
+    json_path : str
+        Path to the input JSONL file containing ball tracking data.
+    save_path : str
+        Path to save the filtered JSONL file.
+    field_size : list
+        Size of the football field [width, height]
+
+    Returns:
+    --------
+    None
+    """
     ball_xy = convert_ball_tracking_json_to_numpy(json_path)
 
     fs = 30 # frame rate
@@ -1281,7 +1297,7 @@ def remove_ball_false_detection(json_path, save_path, field_size=[1060, 660]):
     for lab, n_in in zip(labs, n_in_labs):
         if n_in < 3:
             outs = np.append(outs, np.where(clustering.labels_== lab)[0])
-    outs = np.sort(outs).astype(np.int16)
+    outs = np.sort(outs).astype(int)
 
     # plt.scatter(ball_xy[:,1], ball_xy[:,2], s=0.5)
     # plt.plot(ball_xy[outs,1], ball_xy[outs,2],'r.')
@@ -1534,11 +1550,12 @@ def smoothen_ball_tracking(json_path, save_path, field_size=[1060, 660], detecto
     new_pts = np.hstack(peaks_in)
 
     vertices = np.hstack((debs, ends, new_pts, [1, frames[-1]]))
-    vertices = np.sort(np.unique(vertices)).astype(np.int16)
+    vertices = np.sort(np.unique(vertices)).astype(int)
     vertices_indices =  np.searchsorted(frames, vertices)
     f = interpolate.interp1d(vertices, traj[vertices_indices], axis=0, fill_value='extrapolate')
-    ball_radar = f(frames)
-    ball_xy_final = np.column_stack((frames, ball_radar))
+    all_frames = np.arange(frames[0], frames[-1]+1)
+    ball_radar = f(all_frames)
+    ball_xy_final = np.column_stack((all_frames, ball_radar))
     convert_ball_tracking_numpy_to_json(ball_xy_final, save_path)
 
 def process_trajectory_in_chunks(

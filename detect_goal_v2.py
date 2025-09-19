@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 import torch
 import numpy as np
-import onepose
 import subprocess
 import re
 import json

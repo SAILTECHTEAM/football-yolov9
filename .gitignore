@@ -8,6 +8,7 @@ runs/*
 *.npy
 *.png
 *.json
+*.jsonl
 *.docx
 *.npz
 weight/*

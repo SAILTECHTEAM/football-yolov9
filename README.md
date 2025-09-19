@@ -13,7 +13,12 @@ We use the codes from [WongKinYu/yolov9](https://github.com/WongKinYiu/yolov9/tr
 ## Whole Match Pipeline
 This pipeline detects players and ball in the field, postprocess player tracks and ball tracks, and analyse players behaviour based on tracking data.
 
-### Inference
+We include a script for the whole match pipeline. See `scripts/inference.sh` for more details.
+```{shell}
+bash scripts/inference.sh
+```
+
+### 1️⃣ Inference
 Run detection on the whole match clip, and output detection results in JSONL format. Currently 1 JSONL file for player detection results, and 1 JSONL file for ball detection results.
 
 ```{shell}
@@ -24,7 +29,7 @@ python3 mini_patch_detect_v1_for_video.py \
 --img 640 \
 --device 0 \
 --weights './weight/yolov9-s-converted.pt' \
---name test_4k \
+--name test_4k_player_640 \
 --classes 0 32 \
 --clothes-folder-path ./data/histograms/0525/ \
 --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 \
@@ -46,13 +51,9 @@ python3 mini_patch_detect_ball_for_video.py \
 --homography-dst-points 530 0 530 660 1060 660 1060 0 \
 --nosave
 ```
-See `scripts/inference.sh` for more details
-```{shell}
-bash scripts/inference.sh
-```
 
-### Postprocess of Tracks
-The raw detection results are processed in `post-processing.py` and `post-processing-ball.py` sequentially. Both scripts would output several intermediate JSONL files. The final JSONL file to use is named `team_ball_tracking_final.jsonl`.
+### 2️⃣ Postprocess of Tracks
+The raw detection results are processed in `post-processing.py` and `post-processing-ball.py` sequentially. Both scripts would output several intermediate JSONL files. The final JSONL file to use is named `team_tracking_final.jsonl`.
 
 ```{shell}
 python3 post-processing.py \
@@ -67,8 +68,15 @@ python3 post-processing-ball.py \
 --image-path "./data/images/mongkok_football_field.png" \
 --output-name './runs/detect/test_4k_ball_640/ball_tracking_output'
 ```
+After that run this command to combine both JSONL files into one. The final JSONL file to use is named `team_tracking_final.jsonl`.
+```{shell}
+python combine_team_ball_tracks.py \
+--player-jsonl "./runs/detect/test_4k_player_640/team_tracking_final.jsonl" \
+--ball-jsonl "./runs/detect/test_4k_ball_640/ball_tracking_final.jsonl" \
+--output-jsonl "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl"
+```
 
-### Analyse and Visualise Detection and Tracking Result
+### 3️⃣ Analyse and Visualise Detection and Tracking Result
 Prepare your jsonl file from previous step and run this command:
 ```{shell}
 cd tools
@@ -76,10 +84,43 @@ python render_classification_output.py \
 --jsonl-path "../runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" \
 --video-paths '../data/video/test_sample/C0478.MP4' \
 --bg-img-path ../data/images/mongkok_football_field.png \
---output-dir "../runs/detect/test_4k_player_640_numba_20250829_final/suspicious-output" \
+--output-dir "../runs/detect/test_4k_player_640/suspicious-output" \
 --game-time 317 3085 3982 6809
 ```
 The output contains a radar view image, a radar view video of the suspicious player plotted on 2D field, and the footage of the specific time period of suspicious action. Each suspicious output is stored in a folder named after the track id of the player (e.g. 16a).
+
+```
+Analysis of the following suspicious behaviours:
+1. Player 
+
+```
+
+### Summary
+- Input Clips → mini_patch_detect_v1_for_video.py → player detections and tracks (JSONL)
+- Player detections and tracks → post-processing.py → refined player detections and tracks (JSONL)
+
+- Input Clips → mini_patch_detect_ball_for_video.py → ball detections (JSONL)
+- Ball detections → post-processing.py → refined ball detections and tracks (JSONL)
+
+- Player JSONL + Ball JSONL → combine_team_ball_tracks.py → whole match tracks (JSONL)
+
+- Whole match JSONL → render_classification_output.py → folder of suspicious-output
+
+```text
+.
+├── suspicious-output/
+│   ├── 16a/
+│   │   ├── 16a.mp4
+│   │   └── 16a.png
+│   │   └── 16a_cam0.mp4
+│   ├── 33b/
+│   │   ├── 33b.mp4
+│   │   └── 33b.png
+│   │   └── 33b_cam0.mp4
+|   ├── .../
+```
+
+
 
 ## Goalkeeper Pipeline
 
@@ -96,7 +137,7 @@ Select all clips of the goalkeeper (e.g., first half or second half).
 
 1️⃣ Compute Homography Matrix
 
-Before running detection, compute the homography matrix that maps video coordinates to real-world goal coordinates.
+Before running detection, compute the homography matrix that maps video coordinates to real-world goal coordinates (top-left, top-right, bottom-right, bottom-left).
 
 ```{shell}
 python3 compute_homography.py \
@@ -192,7 +233,7 @@ Output example (XXX_clip_001.analysis.json):
 
 
     Classifies goalkeeper behavior for three cases:
-    - Class 0 : No any bellow class detected.
+    - Class 0 : No any below class detected.
     - Class 1 & 2 & 11: Ball is far from skeleton, and goalkeeper's movement is limited.
     - Class 3: Goalkeeper's last 5-frame average center is farther from the ball than the first 5-frame average center.
     - Class 4 & 12 : Ball above the skeleton ear point but low or not jump to catch the ball.
