@@ -90,8 +90,17 @@ python render_classification_output.py \
 The output contains a radar view image, a radar view video of the suspicious player plotted on 2D field, and the footage of the specific time period of suspicious action. Each suspicious output is stored in a folder named after the track id of the player (e.g. 16a).
 
 ```
-Analysis of the following suspicious behaviours:
-1. Player 
+Classify players' behaviour near the ball into these cases:
+- Class 0: Normal. Not classified as any below classes, or not near the ball
+- Class 1: Angle between player track and ball track exceeds threshold (in degree) for a period of time
+- Class 2: Velocity of player movement is smaller than a threshold, while the ball is possessed by opposing team
+- Class 3: Coordinates of player on the field remain the same with buffer for a period of time
+- Class 4: Change of team possession of the ball from this player to opponent with a distance threshold in an instance
+- Class 5: The coordinates of the ball are outside the boundaries of the field, when the ball is possessed by this player
+- Class 6: 
+- Class 7: Average velocity of the player is lower than a threshold based on the average velocity of other players, for a period of time
+- Class 8: Ball position remains unchagned with buffer while possessed by the player, for a long period of time
+- Class 9: Change of team possession of the ball from this player to opponent more than a number of times
 
 ```
 
@@ -109,15 +118,16 @@ Analysis of the following suspicious behaviours:
 ```text
 .
 ├── suspicious-output/
-│   ├── 16a/
-│   │   ├── 16a.mp4
-│   │   └── 16a.png
-│   │   └── 16a_cam0.mp4
-│   ├── 33b/
-│   │   ├── 33b.mp4
-│   │   └── 33b.png
-│   │   └── 33b_cam0.mp4
-|   ├── .../
+│   ├── action 1
+│   │   ├── 16a/
+│   │   │   ├── 16a.mp4
+│   │   │   └── 16a.png
+│   │   │   └── 16a_cam0.mp4
+│   │   ├── 33b/
+│   │   │   ├── 33b.mp4
+│   │   │   └── 33b.png
+│   │   │   └── 33b_cam0.mp4
+│   ├── .../
 ```
 
 
