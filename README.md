@@ -97,7 +97,7 @@ Classify players' behaviour near the ball into these cases:
 - Class 3: Coordinates of player on the field remain the same with buffer for a period of time
 - Class 4: Change of team possession of the ball from this player to opponent with a distance threshold in an instance
 - Class 5: The coordinates of the ball are outside the boundaries of the field, when the ball is possessed by this player
-- Class 6: 
+- Class 6: The player not in possession is in a close distance to the ball possessed by opponent team, and the distance between player and opponent in possession does not decrease for a period of time
 - Class 7: Average velocity of the player is lower than a threshold based on the average velocity of other players, for a period of time
 - Class 8: Ball position remains unchagned with buffer while possessed by the player, for a long period of time
 - Class 9: Change of team possession of the ball from this player to opponent more than a number of times
@@ -115,19 +115,21 @@ Classify players' behaviour near the ball into these cases:
 
 - Whole match JSONL → render_classification_output.py → folder of suspicious-output
 
+Here let say player 16a has been detected suspicious on Class 1 and 7.
 ```text
 .
 ├── suspicious-output/
-│   ├── action 1
-│   │   ├── 16a/
+│   ├── 16a
+│   │   ├── class_1/
 │   │   │   ├── 16a.mp4
-│   │   │   └── 16a.png
+│   │   │   ├── 16a.png
 │   │   │   └── 16a_cam0.mp4
-│   │   ├── 33b/
-│   │   │   ├── 33b.mp4
-│   │   │   └── 33b.png
-│   │   │   └── 33b_cam0.mp4
-│   ├── .../
+│   │   ├── class_7/
+│   │   │   ├── 16a.mp4
+│   │   │   ├── 16a.png
+│   │   │   └── 16a_cam0.mp4
+│   ├── 33b/
+│   │   ├── ...
 ```
 
 
@@ -143,14 +145,14 @@ Prepare Input Videos
 
 Select all clips of the goalkeeper (e.g., first half or second half).
 
-⚠️ GoPro automatically splits recordings into multiple clips (GX010025.mp4, GX020025.mp4, …). Put all clips belonging to the same session into a single folder.
+⚠️ GoPro automatically splits recordings into multiple clips (GX010025.mp4, GX020025.mp4, …). Put all clips belonging to the same session into a single folder. The file names must be exactly the same as this format.
 
 1️⃣ Compute Homography Matrix
 
 Before running detection, compute the homography matrix that maps video coordinates to real-world goal coordinates (top-left, top-right, bottom-right, bottom-left).
 
 ```{shell}
-python3 compute_homography.py \
+python3 ./tools/extract_homography_matrix.py \
   --src "86,242 1658,258 1644,766 100,771" \
   --dst "0,0 640,0 640,213 0,213" \
   --out ./runs/detect/demo_video/homography_matrix.npy
@@ -179,7 +181,7 @@ python3 detect_goal_v2.py \
 ```
 3️⃣ Track Players and Ball
 
-Next, run detections_to_tracks_and_scores.py on the folder of detection JSONLs.
+Next, run `detections_to_tracks_and_scores.py` on the folder of detection JSONLs.
 
 Uses ByteTrack to track all detected players.
 
