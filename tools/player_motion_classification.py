@@ -16,6 +16,7 @@ def calculate_angle(v1: np.ndarray, v2: np.ndarray) -> float:
     angle = np.degrees(np.arccos(cos_theta))
     return angle
 
+# Function to track ball possession
 def track_ball_possession(
     jsonl_path: str,
     output_path: str,
@@ -693,8 +694,7 @@ def detect_stationary_players(
 
     return suspicious_segments, track_abnormal_frames, track_confidences
 
-
-# Suspicious Action 4 completed)
+# Suspicious Action 4 (completed)
 def detect_possession_change_anomalies(
     jsonl_path: str,
     possession_data_path: str = "../runs/detect/demo_video/possession_data.jsonl",
@@ -859,13 +859,534 @@ def detect_possession_change_anomalies(
     }
     return suspicious_segments, track_abnormal_frames, track_confidences
 
-# Suspicious Action 5
+# Suspicious Action 5 (completed)
 def detect_kicking_outside_the_pitch(
-        
+    jsonl_path: str,
+    possession_data_path: str = "../runs/detect/demo_video/possession_data.jsonl",
+    field_bounds: Tuple[float, float, float, float] = (0, 0, 1060, 680),
+    buffer: float = 10.0,  # Buffer window for error in detection
+    frame_window: int = 60  # Number of frames to include before and after trigger
 ):
-    pass
+    """
+    Detect players kicking the ball outside the pitch.
+    
+    Args:
+        jsonl_path: Path to the tracking data
+        possession_data_path: Path to possession data
+        field_bounds: Field boundaries (min_x, min_y, max_x, max_y)
+        buffer: Buffer window for error in detection
+        frame_window: Number of frames to include before and after trigger
+        
+    Returns:
+        Tuple containing:
+        - Dictionary mapping suspicious track IDs to frame ranges
+        - Dictionary mapping track IDs to list of abnormal frames
+        - Dictionary of confidence scores for each track
+    """
+    # Load data
+    with open(jsonl_path, 'r') as f:
+        tracks = [json.loads(line) for line in f if line.strip()]
 
-# The function which calls all suspicious action detectors
+    # Load possession data
+    with open(possession_data_path, 'r') as f:
+        possession_data = [json.loads(line) for line in f if line.strip()]
+    
+    # Create possession lookup by frame
+    possession_by_frame = {}
+    for event in possession_data:
+        team = event.get("team", "")
+        player_id = event.get("player_track_id", "")
+        frames = event.get("frames", [])
+        for frame in frames:
+            possession_by_frame[frame] = {"team": team, "player_id": player_id}
+    
+    # Separate ball tracks
+    ball_tracks = [t for t in tracks if t.get("team") == "ball"]
+
+    # Build ball position lookup
+    ball_by_frame = {}
+    for b in ball_tracks:
+        for frame, pt in zip(b.get("frames", []), b.get("projected", [])):
+            if pt is not None:
+                ball_by_frame[frame] = pt
+    
+    # Define field boundaries with buffer
+    min_x = field_bounds[0] + buffer
+    min_y = field_bounds[1] + buffer
+    max_x = field_bounds[2] - buffer
+    max_y = field_bounds[3] - buffer
+    
+    # Initialize tracking variables
+    suspicious_segments = {}
+    track_abnormal_frames = defaultdict(list)
+    track_confidences = {}
+    
+    # Get all frames sorted
+    all_frames = sorted(ball_by_frame.keys())
+    
+    # Track when ball goes out of bounds
+    out_of_bounds_start = None
+    current_possession_player = None
+    
+    for frame in all_frames:
+        if frame not in ball_by_frame:
+            continue
+        
+        ball_pos = ball_by_frame[frame]
+        x, y = ball_pos
+        
+        # Check if ball is out of bounds
+        is_out_of_bounds = (x < min_x or x > max_x or y < min_y or y > max_y)
+        
+        if is_out_of_bounds:
+            print(f"Frame {frame}: Ball out of bounds")
+            # Get player in possession when ball went out of bounds
+            possession_info = possession_by_frame.get(frame, {})
+
+            # Skip if no possession info
+            if not possession_info:
+                continue
+            current_possession_player = possession_info.get("player_id")
+            
+            # Start a new out-of-bounds sequence if needed
+            if out_of_bounds_start is None:
+                out_of_bounds_start = frame
+                # Use the player who had possession in the last few frames
+                for look_back in range(1, 11):  # Look back up to 10 frames
+                    prev_frame = frame - look_back
+                    if prev_frame in possession_by_frame:
+                        prev_possession = possession_by_frame[prev_frame]
+                        prev_possession_player = prev_possession.get("player_id")
+                        if prev_possession_player:
+                            current_possession_player = prev_possession_player
+                            break
+        else:
+            # Ball came back in bounds, record the event if we have a start frame
+            if out_of_bounds_start is not None and current_possession_player:
+                print(f"Frame {frame}: Ball back in bounds, was out from frame {out_of_bounds_start} by player {current_possession_player}")
+                # Include frames before and after the out-of-bounds sequence
+                f_start = max(0, out_of_bounds_start - frame_window)
+                f_end = frame + frame_window
+                
+                # Record this event
+                track_abnormal_frames[current_possession_player].append(out_of_bounds_start)
+                
+                # Store confidence data
+                if current_possession_player not in track_confidences:
+                    print(f"Player {current_possession_player} kicked ball out at frame {out_of_bounds_start}")
+                    track_confidences[current_possession_player] = {
+                        "out_of_bounds_count": 1,
+                        "out_of_bounds_frames": [(out_of_bounds_start, frame)]
+                    }
+                else:
+                    track_confidences[current_possession_player]["out_of_bounds_count"] += 1
+                    track_confidences[current_possession_player]["out_of_bounds_frames"].append((out_of_bounds_start, frame))
+                
+                # Reset tracking variables
+                out_of_bounds_start = None
+                current_possession_player = None
+    
+    # Handle case where ball was still out of bounds at the end of the video
+    if out_of_bounds_start is not None and current_possession_player:
+        f_start = max(0, out_of_bounds_start - frame_window)
+        f_end = all_frames[-1] + frame_window
+        
+        track_abnormal_frames[current_possession_player].append(out_of_bounds_start)
+        
+        if current_possession_player not in track_confidences:
+            track_confidences[current_possession_player] = {
+                "out_of_bounds_count": 1,
+                "out_of_bounds_frames": [(out_of_bounds_start, all_frames[-1])]
+            }
+        else:
+            track_confidences[current_possession_player]["out_of_bounds_count"] += 1
+            track_confidences[current_possession_player]["out_of_bounds_frames"].append((out_of_bounds_start, all_frames[-1]))
+    
+    # Create suspicious segments from abnormal frames
+    for player_id, frames in track_abnormal_frames.items():
+        if frames:
+            # For each out-of-bounds event, create a segment with the window
+            for frame in frames:
+                f_start = max(0, frame - frame_window)
+                f_end = frame + frame_window
+                
+                # If this player already has a segment, extend it if they overlap
+                if player_id in suspicious_segments:
+                    existing_start, existing_end = suspicious_segments[player_id]
+                    if f_start <= existing_end and f_end >= existing_start:
+                        # Segments overlap, merge them
+                        suspicious_segments[player_id] = (
+                            min(existing_start, f_start),
+                            max(existing_end, f_end)
+                        )
+                    else:
+                        # Non-overlapping segment, use the earliest one
+                        # Note: This is a simplification; you might want to handle multiple segments differently
+                        suspicious_segments[player_id] = (
+                            min(existing_start, f_start),
+                            max(existing_end, f_end)
+                        )
+                else:
+                    suspicious_segments[player_id] = (f_start, f_end)
+    
+    return suspicious_segments, track_abnormal_frames, track_confidences
+
+# Suspicious Action 6 (completed)
+def detect_passive_play_in_defense(
+  jsonl_path: str,
+  possession_data_path: str = "../runs/detect/demo_video/possession_data.jsonl",
+  velocity_threshold: float = 1.0,
+  min_valid_frames: int = 5
+):
+    """
+    Detect players in defensive positions moving slowly towards their opponents while the opposing team has possession.
+
+    Args:
+        jsonl_path: Path to the tracking data
+        possession_data_path: Path to possession data
+        angle_threshold: Angle threshold in degrees to consider movement towards opponent
+        velocity_threshold: Velocity threshold in m/s to consider slow movement
+        min_valid_frames: Minimum number of frames to consider a track as suspicious
+    
+    Returns:
+        Tuple containing:
+        - Dictionary mapping suspicious track IDs to frame ranges
+        - Dictionary mapping track IDs to list of abnormal frames
+        - Dictionary of confidence scores for each track
+    """
+    # Note: same initialization of tracks as Action 2, possible to merge
+    # Load data
+    with open(jsonl_path, 'r') as f:
+        tracks = [json.loads(line) for line in f if line.strip()]
+
+    # Load possession data
+    with open(possession_data_path, 'r') as f:
+        possession_data = [json.loads(line) for line in f if line.strip()]
+    
+    # Create possession lookup by frame
+    possession_by_frame = {}
+    for event in possession_data:
+        team = event.get("team", "")
+        player_id = event.get("player_track_id", "")
+        frames = event.get("frames", [])
+        for frame in frames:
+            possession_by_frame[frame] = {"team": team, "player_id": player_id}
+    
+    # Separate ball and player tracks
+    ball_tracks = [t for t in tracks if t.get("team") == "ball"]
+    player_tracks = [t for t in tracks if t.get("team") != "ball" and t.get("team") != "referee"]
+    
+    # Extract team names and build team lookup
+    teams = set()
+    for player in player_tracks:
+        team = player.get("team")
+        # For testing purposes, ignore "unsure" teams
+        if team and team != "unsure":
+            # if team name contains "goalkeeper", ignore this team
+            if "goalkeeper" in team.lower():
+                continue
+            teams.add(team)
+            if len(teams) == 2:
+                # sort the team names alphabetically, we asssume first team as Team A, second as Team B
+                teams = sorted(teams)
+                break
+    teams = list(teams)
+
+    # Build ball position lookup
+    ball_by_frame = {}
+    for b in ball_tracks:
+        for frame, pt in zip(b.get("frames", []), b.get("projected", [])):
+            if pt is not None:
+                ball_by_frame[frame] = pt
+    
+    # Build player position lookup, with team info
+    player_by_frame = defaultdict(list)
+    for player in player_tracks:
+        track_id = player.get("track_id")
+        team = player.get("team")
+        frames = player.get("frames", [])
+        points = player.get("projected", [])
+        
+        for i, (frame, pt) in enumerate(zip(frames, points)):
+            if pt is not None and i > 0 and frames[i-1] == frame - 1 and points[i-1] is not None:
+                prev_pt = points[i-1]
+                # Calculate velocity (distance between consecutive frames)
+                displacement = np.linalg.norm(np.array(pt) - np.array(prev_pt))
+                # Now 30fps, position unit in 0.1m, so velocity in m/s = displacement * 30 * 0.1
+                velocity = displacement * 30 * 0.1
+
+                player_by_frame[frame].append({
+                    "track_id": track_id,
+                    "team": team,
+                    "projected": pt,
+                    "velocity": velocity
+                })
+
+    # Initialize tracking variables
+    suspicious_segments = {}
+    track_abnormal_frames = defaultdict(list)
+    track_confidences = {}
+    
+    # Get all frames sorted
+    all_frames = sorted(ball_by_frame.keys())
+
+    for frame in all_frames:
+        if frame not in ball_by_frame or frame not in possession_by_frame:
+            continue
+        
+        ball_pos = np.array(ball_by_frame[frame])
+        possession_info = possession_by_frame[frame]
+        possession_team = possession_info.get("team")
+        possession_player_id = possession_info.get("player_id")
+        
+        # Skip if we don't know which team has possession
+        if not possession_team or possession_team == "unsure":
+            continue
+        
+        # Determine which goal Team A and B are attacking from goalkeepers position in this frame
+        players_in_frame = player_by_frame[frame]
+
+        # Find players to analyze based on the scenario
+        players_to_check = []
+
+        # Later refine the logic here. quite messy now.
+        for team in teams:
+            # Get players from this team in this frame, no goalkeepers
+            team_players_in_frame = [p for p in players_in_frame if p["team"] == team]
+            
+            if not team_players_in_frame:
+                continue
+
+            # Skip if own team has the ball
+            if possession_team == team:
+                continue  
+
+            # Calculate distance to ball for each player
+            for player in team_players_in_frame:
+                player_pos = np.array(player["projected"])
+                dist_to_ball = np.linalg.norm(player_pos - ball_pos)
+                player["distance_to_ball"] = dist_to_ball
+            # Filter players within distance threshold
+            players_to_check = [p for p in team_players_in_frame if p["distance_to_ball"] <= 20]
+
+        # Check for slow movement
+        for player in players_to_check:
+            track_id = player["track_id"]
+            velocity = player.get("velocity", float('inf'))
+            
+            if velocity < velocity_threshold:
+                track_abnormal_frames[track_id].append(frame)
+    
+    # Filter tracks with enough abnormal frames
+    for track_id, abnormal_frames in track_abnormal_frames.items():
+        if len(abnormal_frames) >= min_valid_frames:
+            # Sort frames to ensure they're in order
+            abnormal_frames.sort()
+            
+            # Calculate confidence based on number of slow frames
+            total_slow_frames = len(abnormal_frames)
+            track_confidences[track_id] = {
+                "slow_frames": total_slow_frames,
+                "avg_velocity": sum(player_by_frame[f][i]["velocity"] 
+                                  for f in abnormal_frames 
+                                  for i, p in enumerate(player_by_frame[f]) 
+                                  if p["track_id"] == track_id) / total_slow_frames
+                                  if total_slow_frames > 0 else 0
+            }
+            
+            # Define suspicious segment (start, end)
+            suspicious_segments[track_id] = (abnormal_frames[0], abnormal_frames[-1])
+    
+    return suspicious_segments, track_abnormal_frames, track_confidences
+
+# Suspicious Action 7 (completed)
+def detect_outpaced_player(
+    jsonl_path: str,
+    velocity_threshold: float = 3.0,      # Minimum velocity difference to consider outpaced
+    distance_threshold: float = 100.0,    # Maximum distance to ball to be considered (10 meters)
+    min_valid_frames: int = 30,           # Minimum frames to consider a track suspicious
+    max_players_to_compare: int = 3       # Number of closest players to compare
+) -> Tuple[Dict[str, Tuple[int, int]], Dict[str, List[int]], Dict[str, Dict]]:
+    """
+    Detect players who are consistently slower than other nearby players when near the ball.
+    
+    Args:
+        jsonl_path: Path to the tracking data
+        velocity_threshold: Minimum velocity difference to consider outpaced (m/s)
+        distance_threshold: Maximum distance to ball to be considered (100 units ≈ 10m)
+        min_valid_frames: Minimum frames with slow relative movement to be suspicious
+        max_players_to_compare: Maximum number of nearby players to compare velocities with
+        
+    Returns:
+        Tuple containing:
+        - Dictionary mapping suspicious track IDs to frame ranges
+        - Dictionary mapping track IDs to list of abnormal frames
+        - Dictionary of confidence scores for each track
+    """
+    # Load data
+    with open(jsonl_path, 'r') as f:
+        tracks = [json.loads(line) for line in f if line.strip()]
+    
+    # Separate ball and player tracks
+    ball_tracks = [t for t in tracks if t.get("team") == "ball"]
+    player_tracks = [t for t in tracks if t.get("team") != "ball" and t.get("team") != "referee"]
+    
+    # Extract team names
+    teams = set()
+    for player in player_tracks:
+        team = player.get("team")
+        if team and team != "unsure" and "goalkeeper" not in team.lower():
+            teams.add(team)
+            if len(teams) == 2:
+                teams = sorted(teams)
+                break
+    
+    # Build ball position lookup
+    ball_by_frame = {}
+    for b in ball_tracks:
+        for frame, pt in zip(b.get("frames", []), b.get("projected", [])):
+            if pt is not None:
+                ball_by_frame[frame] = pt
+    
+    # Build player position lookup, with team info
+    player_by_frame = defaultdict(list)
+    for player in player_tracks:
+        track_id = player.get("track_id")
+        team = player.get("team")
+        frames = player.get("frames", [])
+        points = player.get("projected", [])
+        
+        for i, (frame, pt) in enumerate(zip(frames, points)):
+            if pt is not None and i > 0 and frames[i-1] == frame - 1 and points[i-1] is not None:
+                prev_pt = points[i-1]
+                # Calculate velocity (distance between consecutive frames)
+                displacement = np.linalg.norm(np.array(pt) - np.array(prev_pt))
+                # Now 30fps, position unit in 0.1m, so velocity in m/s = displacement * 30 * 0.1
+                velocity = displacement * 30 * 0.1
+
+                player_by_frame[frame].append({
+                    "track_id": track_id,
+                    "team": team,
+                    "projected": pt,
+                    "velocity": velocity
+                })
+
+    # Initialize tracking variables
+    suspicious_segments = {}
+    track_abnormal_frames = defaultdict(list)
+    track_confidences = {}
+    
+    # Get all frames sorted
+    all_frames = sorted(ball_by_frame.keys())
+    
+    # Process each frame
+    for frame in all_frames:
+        if frame not in ball_by_frame:
+            continue
+        
+        ball_pos = np.array(ball_by_frame[frame])
+        players_in_frame = player_by_frame[frame]
+        
+        # Skip if no players in this frame
+        if not players_in_frame:
+            continue
+            
+        # Calculate distance to ball for each player
+        for player in players_in_frame:
+            player_pos = np.array(player["projected"])
+            dist_to_ball = np.linalg.norm(player_pos - ball_pos)
+            player["distance_to_ball"] = dist_to_ball
+        
+        # Filter players within distance threshold to ball
+        nearby_players = [p for p in players_in_frame if p["distance_to_ball"] <= distance_threshold]
+        
+        # Skip if not enough players nearby
+        if len(nearby_players) < 2:
+            continue
+            
+        # Group players by team
+        players_by_team = {}
+        for p in nearby_players:
+            team = p["team"]
+            if "goalkeeper" in team.lower():
+                team = team.replace("goalkeeper", "").strip()
+                
+            if team not in players_by_team:
+                players_by_team[team] = []
+            players_by_team[team].append(p)
+        
+        # Compare players from the same team
+        for team, team_players in players_by_team.items():
+            if len(team_players) < 2:
+                continue
+                
+            # Sort by velocity (ascending)
+            team_players.sort(key=lambda x: x.get("velocity", 0))
+            
+            # Get the slowest player
+            slowest_player = team_players[0]
+            slowest_velocity = slowest_player.get("velocity", 0)
+            
+            # Compare with fastest players (up to max_players_to_compare)
+            for i in range(1, min(max_players_to_compare + 1, len(team_players))):
+                faster_player = team_players[-i]
+                faster_velocity = faster_player.get("velocity", 0)
+                
+                # Check if velocity difference exceeds threshold
+                if faster_velocity - slowest_velocity > velocity_threshold:
+                    track_abnormal_frames[slowest_player["track_id"]].append(frame)
+                    break  # Only record once per frame if multiple faster players
+    
+    # Filter tracks with enough abnormal frames
+    for track_id, abnormal_frames in track_abnormal_frames.items():
+        if len(abnormal_frames) >= min_valid_frames:
+            # Sort frames to ensure they're in order
+            abnormal_frames.sort()
+            
+            # Group consecutive frames
+            frame_groups = []
+            current_group = [abnormal_frames[0]]
+            
+            for f in abnormal_frames[1:]:
+                if f <= current_group[-1] + 5:  # Allow small gaps (5 frames)
+                    current_group.append(f)
+                else:
+                    if len(current_group) >= min_valid_frames:
+                        frame_groups.append(current_group)
+                    current_group = [f]
+            
+            # Add the last group if it's large enough
+            if len(current_group) >= min_valid_frames:
+                frame_groups.append(current_group)
+            
+            # If we have any valid groups
+            if frame_groups:
+                # Find the longest consecutive sequence
+                longest_group = max(frame_groups, key=len)
+                
+                # Calculate average velocity during suspicious frames
+                velocities = []
+                for f in longest_group:
+                    for p in player_by_frame[f]:
+                        if p["track_id"] == track_id:
+                            velocities.append(p.get("velocity", 0))
+                            break
+                            
+                avg_velocity = sum(velocities) / len(velocities) if velocities else 0
+                
+                # Store confidence data
+                track_confidences[track_id] = {
+                    "outpaced_frames": len(longest_group),
+                    "avg_velocity": avg_velocity,
+                    "consecutive_frames": len(longest_group)
+                }
+                
+                # Define suspicious segment (start, end)
+                suspicious_segments[track_id] = (longest_group[0], longest_group[-1])
+    
+    return suspicious_segments, track_abnormal_frames, track_confidences
+
+# This function calls all suspicious action detectors
 def detect_abnormal_tracks_from_jsonl(
     jsonl_path: str,
     angle_threshold: float = 120,
@@ -892,9 +1413,9 @@ def detect_abnormal_tracks_from_jsonl(
         multi_ball_frames=multi_ball_frames
     )
     # Update total results with tag 1
-    total_abnormal_tracks.update(abnormal_tracks)
-    total_track_abnormal_frames.update(track_abnormal_frames)
-    total_tracking_confidences.update(track_confidences)
+    total_abnormal_tracks.update({1: abnormal_tracks})
+    total_track_abnormal_frames.update({1: track_abnormal_frames})
+    total_tracking_confidences.update({1: track_confidences})
 
     abnormal_tracks, track_abnormal_frames, track_confidences = detect_slow_action(
         jsonl_path,
@@ -904,10 +1425,10 @@ def detect_abnormal_tracks_from_jsonl(
         min_valid_frames=5,          # minimum frames to consider as suspicious
         n_closest_players=3,          # number of closest players to track
     )
-
-    total_abnormal_tracks.update(abnormal_tracks)
-    total_track_abnormal_frames.update(track_abnormal_frames)
-    total_tracking_confidences.update(track_confidences)
+    # Update total results with tag 2
+    total_abnormal_tracks.update({2: abnormal_tracks})
+    total_track_abnormal_frames.update({2: track_abnormal_frames})
+    total_tracking_confidences.update({2: track_confidences})
 
     return total_abnormal_tracks, total_track_abnormal_frames, total_tracking_confidences
 
