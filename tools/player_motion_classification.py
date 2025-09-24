@@ -1386,6 +1386,230 @@ def detect_outpaced_player(
     
     return suspicious_segments, track_abnormal_frames, track_confidences
 
+# Suspicious Action 8 (completed)
+def detect_delay_restart(
+    jsonl_path: str,
+    possession_data_path: str = "../runs/detect/demo_video/possession_data.jsonl",
+    stationary_threshold: float = 3.0,  # Maximum distance ball moves to be considered stationary
+    delay_threshold: int = 300,         # Minimum frames (10 seconds at 30fps)
+    frame_window: int = 60              # Number of frames to include before/after trigger
+) -> Tuple[Dict[str, Tuple[int, int]], Dict[str, List[int]], Dict[str, Dict]]:
+    """
+    Detect players delaying the restart of play by holding a stationary ball too long.
+    
+    Args:
+        jsonl_path: Path to the tracking data
+        possession_data_path: Path to possession data
+        stationary_threshold: Maximum movement of ball to be considered stationary (units)
+        delay_threshold: Minimum number of frames to consider as delay (300 frames = 10 seconds at 30fps)
+        frame_window: Number of frames to include before and after trigger
+        
+    Returns:
+        Tuple containing:
+        - Dictionary mapping suspicious track IDs to frame ranges
+        - Dictionary mapping track IDs to list of abnormal frames
+        - Dictionary of confidence scores for each track
+    """
+    # Load data
+    with open(jsonl_path, 'r') as f:
+        tracks = [json.loads(line) for line in f if line.strip()]
+
+    # Load possession data
+    with open(possession_data_path, 'r') as f:
+        possession_data = [json.loads(line) for line in f if line.strip()]
+    
+    # Create possession lookup by frame
+    possession_by_frame = {}
+    for event in possession_data:
+        team = event.get("team", "")
+        player_id = event.get("player_track_id", "")
+        frames = event.get("frames", [])
+        for frame in frames:
+            possession_by_frame[frame] = {"team": team, "player_id": player_id}
+    
+    # Separate ball tracks
+    ball_tracks = [t for t in tracks if t.get("team") == "ball"]
+
+    # Build ball position lookup
+    ball_by_frame = {}
+    for b in ball_tracks:
+        for frame, pt in zip(b.get("frames", []), b.get("projected", [])):
+            if pt is not None:
+                ball_by_frame[frame] = pt
+    
+    # Initialize tracking variables
+    suspicious_segments = {}
+    track_abnormal_frames = defaultdict(list)
+    track_confidences = {}
+    
+    # Get all frames sorted
+    all_frames = sorted(ball_by_frame.keys())
+    
+    # Track stationary ball sequences
+    stationary_start = None
+    stationary_pos = None
+    current_possession_player = None
+    current_possession_team = None
+    
+    for i, frame in enumerate(all_frames):
+        if frame not in ball_by_frame or frame not in possession_by_frame:
+            continue
+        
+        ball_pos = np.array(ball_by_frame[frame])
+        possession_info = possession_by_frame[frame]
+        possession_player = possession_info.get("player_id")
+        possession_team = possession_info.get("team")
+        
+        # Skip frames with unknown possession
+        if not possession_player or possession_team == "unsure":
+            # If we were tracking a stationary sequence, end it
+            if stationary_start is not None:
+                stationary_start = None
+                stationary_pos = None
+                current_possession_player = None
+                current_possession_team = None
+            continue
+        
+        # Check if ball is stationary
+        if stationary_pos is not None:
+            distance_moved = np.linalg.norm(ball_pos - stationary_pos)
+            
+            # If ball moved too much, reset tracking
+            if distance_moved > stationary_threshold:
+                stationary_start = None
+                stationary_pos = None
+                current_possession_player = None
+                current_possession_team = None
+            # If possession changed, reset tracking
+            elif possession_player != current_possession_player:
+                stationary_start = None
+                stationary_pos = None
+                current_possession_player = None
+                current_possession_team = None
+        
+        # Start a new stationary sequence if needed
+        if stationary_start is None:
+            stationary_start = frame
+            stationary_pos = ball_pos
+            current_possession_player = possession_player
+            current_possession_team = possession_team
+        
+        # Check if current sequence is long enough to be suspicious
+        if stationary_start is not None and (frame - stationary_start) >= delay_threshold:
+            # Check if we've already recorded this event
+            if not track_abnormal_frames[current_possession_player] or track_abnormal_frames[current_possession_player][-1] < stationary_start:
+                # Add this sequence to our tracking
+                track_abnormal_frames[current_possession_player].append(stationary_start)
+                
+                # Store confidence data
+                if current_possession_player not in track_confidences:
+                    track_confidences[current_possession_player] = {
+                        "delay_count": 1,
+                        "delay_frames": [(stationary_start, frame)],
+                        "team": current_possession_team,
+                        "duration": frame - stationary_start
+                    }
+                else:
+                    track_confidences[current_possession_player]["delay_count"] += 1
+                    track_confidences[current_possession_player]["delay_frames"].append((stationary_start, frame))
+                    track_confidences[current_possession_player]["duration"] += frame - stationary_start
+                
+                # Reset tracking to avoid double-counting
+                stationary_start = None
+                stationary_pos = None
+                current_possession_player = None
+                current_possession_team = None
+    
+    # Create suspicious segments from abnormal frames
+    for player_id, frames in track_abnormal_frames.items():
+        if frames:
+            segments = []
+            
+            # For each delay event, create a segment with the window
+            for start_frame in frames:
+                # Find the end of this delay sequence from confidence data
+                end_frames = [end for start, end in track_confidences[player_id]["delay_frames"] 
+                             if start == start_frame]
+                
+                if not end_frames:  # Should never happen, but just in case
+                    continue
+                    
+                end_frame = end_frames[0]
+                
+                f_start = max(0, start_frame - frame_window)
+                f_end = end_frame + frame_window
+                
+                segments.append((f_start, f_end))
+            
+            # Merge overlapping segments
+            if segments:
+                segments.sort()
+                merged_segments = [segments[0]]
+                
+                for current in segments[1:]:
+                    previous = merged_segments[-1]
+                    if current[0] <= previous[1]:
+                        # Segments overlap, merge them
+                        merged_segments[-1] = (previous[0], max(previous[1], current[1]))
+                    else:
+                        # Non-overlapping segment
+                        merged_segments.append(current)
+                
+                # Use the earliest segment as the main one
+                suspicious_segments[player_id] = merged_segments[0]
+    
+    return suspicious_segments, track_abnormal_frames, track_confidences
+
+# Suspicious Action 9 (completed)
+def count_abnormal_possession_changes_whole_match(
+    possession_data_path: str = "../runs/detect/demo_video/possession_data.jsonl",
+    max_possession_changes: int = 20
+) -> Tuple[Dict[str, Tuple[int, int]], Dict[str, List[int]], Dict[str, Dict]]:
+    """
+    Count players with an unusually high number of possession changes in a match.
+    
+    Args:
+        possession_data_path: Path to possession data
+        max_possession_changes: Maximum number of possession changes to be considered normal
+
+    Returns:
+        Tuple containing:
+        - Dictionary mapping suspicious track IDs to frame ranges
+        - Dictionary mapping track IDs to list of abnormal frames
+        - Dictionary of confidence scores for each track
+    """
+    # Load data
+    with open(possession_data_path, 'r') as f:
+        possession_data = [json.loads(line) for line in f if line.strip()]
+
+    # Count possession changes per player
+    possession_changes = defaultdict(int)
+    for event in possession_data:
+        player_id = event.get("player_track_id", "")
+        if player_id:
+            possession_changes[player_id] += 1
+
+    # Identify players exceeding the threshold
+    suspicious_segments = {}
+    track_abnormal_frames = defaultdict(list)
+    track_confidences = {}
+
+    for player_id, change_count in possession_changes.items():
+        if change_count > max_possession_changes:
+            # Mark the frames where the possession changes occurred (60 frames window around each event)
+            frames = []
+            for event in possession_data:
+                if event.get("player_track_id", "") == player_id:
+                    frames.extend(event.get("frames", []))
+                    break # Only need to find the first event for frame extraction
+            track_abnormal_frames[player_id] = frames
+            track_confidences[player_id] = {
+                "possession_changes": change_count
+            }
+            if frames:
+                suspicious_segments[player_id] = (min(frames), max(frames))
+    return suspicious_segments, track_abnormal_frames, track_confidences
+
 # This function calls all suspicious action detectors
 def detect_abnormal_tracks_from_jsonl(
     jsonl_path: str,
