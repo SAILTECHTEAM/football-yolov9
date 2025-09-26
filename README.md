@@ -121,13 +121,13 @@ Here let say player 16a has been detected suspicious on Class 1 and 7.
 ├── suspicious-output/
 │   ├── 16a
 │   │   ├── class_1/
-│   │   │   ├── 16a.mp4
-│   │   │   ├── 16a.png
-│   │   │   └── 16a_cam0.mp4
+│   │   │   ├── 16a_0016_0036.mp4
+│   │   │   ├── 16a_0016_0036.png
+│   │   │   └── 16a_cam0_0016_0036.mp4
 │   │   ├── class_7/
-│   │   │   ├── 16a.mp4
-│   │   │   ├── 16a.png
-│   │   │   └── 16a_cam0.mp4
+│   │   │   ├── 16a_0511_0545.mp4
+│   │   │   ├── 16a_0511_0545.png
+│   │   │   └── 16a_cam0_0511_0545.mp4
 │   ├── 33b/
 │   │   ├── ...
 ```

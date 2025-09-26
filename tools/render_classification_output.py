@@ -8,9 +8,11 @@ from collections import defaultdict
 from player_motion_classification import get_frames_with_multiple_balls, detect_abnormal_tracks_from_jsonl, calculate_angle
 from align_video_times import convert_game_frame_to_video_frame
 
-def frame_to_time(f: int, fps=29.97) -> str:
+def frame_to_time(f: int, fps=29.97, no_colon=False) -> str:
     seconds = f / fps
     m, s = divmod(int(seconds), 60)
+    if no_colon:
+        return f"{m:02}{s:02}"
     return f"{m:02}:{s:02}"
 
 def bgr_to_rgb(bgr):
@@ -110,6 +112,8 @@ def render_segments_to_images_and_videos(
 
         for track_id, (start_f, end_f) in segment.items():
             print(f"🎯 Rendering track {track_id} from {start_f} to {end_f}...")
+            video_start_frame = convert_game_frame_to_video_frame(start_f, game_time[0], fps)
+            video_end_frame = convert_game_frame_to_video_frame(end_f, game_time[0], fps)
 
             # Create output subfolder
             track_output_dir = os.path.join(output_dir, track_id, f"class_{tag}")
@@ -145,7 +149,7 @@ def render_segments_to_images_and_videos(
             ax.set_ylim(0, field_size[1])
             ax.set_title(f"Track {track_id} [{frame_to_time(start_f)} → {frame_to_time(end_f)}]")
             plt.tight_layout()
-            image_path = os.path.join(track_output_dir, f"{track_id}.png")
+            image_path = os.path.join(track_output_dir, f"{track_id}_{frame_to_time(video_start_frame, no_colon=True)}_{frame_to_time(video_end_frame, no_colon=True)}.png")
             plt.savefig(image_path, dpi=300)
             plt.close()
             print(f"🖼️ Saved image: {image_path}")
@@ -155,14 +159,14 @@ def render_segments_to_images_and_videos(
                 video_start_frame = convert_game_frame_to_video_frame(start_f, align_time, fps)
                 video_end_frame = convert_game_frame_to_video_frame(end_f, align_time, fps)
 
-                raw_clip_path = os.path.join(track_output_dir, f"{track_id}_cam{idx}.mp4")
+                raw_clip_path = os.path.join(track_output_dir, f"{track_id}_cam{idx}_{frame_to_time(video_start_frame, fps, no_colon=True)}_{frame_to_time(video_end_frame, fps, no_colon=True)}.mp4")
 
                 crop_video_frames(video_file, video_start_frame, video_end_frame, raw_clip_path, fps)
                 print(f"🎥 Saved raw clip for camera {idx} → {raw_clip_path}")
 
             # === 🎥 Render Video ===
             height, width, _ = bg_img.shape
-            video_path = os.path.join(track_output_dir, f"{track_id}.mp4")
+            video_path = os.path.join(track_output_dir, f"{track_id}_{frame_to_time(video_start_frame, no_colon=True)}_{frame_to_time(video_end_frame, no_colon=True)}.mp4")
             writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
 
             for f in range(start_f, end_f + 1):
@@ -234,7 +238,7 @@ if __name__ == "__main__":
     parser.add_argument("--field-size", type=str, default="1060,660", help="Field size as 'width,height'.")
     parser.add_argument("--output-dir", type=str, required=True, help="Directory to save output.")
     parser.add_argument("--fps", type=float, default=29.97, help="Video frames per second.")
-    
+
     # Parameters for abnormal track detection
     parser.add_argument("--angle-threshold", type=float, default=90, help="Angle threshold for detection.")
     parser.add_argument("--velocity-threshold", type=float, default=1e-1, help="Velocity threshold.")
