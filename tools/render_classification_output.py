@@ -234,14 +234,14 @@ if __name__ == "__main__":
     parser.add_argument("--field-size", type=str, default="1060,660", help="Field size as 'width,height'.")
     parser.add_argument("--output-dir", type=str, required=True, help="Directory to save output.")
     parser.add_argument("--fps", type=float, default=29.97, help="Video frames per second.")
-
+    
     # Parameters for abnormal track detection
-    parser.add_argument("--angle-threshold", type=float, default=150, help="Angle threshold for detection.")
+    parser.add_argument("--angle-threshold", type=float, default=90, help="Angle threshold for detection.")
     parser.add_argument("--velocity-threshold", type=float, default=1e-1, help="Velocity threshold.")
-    parser.add_argument("--min-valid-frames", type=int, default=50, help="Minimum number of valid frames.")
-    parser.add_argument("--conf-threshold", type=float, default=0.7, help="Confidence threshold.")
-    parser.add_argument("--frame-threshold", type=int, default=30, help="Frame count threshold.")
-    parser.add_argument("--distance-threshold", type=float, default=50, help="Distance threshold in pixels or meters.")
+    parser.add_argument("--min-valid-frames", type=int, default=5, help="Minimum number of valid frames.")
+    parser.add_argument("--conf-threshold", type=float, default=0.3, help="Confidence threshold.")
+    parser.add_argument("--frame-threshold", type=int, default=3, help="Frame count threshold.")
+    parser.add_argument("--distance-threshold", type=float, default=0.5, help="Distance threshold in pixels or meters.")
 
     args = parser.parse_args()
     # 1. Validate that total game_time values is divisible by 4

@@ -1659,6 +1659,85 @@ def detect_abnormal_tracks_from_jsonl(
     total_track_abnormal_frames.update({2: track_abnormal_frames})
     total_tracking_confidences.update({2: track_confidences})
 
+    abnormal_tracks, track_abnormal_frames, track_confidences = detect_stationary_players(
+        jsonl_path,
+        velocity_threshold=1e-2,
+        min_valid_frames=5,
+        conf_threshold=0.5,
+        frame_threshold=3,
+        distance_threshold=0.5,  # 0.5 meters proximity to ball
+        multi_ball_frames=None
+    )
+    # Update total results with tag 3
+    total_abnormal_tracks.update({3: abnormal_tracks})
+    total_track_abnormal_frames.update({3: track_abnormal_frames})
+    total_tracking_confidences.update({3: track_confidences})
+
+    abnormal_tracks, track_abnormal_frames, track_confidences = detect_possession_change_anomalies(
+        jsonl_path=jsonl_path,
+        possession_data_path=possession_data_path
+    )
+    # Update total results with tag 4
+    total_abnormal_tracks.update({4: abnormal_tracks})
+    total_track_abnormal_frames.update({4: track_abnormal_frames})
+    total_tracking_confidences.update({4: track_confidences})
+
+    abnormal_tracks, track_abnormal_frames, track_confidences = detect_kicking_outside_the_pitch(
+        jsonl_path=jsonl_path,
+        possession_data_path=possession_data_path,
+        field_bounds=(0, 0, 1060, 680),
+        buffer=40.0,  # Buffer window for error in detection
+        frame_window=60  # Number of frames to include before and after trigger
+    )
+    # Update total results with tag 5
+    total_abnormal_tracks.update({5: abnormal_tracks})
+    total_track_abnormal_frames.update({5: track_abnormal_frames})
+    total_tracking_confidences.update({5: track_confidences})
+
+    abnormal_tracks, track_abnormal_frames, track_confidences = detect_passive_play_in_defense(
+        jsonl_path=jsonl_path,
+        possession_data_path=possession_data_path,
+        velocity_threshold=1.0,
+        min_valid_frames=5
+    )
+    # Update total results with tag 6
+    total_abnormal_tracks.update({6: abnormal_tracks})
+    total_track_abnormal_frames.update({6: track_abnormal_frames})
+    total_tracking_confidences.update({6: track_confidences})
+
+    abnormal_tracks, track_abnormal_frames, track_confidences = detect_outpaced_player(
+        jsonl_path=jsonl_path,
+        velocity_threshold = 3.0,
+        distance_threshold = 200.0,
+        min_valid_frames = 30,
+        max_players_to_compare = 2
+    )
+    # Update total results with tag 7
+    total_abnormal_tracks.update({7: abnormal_tracks})
+    total_track_abnormal_frames.update({7: track_abnormal_frames})
+    total_tracking_confidences.update({7: track_confidences})
+
+    abnormal_tracks, track_abnormal_frames, track_confidences = detect_delay_restart(
+        jsonl_path=jsonl_path,
+        possession_data_path=possession_data_path,
+        stationary_threshold=3.0,
+        delay_threshold=30,
+        frame_window=60
+    )
+    # Update total results with tag 8
+    total_abnormal_tracks.update({8: abnormal_tracks})
+    total_track_abnormal_frames.update({8: track_abnormal_frames})
+    total_tracking_confidences.update({8: track_confidences})
+
+    suspicious_segments, track_abnormal_frames, track_confidences = count_abnormal_possession_changes_whole_match(
+        possession_data_path=possession_data_path,
+        max_possession_changes=2
+    )
+    # Update total results with tag 9
+    total_abnormal_tracks.update({9: suspicious_segments})
+    total_track_abnormal_frames.update({9: track_abnormal_frames})
+    total_tracking_confidences.update({9: track_confidences})
+
     return total_abnormal_tracks, total_track_abnormal_frames, total_tracking_confidences
 
     
