@@ -1403,6 +1403,10 @@ def smoothen_ball_tracking(json_path, save_path, field_size=[1060, 660], detecto
         min_points=5,  # Minimum points to consider a cluster
         max_displacement=10  # Maximum allowed movement within a static cluster
     )
+    
+    """
+    Remember to add interpolation for missing frames before Kalman filtering
+    """
 
     # Kalman Filter setup
     dim_x = 4
@@ -1691,35 +1695,6 @@ def process_single_chunk(traj_chunk, frames_chunk, segment_threshold=8):
     
     return chunk_segments
 
-# Combine JSONL files of player and ball tracking
-def combine_jsonl_files_streaming(file1_path, file2_path, output_path):
-    """
-    Combines two JSONL files by appending file2 after file1 in a streaming fashion.
-    More memory efficient for large files.
-    """
-    count1 = 0
-    count2 = 0
-    
-    with open(output_path, 'w') as out_file:
-        # Copy contents from file1
-        with open(file1_path, 'r') as f1:
-            for line in f1:
-                if line.strip():  # Skip empty lines
-                    out_file.write(line)
-                    count1 += 1
-        
-        # Append contents from file2
-        with open(file2_path, 'r') as f2:
-            for line in f2:
-                if line.strip():  # Skip empty lines
-                    out_file.write(line)
-                    count2 += 1
-    
-    print(f"Successfully combined files:")
-    print(f"- {file1_path}: {count1} records")
-    print(f"- {file2_path}: {count2} records")
-    print(f"- {output_path}: {count1 + count2} records total")
-
 def prepare_background_and_tracks(
     json_path,
     image_path,
@@ -1744,6 +1719,7 @@ def prepare_background_and_tracks(
     filter_static_and_multiple_balls(
         json_path, 
         json_path.replace('.jsonl', '_filtered.jsonl'),
+        field_size=field_size,
     )
 
     remove_ball_false_detection(
@@ -1761,12 +1737,6 @@ def prepare_background_and_tracks(
     convert_ball_tracking_format(
         json_path.replace('.jsonl', '_smoothed.jsonl'),
         json_path.replace('.jsonl', '_final.jsonl'),
-    )
-
-    combine_jsonl_files_streaming(
-        file1_path=json_path.replace('ball_tracking.jsonl', 'team_tracking_final.jsonl'),
-        file2_path=json_path.replace('.jsonl', '_final.jsonl'),
-        output_path=json_path.replace('ball_tracking.jsonl', 'team_ball_tracking_final.jsonl')
     )
 
     return bg_img
