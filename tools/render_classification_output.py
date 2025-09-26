@@ -38,7 +38,7 @@ def crop_video_frames(video_path: str, start_frame: int, end_frame: int, output_
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    fourcc = cv2.VideoWriter_fourcc(*'avc1')
     writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -163,7 +163,7 @@ def render_segments_to_images_and_videos(
             # === 🎥 Render Video ===
             height, width, _ = bg_img.shape
             video_path = os.path.join(track_output_dir, f"{track_id}.mp4")
-            writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+            writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
 
             for f in range(start_f, end_f + 1):
                 frame_img = bg_img.copy()
@@ -236,11 +236,11 @@ if __name__ == "__main__":
     parser.add_argument("--fps", type=float, default=29.97, help="Video frames per second.")
 
     # Parameters for abnormal track detection
-    parser.add_argument("--angle-threshold", type=float, default=120, help="Angle threshold for detection.")
-    parser.add_argument("--velocity-threshold", type=float, default=1e-2, help="Velocity threshold.")
-    parser.add_argument("--min-valid-frames", type=int, default=5, help="Minimum number of valid frames.")
+    parser.add_argument("--angle-threshold", type=float, default=150, help="Angle threshold for detection.")
+    parser.add_argument("--velocity-threshold", type=float, default=1e-1, help="Velocity threshold.")
+    parser.add_argument("--min-valid-frames", type=int, default=50, help="Minimum number of valid frames.")
     parser.add_argument("--conf-threshold", type=float, default=0.7, help="Confidence threshold.")
-    parser.add_argument("--frame-threshold", type=int, default=3, help="Frame count threshold.")
+    parser.add_argument("--frame-threshold", type=int, default=30, help="Frame count threshold.")
     parser.add_argument("--distance-threshold", type=float, default=50, help="Distance threshold in pixels or meters.")
 
     args = parser.parse_args()

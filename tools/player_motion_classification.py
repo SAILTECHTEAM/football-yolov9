@@ -40,9 +40,6 @@ def track_ball_possession(
     min_possession_frames: int
         Minimum consecutive frames needed to register a possession event (default: 3)
     
-    Returns:
-    --------
-    Dict with possession statistics
     """
     import json
     import numpy as np
@@ -240,7 +237,7 @@ def track_ball_possession(
         percentage = frames / sum(stats["team_possession"].values()) * 100
         print(f"Team {team}: {percentage:.1f}% possession ({frames} frames)")
         
-    return stats
+    # return stats
 
 # Suspicious Action 1 (completed)
 def detect_abnormal_player_movement_direction(
@@ -1625,6 +1622,14 @@ def detect_abnormal_tracks_from_jsonl(
     total_track_abnormal_frames = {}
     total_tracking_confidences = {}
 
+    possession_data_path = os.path.join(os.path.dirname(jsonl_path), "possession_data.jsonl")
+    track_ball_possession(
+        jsonl_path=jsonl_path,
+        output_path=possession_data_path,
+        window_size=11,
+        max_distance_threshold=50,
+        min_possession_frames=3
+    )
     # Suspicious Action 1: Abnormal Player Movement Relative to Ball
     abnormal_tracks, track_abnormal_frames, track_confidences = detect_abnormal_player_movement_direction(
         jsonl_path,
@@ -1643,7 +1648,7 @@ def detect_abnormal_tracks_from_jsonl(
 
     abnormal_tracks, track_abnormal_frames, track_confidences = detect_slow_action(
         jsonl_path,
-        possession_data_path="../runs/detect/demo_video/possession_data.jsonl",
+        possession_data_path=possession_data_path,
         distance_threshold=100.0,  # 10 meters proximity to ball
         velocity_threshold=1.5,     # slow movement threshold, in m/s
         min_valid_frames=5,          # minimum frames to consider as suspicious
