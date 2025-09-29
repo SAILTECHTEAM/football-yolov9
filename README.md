@@ -115,19 +115,19 @@ Classify players' behaviour near the ball into these cases:
 
 - Whole match JSONL → render_classification_output.py → folder of suspicious-output
 
-Here let say player 16a has been detected suspicious on Class 1 and 7.
+Here let say player 16a has been detected suspicious on Class 1 and 7. For the naming format, the first 3 digits combined is the minute, the last 2 digits combined is the second (00016 is 000:16, 10545 is 105:45).
 ```text
 .
 ├── suspicious-output/
 │   ├── 16a
 │   │   ├── class_1/
-│   │   │   ├── 16a_0016_0036.mp4
-│   │   │   ├── 16a_0016_0036.png
-│   │   │   └── 16a_cam0_0016_0036.mp4
+│   │   │   ├── 16a_00016_00036.mp4
+│   │   │   ├── 16a_00016_00036.png
+│   │   │   └── 16a_cam0_00016_00036.mp4
 │   │   ├── class_7/
-│   │   │   ├── 16a_0511_0545.mp4
-│   │   │   ├── 16a_0511_0545.png
-│   │   │   └── 16a_cam0_0511_0545.mp4
+│   │   │   ├── 16a_10511_10545.mp4
+│   │   │   ├── 16a_10511_10545.png
+│   │   │   └── 16a_cam0_10511_10545.mp4
 │   ├── 33b/
 │   │   ├── ...
 ```

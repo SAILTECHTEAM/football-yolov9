@@ -12,8 +12,8 @@ def frame_to_time(f: int, fps=29.97, no_colon=False) -> str:
     seconds = f / fps
     m, s = divmod(int(seconds), 60)
     if no_colon:
-        return f"{m:02}{s:02}"
-    return f"{m:02}:{s:02}"
+        return f"{m:03}{s:02}"
+    return f"{m:03}:{s:02}"
 
 def bgr_to_rgb(bgr):
     return (bgr[2], bgr[1], bgr[0])  # reverse the tuple
