@@ -12,3 +12,4 @@ runs/*
 *.docx
 *.npz
 weight/*
+*.ckpt

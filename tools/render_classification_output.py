@@ -81,6 +81,19 @@ def render_segments_to_images_and_videos(
     for t in tracks:
         tid = t["track_id"]
         team = t.get("team", "unsure")
+        jersey_num = t.get("jersey_num", "unsure")
+        if isinstance(jersey_num, list):
+            # [12,13,14] -> "12/13/14"
+            jersey_num = "/".join(map(str, jersey_num))
+
+        if jersey_num == "unsure":
+            jersey_num = "U"
+        if "goalkeeper" in team.lower():
+            jersey_num = "GK"
+        if team == "referee":
+            jersey_num = "REF"
+        
+
         frames = t["frames"]
         points = t.get("projected", t.get("points", []))
         for i, f_id in enumerate(frames):
@@ -88,7 +101,7 @@ def render_segments_to_images_and_videos(
                 continue
             pt = points[i]
             if pt is not None:
-                frame_to_objects[f_id].append((pt, tid, team))
+                frame_to_objects[f_id].append((pt, tid, jersey_num, team))
 
     team_colors_cv = {
         'eastern': (255, 0, 0),
@@ -126,6 +139,17 @@ def render_segments_to_images_and_videos(
 
             for t in tracks:
                 tid = t["track_id"]
+                jersey_num = t.get("jersey_num", "U")
+                if isinstance(jersey_num, list):
+                    # [12,13,14] -> "12/13/14"
+                    jersey_num = "/".join(map(str, jersey_num))
+
+                if jersey_num == "unsure":
+                    jersey_num = "U"
+                if "goalkeeper" in team.lower():
+                    jersey_num = "GK"
+                if team == "referee":
+                    jersey_num = "REF"
                 frames = t.get("frames", [])
                 points = np.array(t.get("projected", t.get("points", [])))
                 if len(frames) != len(points):
@@ -143,7 +167,7 @@ def render_segments_to_images_and_videos(
                 ax.plot(xs, ys, color=color, alpha=0.8)
                 ax.scatter(xs[-1], ys[-1], color=color)
                 label_color = 'red' if tid == track_id else 'black'
-                ax.text(xs[-1], ys[-1], str(tid), fontsize=8, color=label_color)
+                ax.text(xs[-1], ys[-1], str(jersey_num), fontsize=8, color=label_color)
 
             ax.set_xlim(0, field_size[0])
             ax.set_ylim(0, field_size[1])
@@ -171,12 +195,12 @@ def render_segments_to_images_and_videos(
 
             for f in range(start_f, end_f + 1):
                 frame_img = bg_img.copy()
-                for pt, tid, team in frame_to_objects.get(f, []):
+                for pt, tid, jersey_num, team in frame_to_objects.get(f, []):
                     x, y = int(pt[0]), field_size[1] - int(pt[1])
                     color = team_colors_cv.get(team, (128, 128, 128))
                     text_color = (0, 0, 255) if tid == track_id else (0, 0, 0)
                     cv2.circle(frame_img, (x, y), 5, color, -1)
-                    cv2.putText(frame_img, str(tid), (x + 6, y - 6),
+                    cv2.putText(frame_img, str(jersey_num), (x + 6, y - 6),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, text_color, 1, cv2.LINE_AA)
                 writer.write(frame_img)
 

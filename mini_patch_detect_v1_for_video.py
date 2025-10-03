@@ -1,5 +1,6 @@
 import argparse
 import os
+import string
 import sys
 from pathlib import Path
 from torchvision.ops import nms
@@ -29,6 +30,9 @@ from collections import defaultdict
 from numba import njit
 from tools.extract_homography_matrix import compute_homography, apply_homography_to_point
 from tools.identify_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
+
+from parseq.strhub.data.module import SceneTextDataModule
+from parseq.strhub.models.utils import load_from_checkpoint
 
 def is_bbox_anomalous(curr_bbox, prev_bbox, height_thresh_ratio=0.5):
     curr_h = curr_bbox[3] - curr_bbox[1]
@@ -404,18 +408,22 @@ class TrackJsonlStreamer:
             "track_id": None,
             "frame_id": [],
             "team_conf": [],
+            "jersey_num": [],
+            "jersey_conf": [],
             "bbox": [],
             "projected": [],
         })
         self.last_seen = {}
         self.fh = self.out_path.open("w")
 
-    def update(self, tid, frame_idx, bbox, team_conf, proj_pt):
+    def update(self, tid, frame_idx, bbox, team_conf, proj_pt, jersey_num, jersey_conf):
         rec = self.records[tid]
         if rec["track_id"] is None:
             rec["track_id"] = tid
         rec["frame_id"].append(frame_idx)
         rec["team_conf"].append(team_conf)
+        rec["jersey_num"].append(jersey_num)
+        rec["jersey_conf"].append(jersey_conf)
         rec["bbox"].append(bbox)
         rec["projected"].append(proj_pt)
         self.last_seen[tid] = frame_idx
@@ -477,6 +485,7 @@ def run(
         ema_alpha = 0.5,  # EMA smoothing factor for bottom center
         slice_size=(640, 640),  # slice width and height
         nms_threshold=0.45,  # NMS threshold for slicer
+        jersey_weights=ROOT / 'jersey_net.pt'  # path to jersey number recognition model
 ):
     
     # Determine valid frame ranges (as set)
@@ -532,6 +541,18 @@ def run(
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     output_path = str(Path(save_dir) / ("after_globalNMS_overlap_remove_annotated_" + Path(source).name))
+
+    # Load jersey number recognition model
+    if jersey_weights and os.path.exists(jersey_weights):
+        charset_test = string.digits
+        kwargs = {"charset_test": charset_test}
+        jersey_model = load_from_checkpoint(jersey_weights, **kwargs)
+        hp = model.hparams
+        if hp is not None:
+            jersey_img_size = hp.img_size
+    else:
+        jersey_model = None
+        print("⚠️ Jersey number recognition model not found or path not provided.")
 
     # init json
     output_json_path = str(Path(save_dir) / "team_tracking.jsonl")
@@ -730,6 +751,8 @@ def run(
             crop_hists = []
             crop_track_ids = []
             frame_crop_features = []
+            jersey_numbers = []
+            jersey_confs = []
 
             # Format detections with track ID
             final_detections = []
@@ -795,6 +818,26 @@ def run(
                 crop_hists.append(crop_hist)
                 crop_track_ids.append(track_id) # may not be required, cause the index of crop_tensors is first N element of final_detections
 
+                # Crop the clothing region with jersey number, looser crop
+                crop_img_jersey = crop_clothing_region(high_resolution_image, (x1, y1, x2, y2),top_ratio=0.1, bottom_ratio=0.6, left_ratio=0.25, right_ratio=0.75)
+                if crop_img_jersey.size == 0:
+                    continue  # skip empty crops
+                # Run jersey number recognition if model is available
+                if jersey_model:
+                    crop_img_jersey_rgb = cv2.cvtColor(crop_img_jersey, cv2.COLOR_BGR2RGB)
+                    transform = SceneTextDataModule.get_transform(jersey_img_size)
+                    crop_img_jersey_rgb = transform(crop_img_jersey_rgb)
+                    crop_img_jersey_rgb = crop_img_jersey_rgb.unsqueeze(0)
+                    logits = jersey_model.forward(crop_img_jersey_rgb.to(jersey_model.device))
+                    probs_full = logits[:,:3,:11].softmax(-1)
+                    preds, probs = model.tokenizer.decode(probs_full)
+                    logits = logits[:,:3,:11].cpu().detach().numpy()[0].tolist()
+                    probs_full = probs_full.cpu().detach().numpy()[0].tolist()
+                    confidence = probs[0].cpu().detach().numpy().squeeze().tolist()
+                    jersey_numbers.append(preds[0]) # e.g. '10'
+                    jersey_confs.append(confidence) # e.g. ['0.9999', '0.999', '1.0'] corresponding to '1' '0' and EOS
+
+
             # for t in online_balls:
             #     tlbr = t.tlbr
             #     track_id = t.track_id
@@ -821,24 +864,33 @@ def run(
 
             # Update tracking JSON records
             # Track current feature index to sync with crop detections
-            feature_index = 0
+            feature_index_jersey = 0
+            feature_index_team = 0
 
             for det in final_detections:
                 x1, y1, x2, y2, conf, cls, track_id, projected_position  = det
                 bbox_out = [int(x1), int(y1), int(x2), int(y2), float(conf)]
 
                 if cls == 0:                              # person
-                    if feature_index < len(team_scores):
+                    if feature_index_jersey < len(jersey_numbers):
+                        jersey_str = jersey_numbers[feature_index_jersey]
+                        jersey_num = int(jersey_str) if jersey_str.isdigit() else -1
+                        jersey_confidence = float(jersey_confs[feature_index_jersey])
+                    else:
+                        jersey_num = -1
+                        jersey_confidence = 0.0
+
+                    if feature_index_team < len(team_scores):
                         team_conf = {k: float(v)
-                                    for k, v in team_scores[feature_index].items()}
-                        feature_index += 1
+                                    for k, v in team_scores[feature_index_team].items()}
+                        feature_index_team += 1
                     else:
                         team_conf = {}
                 else:                                     # ball
                     team_conf = {}
 
                 # ⭐ update the streamer
-                json_streamer.update(track_id, processed_frame_idx, bbox_out, team_conf, projected_position) 
+                json_streamer.update(track_id, processed_frame_idx, bbox_out, team_conf, projected_position, jersey_num, jersey_confidence)
 
         # save json every N frames
         with dt[6]:
@@ -857,12 +909,12 @@ def run(
         total_time = sum(dt[i].dt for i in range(len(dt)))
         # print(f"Frame {processed_frame_idx} total use: {total_time} (preprocessed: {dt[0].dt:.2f}s, inference: {dt[1].dt:.2f}s, NMS: {dt[2].dt:.2f}s, proprocess: {dt[3].dt:.2f}s, tracking & crop patches: {dt[4].dt:.2f}s, ReID: {dt[5].dt:.2f}s, Json: {dt[6].dt:.2f}s, Draw: {dt[7].dt:.2f}s)")
         pbar.set_postfix({
-            # "pre": f"{dt[0].dt:.2f}s",
+            "pre": f"{dt[0].dt:.2f}s",
             "inf": f"{dt[1].dt:.2f}s",
-            # "nms": f"{dt[2].dt:.2f}s",
+            "nms": f"{dt[2].dt:.2f}s",
             "proc": f"{dt[3].dt:.2f}s",
             "trk": f"{dt[4].dt:.2f}s",
-            # "reid": f"{dt[5].dt:.2f}s",
+            "reid": f"{dt[5].dt:.2f}s",
             "json": f"{dt[6].dt:.2f}s",
             "draw": f"{dt[7].dt:.2f}s",
             "total": f"{total_time:.2f}s"
@@ -924,6 +976,7 @@ def parse_opt():
     parser.add_argument('--ema-alpha', type=float, default=0.5, help='EMA smoothing factor for bottom center')
     parser.add_argument('--slice-size', nargs='+', type=int, default=[640, 640], help='slice width and height')
     parser.add_argument('--nms-threshold', type=float, default=0.45, help='NMS threshold for slicer')
+    parser.add_argument('--jersey-weights', type=str, default=ROOT / 'jersey_net.pt', help='path to jersey number recognition model')
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     opt.game_time = np.array(opt.game_time, dtype=np.int32).reshape(4)  # reshape to 1D array
@@ -948,4 +1001,4 @@ if __name__ == "__main__":
     end_time = time.time()
     print(f"Total execution time(HH:MM:SS): {time.strftime('%H:%M:%S', time.gmtime(end_time - start_time))}")
 # Example usage:
-# python3 mini_patch_detect_v1_for_video.py --source './data/video/test_sample/C0478.MP4' --game-time 317 3085 3982 6809 --img 640 --device 0 --weights './weight/yolov9-s-converted.pt' --name test_4k --classes 0 32 --clothes-folder-path ./data/histograms/0525/ --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --nosave
+# python3 mini_patch_detect_v1_for_video.py --source './data/video/test_sample/C0478.MP4' --game-time 317 3085 3982 6809 --img 640 --device 0 --weights './weight/yolov9-s-converted.pt' --name test_4k --classes 0 32 --clothes-folder-path ./data/histograms/0525/ --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --jersey-weights ./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255.ckpt --nosave

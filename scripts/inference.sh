@@ -14,7 +14,7 @@ python3 post-processing-ball.py --json-path "./runs/detect/test_4k_ball_640/ball
 python render_classification_output.py --jsonl-path "../runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" --video-paths '../data/video/test_sample/C0478.MP4' --video-paths ../data/video/test_sample/C0478.MP4 --bg-img-path ../data/images/mongkok_football_field.png --output-dir "../runs/detect/test_4k_player_640_numba_20250829_final/suspicious-output" --game-time 0 0 0 36
 
 # Goalkeper
-python3 detect_goal_v2.py --weights "./weight/yolov9-s-converted.pt" --source "./data/video/GX010025_clips/" --name "demo_video" --nosave --radar_data_path ./data/excel/PR_20250208_1739_session.csv --homography_path ./runs/detect/demo_video/homography_matrix.npy
+python3 detect_goal_v2.py --weights "./weight/yolov9-s-converted.pt" --source "./data/video/GX010025_clips/" --name "demo_video" --nosave --radar_data_path ./data/excel/PR_20250208_1739_session.csv --homography_path ./runs/detect/demo_video/homography_matrix.npy --use-tqdm
 
 python3 detections_to_tracks_and_scores.py --clips-root ./runs/detect/demo_video/clips/0025/ --hist ./data/histograms/gk01.npy
 

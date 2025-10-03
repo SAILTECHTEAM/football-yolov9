@@ -34,6 +34,7 @@ python3 mini_patch_detect_v1_for_video.py \
 --clothes-folder-path ./data/histograms/0525/ \
 --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 \
 --homography-dst-points 530 0 530 660 1060 660 1060 0 \
+--jersey-weights ./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255.ckpt
 --nosave
 ```
 
@@ -178,8 +179,11 @@ python3 detect_goal_v2.py \
   --nosave \
   --radar_data_path ./data/excel/PR_20250208_1739_session.csv \
   --homography_path ./runs/detect/demo_video/homography_matrix.npy
+  --use-tqdm
 ```
 3️⃣ Track Players and Ball
+
+Before running the next codes, remember to download the pretrained weight of ViTPose from the official repo ([link](https://1drv.ms/u/s!AimBgYV7JjTlgSbHyN2mjh2n2LyG?e=y0FgMK))
 
 Next, run `detections_to_tracks_and_scores.py` on the folder of detection JSONLs.
 
