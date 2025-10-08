@@ -18,6 +18,61 @@ def frame_to_time(f: int, fps=29.97, no_colon=False) -> str:
 def bgr_to_rgb(bgr):
     return (bgr[2], bgr[1], bgr[0])  # reverse the tuple
 
+def reverse_homography(point, homography_matrix):
+    """
+    Apply reverse homography to transform a point from 2D pitch coordinates back to video coordinates.
+    
+    Args:
+        point: The 2D point [x, y] in pitch coordinates
+        homography_matrix: The 3x3 homography matrix that maps from video to pitch
+    
+    Returns:
+        np.array: The transformed point [x, y] in video coordinates
+    """
+    # Invert the homography matrix
+    inv_h = np.linalg.inv(homography_matrix)
+    
+    # Convert point to homogeneous coordinates
+    p_homogeneous = np.array([point[0], point[1], 1.0])
+    
+    # Apply inverse transformation
+    transformed = np.dot(inv_h, p_homogeneous)
+    
+    # Convert back to 2D coordinates
+    transformed = transformed / transformed[2]
+    
+    return np.array([transformed[0], transformed[1]])
+
+def draw_triangle(img, center, size=10, color=(0, 0, 255), thickness=2):
+    """
+    Draw a triangle with its tip facing upward.
+    
+    Args:
+        img: The image to draw on
+        center: The center point [x, y] where the triangle should be placed
+        size: Size of the triangle (height)
+        color: BGR color tuple
+        thickness: Line thickness (-1 for filled)
+    """
+    x, y = int(center[0]), int(center[1])
+    
+    # Define triangle points (tip at the top)
+    pts = np.array([
+        [x, y - size],           # Top point
+        [x - size//2, y + size//2],  # Bottom left
+        [x + size//2, y + size//2],  # Bottom right
+    ], np.int32)
+    
+    # Reshape to a format OpenCV expects
+    pts = pts.reshape((-1, 1, 2))
+    
+    # Draw the triangle
+    # cv2.polylines(img, [pts], True, color, thickness)
+    
+    # Fill the triangle if thickness is -1
+    if thickness == -1:
+        cv2.fillPoly(img, [pts], color)
+
 def crop_video_frames(video_path: str, start_frame: int, end_frame: int, output_path: str, fps: float):
     """
     Crop a segment from a video between start_frame and end_frame (inclusive), and save it.
@@ -63,7 +118,8 @@ def render_segments_to_images_and_videos(
     bg_img,
     field_size: tuple,
     output_dir: str,
-    fps: float = 29.97
+    fps: float = 29.97,
+    homography=np.eye(3)
 ):
     os.makedirs(output_dir, exist_ok=True)
     # resize background image to match field size
@@ -75,7 +131,7 @@ def render_segments_to_images_and_videos(
     # Load all tracks once
     with open(jsonl_path, 'r') as f:
         tracks = [json.loads(line) for line in f]
-
+    
     # Index by frame
     frame_to_objects = defaultdict(list)
     for t in tracks:
@@ -92,7 +148,8 @@ def render_segments_to_images_and_videos(
             jersey_num = "GK"
         if team == "referee":
             jersey_num = "REF"
-        
+        if team == "ball":
+            jersey_num = "Ball"
 
         frames = t["frames"]
         points = t.get("projected", t.get("points", []))
@@ -124,12 +181,33 @@ def render_segments_to_images_and_videos(
         print(f"🔍 Processing Class {tag} with {len(segment)} segments...")
 
         for track_id, (start_f, end_f) in segment.items():
-            print(f"🎯 Rendering track {track_id} from {start_f} to {end_f}...")
+            # Find team and jersey number for the track using the first valid frame
+            suspicious_player_team = "unsure"
+            suspicious_jersey_num = "unsure"
+            for f in range(start_f, start_f + 10):
+                for pt, tid, jnum, t in frame_to_objects.get(f, []):
+                    if tid == track_id:
+                        suspicious_player_team = t
+                        suspicious_jersey_num = jnum
+                        break
+                if suspicious_player_team != "unsure":
+                    break
+                if suspicious_jersey_num != "unsure":
+                    break
+
+            if suspicious_jersey_num == "unsure":
+                suspicious_jersey_num = track_id  # fallback to track_id
+            if "goalkeeper" in suspicious_player_team.lower():
+                suspicious_jersey_num = "GK"
+            if isinstance(suspicious_jersey_num, list):
+                suspicious_jersey_num = "/".join(map(str, suspicious_jersey_num))
+            print(f"🎯 Rendering track {track_id}, team {suspicious_player_team}, player {suspicious_jersey_num} from {start_f} to {end_f}...")
             video_start_frame = convert_game_frame_to_video_frame(start_f, game_time[0], fps)
             video_end_frame = convert_game_frame_to_video_frame(end_f, game_time[0], fps)
 
             # Create output subfolder
-            track_output_dir = os.path.join(output_dir, track_id, f"class_{tag}")
+            track_name = f"{suspicious_player_team}_{suspicious_jersey_num}"
+            track_output_dir = os.path.join(output_dir, track_name, f"class_{tag}")
             os.makedirs(track_output_dir, exist_ok=True)
 
             # === 🖼️ Render Image ===
@@ -139,6 +217,7 @@ def render_segments_to_images_and_videos(
 
             for t in tracks:
                 tid = t["track_id"]
+                team = t.get("team", "unsure")
                 jersey_num = t.get("jersey_num", "U")
                 if isinstance(jersey_num, list):
                     # [12,13,14] -> "12/13/14"
@@ -150,6 +229,7 @@ def render_segments_to_images_and_videos(
                     jersey_num = "GK"
                 if team == "referee":
                     jersey_num = "REF"
+                    
                 frames = t.get("frames", [])
                 points = np.array(t.get("projected", t.get("points", [])))
                 if len(frames) != len(points):
@@ -173,7 +253,7 @@ def render_segments_to_images_and_videos(
             ax.set_ylim(0, field_size[1])
             ax.set_title(f"Track {track_id} [{frame_to_time(start_f)} → {frame_to_time(end_f)}]")
             plt.tight_layout()
-            image_path = os.path.join(track_output_dir, f"{track_id}_{frame_to_time(video_start_frame, no_colon=True)}_{frame_to_time(video_end_frame, no_colon=True)}.png")
+            image_path = os.path.join(track_output_dir, f"{track_id}_{suspicious_player_team}_{suspicious_jersey_num}_{frame_to_time(video_start_frame, no_colon=True)}_{frame_to_time(video_end_frame, no_colon=True)}.png")
             plt.savefig(image_path, dpi=300)
             plt.close()
             print(f"🖼️ Saved image: {image_path}")
@@ -183,14 +263,47 @@ def render_segments_to_images_and_videos(
                 video_start_frame = convert_game_frame_to_video_frame(start_f, align_time, fps)
                 video_end_frame = convert_game_frame_to_video_frame(end_f, align_time, fps)
 
-                raw_clip_path = os.path.join(track_output_dir, f"{track_id}_cam{idx}_{frame_to_time(video_start_frame, fps, no_colon=True)}_{frame_to_time(video_end_frame, fps, no_colon=True)}.mp4")
+                # raw_clip_path = os.path.join(track_output_dir, f"{track_id}_cam{idx}_{frame_to_time(video_start_frame, fps, no_colon=True)}_{frame_to_time(video_end_frame, fps, no_colon=True)}.mp4")
 
-                crop_video_frames(video_file, video_start_frame, video_end_frame, raw_clip_path, fps)
-                print(f"🎥 Saved raw clip for camera {idx} → {raw_clip_path}")
+                # crop_video_frames(video_file, video_start_frame, video_end_frame, raw_clip_path, fps)
+                # print(f"🎥 Saved raw clip for camera {idx} → {raw_clip_path}")
+                
+                # Create annotated version of the clip
+                annotated_clip_path = os.path.join(track_output_dir, f"{track_id}_{suspicious_player_team}_{suspicious_jersey_num}_cam{idx}_{frame_to_time(video_start_frame, fps, no_colon=True)}_{frame_to_time(video_end_frame, fps, no_colon=True)}.mp4")
+                
+                # Process and annotate video
+                cap = cv2.VideoCapture(video_file)
+                if not cap.isOpened():
+                    print(f"⚠️ Cannot open video: {video_file}")
+                    continue
+                
+                width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                
+                fourcc = cv2.VideoWriter_fourcc(*'avc1')
+                writer = cv2.VideoWriter(annotated_clip_path, fourcc, fps, (width, height))
+                
+                # Set position to start frame and annotate
+                cap.set(cv2.CAP_PROP_POS_FRAMES, video_start_frame)
+                for f in range(start_f, end_f + 1):
+                    ret, frame = cap.read()
+                    if not ret:
+                        print(f"⚠️ Failed to read, stopping early.")
+                        break
+                    for pt, tid, jersey_num, team in frame_to_objects.get(f, []):
+                        if tid != track_id:
+                            continue
+                        pitch_point = int(pt[0]), int(pt[1])
+                        video_point = reverse_homography(pitch_point, homography)
+                        draw_triangle(frame, video_point, size=15, color=(0, 0, 255), thickness=-1)  # Filled triangle
+                    writer.write(frame)
+                writer.release()
+                print(f"🎥 Saved annotated clip → {annotated_clip_path}")
+                cap.release()
 
             # === 🎥 Render Video ===
             height, width, _ = bg_img.shape
-            video_path = os.path.join(track_output_dir, f"{track_id}_{frame_to_time(video_start_frame, no_colon=True)}_{frame_to_time(video_end_frame, no_colon=True)}.mp4")
+            video_path = os.path.join(track_output_dir, f"{track_id}_{suspicious_player_team}_{suspicious_jersey_num}_{frame_to_time(video_start_frame, no_colon=True)}_{frame_to_time(video_end_frame, no_colon=True)}.mp4")
             writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
 
             for f in range(start_f, end_f + 1):
@@ -223,6 +336,7 @@ def main(args):
     bg_img_path = args.bg_img_path
     field_size = tuple(map(int, args.field_size.split(',')))
     fps = args.fps
+    homography = np.load(args.homography) if os.path.isfile(args.homography) else np.eye(3)
 
     # Assume these functions are defined elsewhere
     multi_ball_frames = get_frames_with_multiple_balls(jsonl_path)
@@ -248,7 +362,8 @@ def main(args):
         bg_img=cv2.imread(bg_img_path),
         field_size=field_size,
         output_dir=output_dir,
-        fps=fps
+        fps=fps,
+        homography=homography
     )
 
 if __name__ == "__main__":
@@ -264,12 +379,13 @@ if __name__ == "__main__":
     parser.add_argument("--fps", type=float, default=29.97, help="Video frames per second.")
 
     # Parameters for abnormal track detection
-    parser.add_argument("--angle-threshold", type=float, default=90, help="Angle threshold for detection.")
+    parser.add_argument("--angle-threshold", type=float, default=120, help="Angle threshold for detection.")
     parser.add_argument("--velocity-threshold", type=float, default=1e-1, help="Velocity threshold.")
     parser.add_argument("--min-valid-frames", type=int, default=5, help="Minimum number of valid frames.")
     parser.add_argument("--conf-threshold", type=float, default=0.3, help="Confidence threshold.")
     parser.add_argument("--frame-threshold", type=int, default=3, help="Frame count threshold.")
     parser.add_argument("--distance-threshold", type=float, default=0.5, help="Distance threshold in pixels or meters.")
+    parser.add_argument("--homography", type=str, default="homography_matrix.npy", help="Path to homography matrix file.")
 
     args = parser.parse_args()
     # 1. Validate that total game_time values is divisible by 4

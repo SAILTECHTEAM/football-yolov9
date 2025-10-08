@@ -19,38 +19,43 @@ bash scripts/inference.sh
 ```
 
 ### 1️⃣ Inference
-Run detection on the whole match clip, and output detection results in JSONL format. Currently 1 JSONL file for player detection results, and 1 JSONL file for ball detection results.
+Run detection on the whole match clip, and output detection results in JSONL format. Currently 1 JSONL file for player detection results, and 1 JSONL file for ball detection results. The jersey model weight is downloaded from [here](https://drive.google.com/file/d/1uRln22tlhneVt3P6MePmVxBWSLMsL3bm/view). In case the checkpoint does not match the model state_dict, run this command:
+```{shell}
+python3 ./old_function/convert_parseq_weight.py \
+  --old_ckpt "./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255.ckpt" \
+  --new_ckpt "./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255_new.ckpt"
+```
 
 ```{shell}
 # Player detection
 python3 mini_patch_detect_v1_for_video.py \
---source './data/video/test_sample/C0478.MP4' \
---game-time 317 3085 3982 6809 \
---img 640 \
---device 0 \
---weights './weight/yolov9-s-converted.pt' \
---name test_4k_player_640 \
---classes 0 32 \
---clothes-folder-path ./data/histograms/0525/ \
---homography-src-points 172 1104 2101 895 3800 1021 3458 2057 \
---homography-dst-points 530 0 530 660 1060 660 1060 0 \
---jersey-weights ./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255.ckpt
---nosave
+  --source './data/video/test_sample/C0478.MP4' \
+  --game-time 317 3085 3982 6809 \
+  --img 640 \
+  --device 0 \
+  --weights './weight/yolov9-s-converted.pt' \
+  --name test_4k_player_640 \
+  --classes 0 32 \
+  --clothes-folder-path ./data/histograms/0525/ \
+  --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 \
+  --homography-dst-points 530 0 530 660 1060 660 1060 0 \
+  --jersey-weights ./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255.ckpt \
+  --nosave
 ```
 
 ```{shell}
 # Ball detection
 python3 mini_patch_detect_ball_for_video.py \
---source './data/video/test_sample/C0478.MP4' \
---game-time 317 3085 3982 6809 \
---img 640 \
---device 0 \
---weights './weight/yolov9-s-converted_ball_detection_1280_20250822.pt' \
---name test_4k_ball_640 \
---classes 0 \
---homography-src-points 172 1104 2101 895 3800 1021 3458 2057 \
---homography-dst-points 530 0 530 660 1060 660 1060 0 \
---nosave
+  --source './data/video/test_sample/C0478.MP4' \
+  --game-time 317 3085 3982 6809 \
+  --img 640 \
+  --device 0 \
+  --weights './weight/yolov9-s-converted_ball_detection_1280_20250822.pt' \
+  --name test_4k_ball_640 \
+  --classes 0 \
+  --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 \
+  --homography-dst-points 530 0 530 660 1060 660 1060 0 \
+  --nosave
 ```
 
 ### 2️⃣ Postprocess of Tracks
@@ -58,35 +63,46 @@ The raw detection results are processed in `post-processing.py` and `post-proces
 
 ```{shell}
 python3 post-processing.py \
---json-path "./runs/detect/test_4k_player_640/team_tracking.jsonl" \
---image-path "./data/images/mongkok_football_field.png" \
---output-name './runs/detect/test_4k_player_640/team_tracking_output'
+  --json-path "./runs/detect/test_4k_player_640/team_tracking.jsonl" \
+  --image-path "./data/images/mongkok_football_field.png" \
+  --home-jersey-numbers 1, 2, 3, 4, 7, 10, 11, 16, 20, 27, 30, 13, 23, 25, 8, 14, 17, 18, 21, 24, 31, 33, 34 \
+  --away-jersey-numbers 26, 2, 6, 7, 9, 16, 20, 30, 36, 77, 99, 1, 17, 22, 23, 24, 28, 33, 42, 43, 44, 72, 88 \
+  --output-name './runs/detect/test_4k_player_640/team_tracking_output'
 ```
 
 ```{shell}
 python3 post-processing-ball.py \
---json-path "./runs/detect/test_4k_ball_640/ball_tracking.jsonl" \
---image-path "./data/images/mongkok_football_field.png" \
---output-name './runs/detect/test_4k_ball_640/ball_tracking_output'
+  --json-path "./runs/detect/test_4k_ball_640/ball_tracking.jsonl" \
+  --image-path "./data/images/mongkok_football_field.png" \
+  --output-name './runs/detect/test_4k_ball_640/ball_tracking_output'
 ```
 After that run this command to combine both JSONL files into one. The final JSONL file to use is named `team_tracking_final.jsonl`.
 ```{shell}
-python combine_team_ball_tracks.py \
---player-jsonl "./runs/detect/test_4k_player_640/team_tracking_final.jsonl" \
---ball-jsonl "./runs/detect/test_4k_ball_640/ball_tracking_final.jsonl" \
---output-jsonl "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl"
+python3 combine_team_ball_tracks.py \
+  --player-jsonl "./runs/detect/test_4k_player_640/team_tracking_final.jsonl" \
+  --ball-jsonl "./runs/detect/test_4k_ball_640/ball_tracking_final.jsonl" \
+  --output-jsonl "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl"
 ```
 
 ### 3️⃣ Analyse and Visualise Detection and Tracking Result
+Compute the .npy file required for the homographic transformation:
+
+```{shell}
+python3 ./tools/extract_homography_matrix.py \
+  --src "172,1104 2101,895 3800,1021 3458,2057" \
+  --dst "530,0 530,660 1060,660 1060,0" \
+  --out "./weight/homography_matrix_whole_match.npy"
+```
+
 Prepare your jsonl file from previous step and run this command:
 ```{shell}
-cd tools
-python render_classification_output.py \
---jsonl-path "../runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" \
---video-paths '../data/video/test_sample/C0478.MP4' \
---bg-img-path ../data/images/mongkok_football_field.png \
---output-dir "../runs/detect/test_4k_player_640/suspicious-output" \
---game-time 317 3085 3982 6809
+python3 ./tools/render_classification_output.py \
+  --jsonl-path "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" \
+  --video-paths './data/video/test_sample/C0478.MP4' \
+  --bg-img-path ./data/images/mongkok_football_field.png \
+  --output-dir './runs/detect/test_4k_player_640/suspicious-output' \
+  --game-time 317 3085 3982 6809 \
+  --homography './weight/homography_matrix_whole_match.npy'
 ```
 The output contains a radar view image, a radar view video of the suspicious player plotted on 2D field, and the footage of the specific time period of suspicious action. Each suspicious output is stored in a folder named after the track id of the player (e.g. 16a).
 
@@ -116,20 +132,20 @@ Classify players' behaviour near the ball into these cases:
 
 - Whole match JSONL → render_classification_output.py → folder of suspicious-output
 
-Here let say player 16a has been detected suspicious on Class 1 and 7. For the naming format, the first 3 digits combined is the minute, the last 2 digits combined is the second (00016 is 000:16, 10545 is 105:45).
+Here let say player 16a with jersey number 8 from home team has been detected suspicious on Class 1 and 7. For the naming format, the first 3 digits combined is the minute, the last 2 digits combined is the second (00016 is 000:16, 10545 is 105:45).
 ```text
 .
 ├── suspicious-output/
-│   ├── 16a
+│   ├── home_8
 │   │   ├── class_1/
-│   │   │   ├── 16a_00016_00036.mp4
-│   │   │   ├── 16a_00016_00036.png
-│   │   │   └── 16a_cam0_00016_00036.mp4
+│   │   │   ├── 16a_home_8_00016_00036.mp4
+│   │   │   ├── 16a_home_8_00016_00036.png
+│   │   │   └── 16a_home_8_cam0_00016_00036.mp4
 │   │   ├── class_7/
-│   │   │   ├── 16a_10511_10545.mp4
-│   │   │   ├── 16a_10511_10545.png
-│   │   │   └── 16a_cam0_10511_10545.mp4
-│   ├── 33b/
+│   │   │   ├── 16a_home_8_10511_10545.mp4
+│   │   │   ├── 16a_home_8_10511_10545.png
+│   │   │   └── 16a_home_8_cam0_10511_10545.mp4
+│   ├── away_30/
 │   │   ├── ...
 ```
 
@@ -178,7 +194,7 @@ python3 detect_goal_v2.py \
   --name "demo_video" \
   --nosave \
   --radar_data_path ./data/excel/PR_20250208_1739_session.csv \
-  --homography_path ./runs/detect/demo_video/homography_matrix.npy
+  --homography_path ./runs/detect/demo_video/homography_matrix.npy \
   --use-tqdm
 ```
 3️⃣ Track Players and Ball
@@ -225,7 +241,7 @@ The script processes all clips in a folder and prints tags or saves per-clip JSO
 ```{shell}
 python3 analyze_goalkeeper_behavior.py \
   --root ./runs/detect/demo_video/clips/0025/ \
-  --speeds 30,31,32,33,34,35 \
+  --speeds 30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45 \
   --out-dir ./runs/detect/demo_video/analysis \
   --homography ./runs/detect/demo_video/homography_matrix.npy
 ```

@@ -13,6 +13,7 @@ import torch
 import json
 import time
 from tqdm import tqdm
+from PIL import Image
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLO root directory
@@ -31,8 +32,8 @@ from numba import njit
 from tools.extract_homography_matrix import compute_homography, apply_homography_to_point
 from tools.identify_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
 
-from parseq.strhub.data.module import SceneTextDataModule
-from parseq.strhub.models.utils import load_from_checkpoint
+from strhub.data.module import SceneTextDataModule
+from strhub.models.utils import load_from_checkpoint
 
 def is_bbox_anomalous(curr_bbox, prev_bbox, height_thresh_ratio=0.5):
     curr_h = curr_bbox[3] - curr_bbox[1]
@@ -547,7 +548,7 @@ def run(
         charset_test = string.digits
         kwargs = {"charset_test": charset_test}
         jersey_model = load_from_checkpoint(jersey_weights, **kwargs)
-        hp = model.hparams
+        hp = jersey_model.hparams
         if hp is not None:
             jersey_img_size = hp.img_size
     else:
@@ -566,7 +567,7 @@ def run(
 
     if not nosave:
         print(f"🔄 Saving video to: {output_path}")
-        out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'H264'), fps, (width, height))
+        out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
     # print(f"🔄 Saving tracking JSON to: {output_json_path}")
     
     # Initialize tracker
@@ -826,11 +827,12 @@ def run(
                 if jersey_model:
                     crop_img_jersey_rgb = cv2.cvtColor(crop_img_jersey, cv2.COLOR_BGR2RGB)
                     transform = SceneTextDataModule.get_transform(jersey_img_size)
+                    crop_img_jersey_rgb = Image.fromarray(crop_img_jersey_rgb)
                     crop_img_jersey_rgb = transform(crop_img_jersey_rgb)
                     crop_img_jersey_rgb = crop_img_jersey_rgb.unsqueeze(0)
                     logits = jersey_model.forward(crop_img_jersey_rgb.to(jersey_model.device))
                     probs_full = logits[:,:3,:11].softmax(-1)
-                    preds, probs = model.tokenizer.decode(probs_full)
+                    preds, probs = jersey_model.tokenizer.decode(probs_full)
                     logits = logits[:,:3,:11].cpu().detach().numpy()[0].tolist()
                     probs_full = probs_full.cpu().detach().numpy()[0].tolist()
                     confidence = probs[0].cpu().detach().numpy().squeeze().tolist()
@@ -875,7 +877,7 @@ def run(
                     if feature_index_jersey < len(jersey_numbers):
                         jersey_str = jersey_numbers[feature_index_jersey]
                         jersey_num = int(jersey_str) if jersey_str.isdigit() else -1
-                        jersey_confidence = float(jersey_confs[feature_index_jersey])
+                        jersey_confidence = jersey_confs[feature_index_jersey]
                     else:
                         jersey_num = -1
                         jersey_confidence = 0.0

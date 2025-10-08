@@ -942,7 +942,8 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
 def resolve_duplicate_jersey_numbers(
     jsonl_path: str,
     output_path: str,
-    team_jersey_lists: str = None
+    home_jersey_numbers: list = None,
+    away_jersey_numbers: list = None,
 ):
     """
     Resolves duplicate jersey numbers by identifying and correcting players with the same jersey number on the same team.
@@ -950,23 +951,19 @@ def resolve_duplicate_jersey_numbers(
     Args:
         jsonl_path: Path to the input JSONL file with track data
         output_path: Path to save the output JSONL with resolved jersey numbers
-        team_jersey_lists: Path to JSON file containing valid jersey numbers per team
+        home_jersey_numbers: List of valid jersey numbers for the home team
+        away_jersey_numbers: List of valid jersey numbers for the away team
     """
     
     # Read team jersey number lists
-    if team_jersey_lists is None:
+    if home_jersey_numbers is None or away_jersey_numbers is None:
         print("No team jersey number lists provided.")
         exit(1)
 
-    team_jerseys = {}
-    with open(team_jersey_lists, 'r') as f: # format of each line: {"team": "team_name", "jersey_numbers": [1, 2, 3, ...]}
-        for line in f:
-            if line.strip():
-                obj = json.loads(line)
-                team = obj.get('team', '')
-                jerseys = obj.get('jersey_numbers', [])
-                if team and jerseys:
-                    team_jerseys[team] = jerseys
+    team_jerseys = {
+        'home': home_jersey_numbers,
+        'away': away_jersey_numbers,
+    }
         
 
     # Read all tracks into memory
@@ -1151,7 +1148,8 @@ def find_similar_jersey_numbers(jersey_num, available_jerseys):
 def prepare_background_and_tracks(
     json_path,
     image_path,
-    team_jersey_lists,
+    home_jersey_numbers,
+    away_jersey_numbers,
     field_size,
     min_track_length,
     smoothing_window,
@@ -1255,14 +1253,16 @@ def prepare_background_and_tracks(
     resolve_duplicate_jersey_numbers(
         jsonl_path=json_path.replace('.jsonl', '_smoothed.jsonl'),
         output_path=json_path.replace('.jsonl', '_final.jsonl'),
-        team_jersey_lists=team_jersey_lists
+        home_jersey_numbers=home_jersey_numbers,
+        away_jersey_numbers=away_jersey_numbers,
     )
     return bg_img
 
 def process_merged_tracks(
     json_path,
     image_path,
-    team_jersey_lists,
+    home_jersey_numbers,
+    away_jersey_numbers,
     field_size,
     min_track_length,
     smoothing_window,
@@ -1285,7 +1285,7 @@ def process_merged_tracks(
     start = time.time()
     # Shared logic
     bg_img = prepare_background_and_tracks(
-        json_path, image_path, team_jersey_lists, field_size,
+        json_path, image_path, home_jersey_numbers, away_jersey_numbers, field_size,
         min_track_length, smoothing_window, polyorder, max_step,
         max_merge_gap, max_merge_overlap_frames, max_merge_distance,
         window_size, threshold, detector_kwargs
@@ -1298,7 +1298,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Process merged tracks from tracking JSONL")
     parser.add_argument('--json-path', type=str, required=True, help='Path to the merged tracking JSONL file')
     parser.add_argument('--image-path', type=str, required=True, help='Path to the field image')
-    parser.add_argument('--team-jersey-lists', type=str, required=True, help='Path to JSON file with team jersey number lists')
+    parser.add_argument('--home-jersey-numbers', type=int, nargs='+', required=True, help='List of home team jersey numbers')
+    parser.add_argument('--away-jersey-numbers', type=int, nargs='+', required=True, help='List of away team jersey numbers')
     parser.add_argument('--field-size', type=int, nargs=2, default=[1060, 660], help='Field size (length, width) as 0.1m')
     parser.add_argument('--min-track-length', type=int, default=10, help='Minimum track length to keep')
     parser.add_argument('--smoothing-window', type=int, default=90, help='Savitzky-Golay filter window size')
@@ -1334,7 +1335,8 @@ def main():
     process_merged_tracks(
         json_path=args.json_path,
         image_path=args.image_path,
-        team_jersey_lists=args.team_jersey_lists,
+        home_jersey_numbers=args.home_jersey_numbers,
+        away_jersey_numbers=args.away_jersey_numbers,
         field_size=tuple(args.field_size),
         min_track_length=args.min_track_length,
         smoothing_window=args.smoothing_window,

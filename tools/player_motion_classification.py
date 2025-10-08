@@ -1534,7 +1534,7 @@ def detect_delay_restart(
                 end_frame = end_frames[0]
                 
                 f_start = max(0, start_frame - frame_window)
-                f_end = end_frame + frame_window
+                f_end = min(end_frame + frame_window, all_frames[-1])
                 
                 segments.append((f_start, f_end))
             

@@ -241,7 +241,7 @@ team_jersey_lists = {
 }
 
 resolve_duplicate_jersey_numbers(
-    jsonl_path="./runs/detect/example_1002/team_tracking_with_jersey_final.jsonl",
-    output_path="./runs/detect/example_1002/team_tracking_with_jersey_final_resolved.jsonl",
+    jsonl_path="../runs/detect/example_1002/team_tracking_with_jersey_smoothed.jsonl",
+    output_path="../runs/detect/example_1002/team_tracking_with_jersey_final.jsonl",
     team_jersey_lists=team_jersey_lists
 )
