@@ -121,6 +121,26 @@ Classify players' behaviour near the ball into these cases:
 
 ```
 
+For the statistics of each player, run the following command:
+
+```{shell}
+python3 ./tools/calculate_player_statistics.py 
+  --jsonl-path "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" --frame-interval 30 
+  --fps 29.97 
+  --comparison-split 0.85
+```
+This will output a csv file called `player_statstics.csv` to the same directory of the jsonl file.
+
+To generate position heatmap of a player, run the following command:
+
+```{shell}
+python3 ./tools/generate_player_heatmap.py 
+  --jsonl-path "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" --bg-img-path "./data/images/mongkok_football_field.png" 
+  --jersey_number "16" 
+  --team "home"      
+```
+Change the value of `jersey-number` and `team` for selecting the specific player. This outputs a png file named after the jersey number and team, e.g. `home_16_heatmap.png`, on the same directory of the jsonl file.
+
 ### Summary
 - Input Clips → mini_patch_detect_v1_for_video.py → player detections and tracks (JSONL)
 - Player detections and tracks → post-processing.py → refined player detections and tracks (JSONL)

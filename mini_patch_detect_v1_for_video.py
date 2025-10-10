@@ -547,7 +547,7 @@ def run(
     if jersey_weights and os.path.exists(jersey_weights):
         charset_test = string.digits
         kwargs = {"charset_test": charset_test}
-        jersey_model = load_from_checkpoint(jersey_weights, **kwargs)
+        jersey_model = load_from_checkpoint(jersey_weights, **kwargs).eval().to(device)
         hp = jersey_model.hparams
         if hp is not None:
             jersey_img_size = hp.img_size
@@ -878,6 +878,7 @@ def run(
                         jersey_str = jersey_numbers[feature_index_jersey]
                         jersey_num = int(jersey_str) if jersey_str.isdigit() else -1
                         jersey_confidence = jersey_confs[feature_index_jersey]
+                        feature_index_jersey += 1
                     else:
                         jersey_num = -1
                         jersey_confidence = 0.0

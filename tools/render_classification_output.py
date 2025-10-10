@@ -161,10 +161,10 @@ def render_segments_to_images_and_videos(
                 frame_to_objects[f_id].append((pt, tid, jersey_num, team))
 
     team_colors_cv = {
-        'eastern': (255, 0, 0),
-        'easterngoalkeeper': (0, 255, 0),
-        'kitchee': (255, 192, 203),
-        'kitcheegoalkeeper': (0, 165, 255),
+        'home': (255, 0, 0),
+        'homegoalkeeper': (0, 255, 0),
+        'away': (255, 192, 203),
+        'awaygoalkeeper': (0, 165, 255),
         'referee': (0, 255, 255),
         'ball': (0, 0, 0),
         'unsure': (128, 128, 128),
@@ -174,6 +174,8 @@ def render_segments_to_images_and_videos(
         k: tuple(np.array(bgr_to_rgb(v)) / 255.0)
         for k, v in team_colors_cv.items()
     }
+
+    buffer = 150  # frames before and after
     # Note: format of suspicious_segments: {1: {'start_frame': int, 'end_frame': int}, ...}
     for tag, segment in suspicious_segments.items():
         if not isinstance(segment, dict):
@@ -181,9 +183,13 @@ def render_segments_to_images_and_videos(
         print(f"🔍 Processing Class {tag} with {len(segment)} segments...")
 
         for track_id, (start_f, end_f) in segment.items():
+            # give a larger window for context
+            start_f = max(0, start_f - buffer)
+            end_f = min(end_f + buffer, max(frame_to_objects.keys()))
             # Find team and jersey number for the track using the first valid frame
             suspicious_player_team = "unsure"
             suspicious_jersey_num = "unsure"
+            # Search within the first 10 frames
             for f in range(start_f, start_f + 10):
                 for pt, tid, jnum, t in frame_to_objects.get(f, []):
                     if tid == track_id:
