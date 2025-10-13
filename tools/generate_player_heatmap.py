@@ -89,7 +89,7 @@ def generate_heatmap(tracks_df, field_size=(1060, 660), bg_img=None, cmap='hot',
         title = "Position Heatmap"
 
     # Create meshgrid
-    xi, yi = np.mgrid[0:field_size[0]:1000j, 0:field_size[1]:500j]
+    xi, yi = np.mgrid[0:field_size[0]:100j, 0:field_size[1]:50j]
     
     # Compute kernel density
     k = gaussian_kde([x, y])

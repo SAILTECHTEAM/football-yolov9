@@ -333,6 +333,10 @@ def determine_track_jersey_number(
             # Validate jersey predictions
             candidates = []
             for i, (jersey_num, conf_list) in enumerate(zip(jersey_entries, jersey_conf_entries)):
+                if not isinstance(conf_list, list):
+                    continue
+                if jersey_num == -1:
+                    continue
                 # Skip if any confidence is below threshold
                 if any(conf < confidence_threshold for conf in conf_list):
                     continue
