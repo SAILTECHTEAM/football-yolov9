@@ -30,8 +30,8 @@ python3 mini_patch_detect_ball_for_video.py \
 python3 post-processing.py \
   --json-path "./runs/detect/test_4k_player_640/team_tracking.jsonl" \
   --image-path "./data/images/mongkok_football_field.png" \
-  --home-jersey-numbers 1, 2, 3, 4, 7, 10, 11, 16, 20, 27, 30, 13, 23, 25, 8, 14, 17, 18, 21, 24, 31, 33, 34 \
-  --away-jersey-numbers 26, 2, 6, 7, 9, 16, 20, 30, 36, 77, 99, 1, 17, 22, 23, 24, 28, 33, 42, 43, 44, 72, 88 \
+  --home-jersey-numbers 1 2 3 4 7 10 11 16 20 27 30 13 23 25 8 14 17 18 21 24 31 33 34 \
+  --away-jersey-numbers 26 2 6 7 9 16 20 30 36 77 99 1 17 22 23 24 28 33 42 43 44 72 88 \
   --output-name './runs/detect/test_4k_player_640/team_tracking_output'
 
 

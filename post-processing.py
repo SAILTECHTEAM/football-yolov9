@@ -918,6 +918,13 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
                             "count": other["count"],
                             "track_ids": other["track_ids"]
                         })
+                    if not (t_start > ow_start or t_end < ow_end):
+                        new_windows.append({
+                            "range": other["range"],
+                            "count": other["count"] - 1,
+                            "track_ids": [other_tid for other_tid in other["track_ids"] if other_tid != tid]
+                        })
+
                 windows = new_windows
 
             # If still unresolved, re-add current window
@@ -931,7 +938,7 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
             track = json.loads(line.strip())
             tid = track.get("track_id")
             if tid in relabel_map:
-                if track.get("team") not in [not_sure_label, "referee"] and not track.get("team", "").endswith("goalkeeper"):
+                if track.get("team") not in [not_sure_label, "referee"]:
                     track["team"] = relabel_map[tid]
             json.dump(track, f_out)
             f_out.write("\n")
@@ -1129,7 +1136,7 @@ def find_similar_jersey_numbers(jersey_num, available_jerseys):
         # Single digit: find all numbers containing this digit
         digit = jersey_str
         for available in available_jerseys:
-            if digit in str(available) and available != jersey_num:
+            if digit in str(available) or available == jersey_num:
                 similar_jerseys.append(available)
     else:
         # Multi-digit: find all numbers starting or ending with same digit
@@ -1138,7 +1145,7 @@ def find_similar_jersey_numbers(jersey_num, available_jerseys):
         
         for available in available_jerseys:
             available_str = str(available)
-            if (available_str.startswith(first_digit) or available_str.endswith(last_digit)) and available != jersey_num:
+            if (available_str.startswith(first_digit) or available_str.endswith(last_digit)) or available == jersey_num:
                 similar_jerseys.append(available)
     
     return similar_jerseys
@@ -1358,4 +1365,9 @@ if __name__ == "__main__":
     main()
 
 # example usage:
-# python3 post-processing.py --json-path "./runs/detect/test_4k-2h-crop/team_tracking.jsonl" --image-path "./data/images/mongkok_football_field.png" --output-name './runs/detect/test_4k-2h-crop/team_tracking_output'
+# python3 post-processing.py \
+#  --json-path "./runs/detect/test_4k_player_640/team_tracking.jsonl" \
+#  --image-path "./data/images/mongkok_football_field.png" \
+#  --home-jersey-numbers 1 2 3 4 7 10 11 16 20 27 30 13 23 25 8 14 17 18 21 24 31 33 34 \
+#  --away-jersey-numbers 26 2 6 7 9 16 20 30 36 77 99 1 17 22 23 24 28 33 42 43 44 72 88 \
+#  --output-name './runs/detect/test_4k_player_640/team_tracking_output'

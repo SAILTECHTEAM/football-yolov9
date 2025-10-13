@@ -301,7 +301,7 @@ def render_segments_to_images_and_videos(
                             continue
                         pitch_point = int(pt[0]), int(pt[1])
                         video_point = reverse_homography(pitch_point, homography)
-                        draw_triangle(frame, video_point, size=15, color=(0, 0, 255), thickness=-1)  # Filled triangle
+                        draw_triangle(frame, video_point, size=30, color=(0, 255, 255), thickness=-1)  # Filled triangle
                     writer.write(frame)
                 writer.release()
                 print(f"🎥 Saved annotated clip → {annotated_clip_path}")

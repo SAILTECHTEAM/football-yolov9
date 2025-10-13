@@ -65,8 +65,8 @@ The raw detection results are processed in `post-processing.py` and `post-proces
 python3 post-processing.py \
   --json-path "./runs/detect/test_4k_player_640/team_tracking.jsonl" \
   --image-path "./data/images/mongkok_football_field.png" \
-  --home-jersey-numbers 1, 2, 3, 4, 7, 10, 11, 16, 20, 27, 30, 13, 23, 25, 8, 14, 17, 18, 21, 24, 31, 33, 34 \
-  --away-jersey-numbers 26, 2, 6, 7, 9, 16, 20, 30, 36, 77, 99, 1, 17, 22, 23, 24, 28, 33, 42, 43, 44, 72, 88 \
+  --home-jersey-numbers 1 2 3 4 7 10 11 16 20 27 30 13 23 25 8 14 17 18 21 24 31 33 34 \
+  --away-jersey-numbers 26 2 6 7 9 16 20 30 36 77 99 1 17 22 23 24 28 33 42 43 44 72 88 \
   --output-name './runs/detect/test_4k_player_640/team_tracking_output'
 ```
 
@@ -125,19 +125,30 @@ For the statistics of each player, run the following command:
 
 ```{shell}
 python3 ./tools/calculate_player_statistics.py 
-  --jsonl-path "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" --frame-interval 30 
-  --fps 29.97 
+  --jsonl-path "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" \
+  --frame-interval 30 \
+  --fps 29.97 \
   --comparison-split 0.85
 ```
 This will output a csv file called `player_statstics.csv` to the same directory of the jsonl file.
+
+Player statistics include team, jersey_num, total_distance (m), avg_speed (kmh), max_speed (kmh), min_speed (kmh), distance_ratio, avg_speed_ratio, max_speed_ratio, min_speed_ratio.
+
+
+`comparison-split`: for example, setting to $0.85$ means that the ratios are calculated as follows:
+
+$$ \text{avg\_speed\_first\_part } = 85\% \text{ of the tracking data}$$
+$$ \text{avg\_speed\_second\_part } = (1 - 85\%) \text{ of the tracking data}$$
+$$ \text{avg\_speed\_ratio} = \frac{\text{avg\_speed\_first\_part}}{\text{avg\_speed\_second\_part}}$$
 
 To generate position heatmap of a player, run the following command:
 
 ```{shell}
 python3 ./tools/generate_player_heatmap.py 
-  --jsonl-path "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" --bg-img-path "./data/images/mongkok_football_field.png" 
-  --jersey_number "16" 
-  --team "home"      
+  --jsonl-path "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" \
+  --bg-img-path "./data/images/mongkok_football_field.png" \
+  --jersey_number "16" \
+  --team "home" # home, homegoalkeeper, away, awaygoalkeeper      
 ```
 Change the value of `jersey-number` and `team` for selecting the specific player. This outputs a png file named after the jersey number and team, e.g. `home_16_heatmap.png`, on the same directory of the jsonl file.
 
@@ -151,6 +162,10 @@ Change the value of `jersey-number` and `team` for selecting the specific player
 - Player JSONL + Ball JSONL → combine_team_ball_tracks.py → whole match tracks (JSONL)
 
 - Whole match JSONL → render_classification_output.py → folder of suspicious-output
+
+- Whole match JSONL → calculate_player_statistics.py → player_statistics.csv
+
+- Whole match JSONL → generate_player_heatmap.py → heatmap.png
 
 Here let say player 16a with jersey number 8 from home team has been detected suspicious on Class 1 and 7. For the naming format, the first 3 digits combined is the minute, the last 2 digits combined is the second (00016 is 000:16, 10545 is 105:45).
 ```text
