@@ -5,6 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import argparse
 from collections import defaultdict
+
+from tqdm import tqdm
 from player_motion_classification import get_frames_with_multiple_balls, detect_abnormal_tracks_from_jsonl, calculate_angle
 from align_video_times import convert_game_frame_to_video_frame
 
@@ -291,7 +293,7 @@ def render_segments_to_images_and_videos(
                 
                 # Set position to start frame and annotate
                 cap.set(cv2.CAP_PROP_POS_FRAMES, video_start_frame)
-                for f in range(start_f, end_f + 1):
+                for f in tqdm(range(start_f, end_f + 1), desc=f"Annotating video for team {suspicious_player_team}, player {suspicious_jersey_num}, cam {idx}"):
                     ret, frame = cap.read()
                     if not ret:
                         print(f"⚠️ Failed to read, stopping early.")

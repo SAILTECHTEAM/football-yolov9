@@ -137,8 +137,8 @@ Player statistics include team, jersey_num, total_distance (m), avg_speed (kmh),
 
 `comparison-split`: for example, setting to $0.85$ means that the ratios are calculated as follows:
 
-$$ \text{average speed first part} = \text{average spped of first } 85\% \text{ of the tracking data}$$
-$$ \text{average speed second part } = \text{average speed of the remaining } 15\% \text{ of the tracking data}$$
+$$ \text{average speed first part} = \text{average spped of first 85\% of the tracking data}$$
+$$ \text{average speed second part } = \text{average speed of the remaining 15\% of the tracking data}$$
 $$ \text{average speed ratio} = \frac{\text{average speed first part}}{\text{average speed second part}}$$
 
 To generate position heatmap of a player, run the following command:

@@ -26,7 +26,7 @@ def load_tracking_data(filepath, jersey_number=None, team=None):
                 continue
             if jersey_number is not None and track['jersey_num'] != jersey_number and "goalkeeper" not in track['team'].lower():
                 continue
-            if team is not None and track['team'] != team:
+            if team is not None and team not in track['team']:
                 continue
             
             # Store metadata
