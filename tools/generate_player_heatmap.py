@@ -7,6 +7,8 @@ import json
 import pandas as pd
 import argparse
 import os
+from time import time
+from scipy.ndimage import gaussian_filter
 
 def load_tracking_data(filepath, jersey_number=None, team=None):
     # Initialize data structures
@@ -59,6 +61,29 @@ def load_tracking_data(filepath, jersey_number=None, team=None):
     
     return tracks_df, track_metadata
 
+def fast_binned_heatmap(tracks_df, field_size=(1060, 660), bins=(100, 60)):
+    """
+    Generate a heatmap using numpy's histogram2d which is much faster than KDE
+    
+    Parameters:
+    - tracks_df: DataFrame containing tracking data
+    - field_size: dimensions of the football field
+    - bins: number of bins for the histogram (resolution of the heatmap)
+    
+    Returns:
+    - heatmap: 2D array containing binned counts with gaussian smoothing
+    - xedges: bin edges along x-axis
+    - yedges: bin edges along y-axis
+    """
+    # Use numpy's histogram2d which is very fast
+    heatmap, xedges, yedges = np.histogram2d(
+        tracks_df['x'].values, tracks_df['y'].values, 
+        bins=bins, range=[[0, field_size[0]], [0, field_size[1]]]
+    )
+    # Apply smoothing if needed
+    heatmap = gaussian_filter(heatmap, sigma=1.5)
+    return heatmap, xedges, yedges
+
 def generate_heatmap(tracks_df, field_size=(1060, 660), bg_img=None, cmap='hot', jersey_number=None, team=None):
     """
     Generate position heatmap for player(s) in the tracks_df
@@ -88,12 +113,15 @@ def generate_heatmap(tracks_df, field_size=(1060, 660), bg_img=None, cmap='hot',
     else:
         title = "Position Heatmap"
 
-    # Create meshgrid
-    xi, yi = np.mgrid[0:field_size[0]:100j, 0:field_size[1]:50j]
+    # Use fast binned heatmap instead of KDE
+    bins = (int(field_size[0]/8), int(field_size[1]/8))
+    heatmap, xedges, yedges = fast_binned_heatmap(tracks_df, field_size, bins)
+    # # Create meshgrid
+    # xi, yi = np.mgrid[0:field_size[0]:100j, 0:field_size[1]:50j]
     
-    # Compute kernel density
-    k = gaussian_kde([x, y])
-    zi = k(np.vstack([xi.flatten(), yi.flatten()]))
+    # # Compute kernel density
+    # k = gaussian_kde([x, y])
+    # zi = k(np.vstack([xi.flatten(), yi.flatten()]))
     
     # Plot the heatmap
     fig, ax = plt.subplots(figsize=(12, 7))
@@ -109,9 +137,13 @@ def generate_heatmap(tracks_df, field_size=(1060, 660), bg_img=None, cmap='hot',
     base_cmap.set_gamma(0.5)
     base_cmap.set_under("white")
 
-    # Create heatmap and store the mappable object
-    mesh = ax.pcolormesh(xi, yi, zi.reshape(xi.shape), shading='auto', cmap=base_cmap, alpha=0.7)
+    # # Create heatmap and store the mappable object
+    # mesh = ax.pcolormesh(xi, yi, zi.reshape(xi.shape), shading='auto', cmap=base_cmap, alpha=0.7)
     
+    # Create heatmap using pcolormesh with the binned data
+    mesh = ax.pcolormesh(xedges, yedges, heatmap.T, shading='auto', 
+                       cmap=base_cmap, alpha=0.7)
+
     # Now use the mesh object for the colorbar
     # plt.colorbar(mesh, label='Density')
     
@@ -141,13 +173,16 @@ if __name__ == "__main__":
     jersey_number = args.jersey_number
     team = args.team
     
+    start_time = time()
+    print("⏳ Loading tracking data...")
     # Load data for specific player if specified
     tracks_df, track_metadata = load_tracking_data(
         jsonl_path, 
         jersey_number=jersey_number if jersey_number else None, 
         team=team if team else None
     )
-    
+    middle_time = time()
+    print(f"✅ Tracking data loaded in {middle_time - start_time:.2f} seconds.")
     if tracks_df.empty:
         print("⚠️ No data found. Please check jersey number and team values.")
         exit(1)
@@ -175,6 +210,8 @@ if __name__ == "__main__":
     if heatmap_fig:
         heatmap_fig.savefig(output_path, dpi=300, bbox_inches='tight')
         print(f"✅ Heatmap saved to {output_path}")
+        end_time = time()
+        print(f"⏱️ Time taken: {end_time - start_time:.2f} seconds")
         # plt.show()
     else:
         print("❌ Failed to generate heatmap.")

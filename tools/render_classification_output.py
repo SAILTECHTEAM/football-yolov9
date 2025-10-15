@@ -178,6 +178,10 @@ def render_segments_to_images_and_videos(
     }
 
     buffer = 150  # frames before and after
+
+    total_segments = sum(len(v) for v in suspicious_segments.values())
+    current_segment = 0
+    print(f"🚩 Total suspicious segments to render: {total_segments}")
     # Note: format of suspicious_segments: {1: {'start_frame': int, 'end_frame': int}, ...}
     for tag, segment in suspicious_segments.items():
         if not isinstance(segment, dict):
@@ -185,6 +189,7 @@ def render_segments_to_images_and_videos(
         print(f"🔍 Processing Class {tag} with {len(segment)} segments...")
 
         for track_id, (start_f, end_f) in segment.items():
+            current_segment += 1
             # give a larger window for context
             start_f = max(0, start_f - buffer)
             end_f = min(end_f + buffer, max(frame_to_objects.keys()))
@@ -293,7 +298,7 @@ def render_segments_to_images_and_videos(
                 
                 # Set position to start frame and annotate
                 cap.set(cv2.CAP_PROP_POS_FRAMES, video_start_frame)
-                for f in tqdm(range(start_f, end_f + 1), desc=f"Annotating video for team {suspicious_player_team}, player {suspicious_jersey_num}, cam {idx}"):
+                for f in tqdm(range(start_f, end_f + 1), desc=f"🎥 Video {current_segment}/{total_segments}: team {suspicious_player_team}, player {suspicious_jersey_num}, cam {idx}"):
                     ret, frame = cap.read()
                     if not ret:
                         print(f"⚠️ Failed to read, stopping early.")
