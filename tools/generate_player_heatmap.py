@@ -26,7 +26,7 @@ def load_tracking_data(filepath, jersey_number=None, team=None):
                 return None, None
             if isinstance(track.get("jersey_num"), list):
                 continue
-            if jersey_number is not None and track['jersey_num'] != jersey_number and "goalkeeper" not in track['team'].lower():
+            if jersey_number is not None and track['jersey_num'] != jersey_number:
                 continue
             if team is not None and team not in track['team']:
                 continue

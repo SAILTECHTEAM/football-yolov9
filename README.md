@@ -35,7 +35,7 @@ python3 mini_patch_detect_v1_for_video.py \
   --device 0 \
   --weights './weight/yolov9-s-converted.pt' \
   --name test_4k_player_640 \
-  --classes 0 32 \
+  --classes 0 \
   --clothes-folder-path ./data/histograms/0525/ \
   --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 \
   --homography-dst-points 530 0 530 660 1060 660 1060 0 \
@@ -137,8 +137,8 @@ Player statistics include team, jersey_num, total_distance (m), avg_speed (kmh),
 
 `comparison-split`: for example, setting to $0.85$ means that the ratios are calculated as follows:
 
-$$ \text{average speed first part} = \text{average spped of first 85\% of the tracking data}$$
-$$ \text{average speed second part } = \text{average speed of the remaining 15\% of the tracking data}$$
+$$ \text{average speed first part} = \text{average spped of first 85 percent of the tracking data}$$
+$$ \text{average speed second part } = \text{average speed of the remaining 15 percent of the tracking data}$$
 $$ \text{average speed ratio} = \frac{\text{average speed first part}}{\text{average speed second part}}$$
 
 To generate position heatmap of a player, run the following command:
