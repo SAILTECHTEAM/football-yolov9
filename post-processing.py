@@ -9,7 +9,7 @@ import os
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import time
 import ijson.backends.python as ijson_python
-from typing import List, Dict, Any, Tuple, Iterator, Union
+from typing import Counter, List, Dict, Any, Tuple, Iterator, Union
 from heapq import nsmallest
 from tools.remove_track_sharp import process_jsonl_detect_replace
 import argparse
@@ -950,6 +950,163 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
     print(f"✅ Relabeled {relabel_count} tracks.")
     return relabel_count
 
+# def resolve_duplicate_jersey_numbers(
+#     jsonl_path: str,
+#     output_path: str,
+#     home_jersey_numbers: list = None,
+#     away_jersey_numbers: list = None,
+# ):
+#     """
+#     Resolves duplicate jersey numbers by identifying and correcting players with the same jersey number on the same team.
+    
+#     Args:
+#         jsonl_path: Path to the input JSONL file with track data
+#         output_path: Path to save the output JSONL with resolved jersey numbers
+#         home_jersey_numbers: List of valid jersey numbers for the home team
+#         away_jersey_numbers: List of valid jersey numbers for the away team
+#     """
+    
+#     # Read team jersey number lists
+#     if home_jersey_numbers is None or away_jersey_numbers is None:
+#         print("No team jersey number lists provided.")
+#         exit(1)
+
+#     team_jerseys = {
+#         'home': home_jersey_numbers,
+#         'away': away_jersey_numbers,
+#     }
+        
+
+#     # Read all tracks into memory
+#     tracks = []
+#     with open(jsonl_path, 'r') as f:
+#         for line in f:
+#             if line.strip():
+#                 tracks.append(json.loads(line))
+    
+#     # Create mapping from track_id to track
+#     track_map = {track['track_id']: track for track in tracks}
+    
+#     # Find all frames in the dataset
+#     all_frames = set()
+#     for track in tracks:
+#         frames = track.get('frames', [])
+#         if frames:
+#             all_frames.update(frames)
+    
+#     # Find duplicate jersey numbers in each frame
+#     duplicates_found = defaultdict(list)  # {track_id: [(conflicting_track_id, frame), ...]}
+    
+#     print(f"🔄 Checking {len(all_frames)} frames for duplicate jersey numbers...")
+#     for frame in sorted(all_frames):
+#         # Get all tracks visible in this frame
+#         frame_tracks = []
+#         for track in tracks:
+#             frames = track.get('frames', [])
+#             if not frames:
+#                 continue
+                
+#             if frame >= track.get('frame_range', [0, 0])[0] and frame <= track.get('frame_range', [0, 0])[1]:
+#                 # Track is visible in this frame
+#                 frame_idx = frames.index(frame) if frame in frames else None
+#                 if frame_idx is not None:
+#                     frame_tracks.append((track, frame_idx))
+        
+#         # Group tracks by team and jersey number
+#         team_jersey_tracks = defaultdict(lambda: defaultdict(list))
+#         for track, frame_idx in frame_tracks:
+#             team = track.get('team', '')
+#             if team in ['ball', 'referee', 'unsure']:
+#                 continue
+
+#             jersey_num = track.get('jersey_num', 'unsure')
+#             if jersey_num == 'unsure' or jersey_num == []:
+#                 continue
+                
+#             # Check if jersey is a list (frame-by-frame) or single value
+#             if isinstance(jersey_num, list):
+#                 if frame_idx < len(jersey_num):
+#                     current_jersey = jersey_num[frame_idx]
+#                 else:
+#                     continue
+#             else:
+#                 current_jersey = jersey_num
+
+#             if current_jersey != 'unsure':
+#                 team_jersey_tracks[team][current_jersey].append((track, frame_idx))
+        
+#         # Find duplicates within each team and jersey number
+#         for team, jersey_tracks in team_jersey_tracks.items():
+#             for jersey_num, track_entries in jersey_tracks.items():
+#                 if len(track_entries) > 1:
+#                     # Sort by jersey number confidence (highest first)
+#                     track_entries.sort(key=lambda x: get_jersey_num_confidence(x[0], x[1]), reverse=True)
+                    
+#                     # The first track has highest confidence, others are duplicates
+#                     main_track, _ = track_entries[0]
+#                     for dup_track, _ in track_entries[1:]:
+#                         duplicates_found[dup_track['track_id']].append((main_track['track_id'], frame, jersey_num))
+    
+#     # Resolve duplicates
+#     resolved_count = 0
+    
+#     for track_id, conflicts in duplicates_found.items():
+#         track = track_map[track_id]
+#         # Group conflicts by jersey number
+#         conflicting_jerseys = defaultdict(list)
+#         for _, _, jersey_num in conflicts:
+#             conflicting_jerseys[jersey_num].append(jersey_num)
+        
+#         # For each conflicting jersey, find alternatives
+#         team = track.get('team', '')
+#         if not team or team in ['ball', 'referee', 'unsure']:
+#             continue
+            
+#         jersey_conf = track.get('jersey_conf', 0.0)
+#         alternative_jerseys = []
+        
+#         for jersey_num in conflicting_jerseys:
+#             similar_jerseys = find_similar_jersey_numbers(jersey_num, team_jerseys.get(team, []))
+#             for similar in similar_jerseys:
+#                 # Check if this similar jersey number is used by anyone in the same frames
+#                 is_used = False
+#                 for frame in track.get('frames', []):
+#                     for other_track in tracks:
+#                         if other_track['track_id'] == track_id:
+#                             continue
+#                         if other_track.get('team', '') != team:
+#                             continue
+#                         if frame not in other_track.get('frames', []):
+#                             continue
+
+#                         other_jersey_num = other_track.get('jersey_num', 'unsure')
+#                         if other_jersey_num == similar:
+#                             is_used = True
+#                             break
+#                     if is_used:
+#                         break
+                
+#                 if not is_used:
+#                     alternative_jerseys.append(similar)
+        
+#         if alternative_jerseys:
+#             # Update the track with alternatives
+#             track['jersey_num'] = alternative_jerseys
+#             track['jersey_conf'] = jersey_conf  # Keep same confidence
+#             resolved_count += 1
+#         else:
+#             # No alternatives found, mark as unsure
+#             track['jersey_num'] = 'unsure'
+#             track['jersey_conf'] = 0.0
+#             resolved_count += 1
+    
+#     # Write updated tracks to output file
+#     with open(output_path, 'w') as out_f:
+#         for track in tracks:
+#             out_f.write(json.dumps(track) + '\n')
+    
+#     print(f"✅ Resolved {resolved_count} duplicate jersey numbers. Results saved to {output_path}")
+
 def resolve_duplicate_jersey_numbers(
     jsonl_path: str,
     output_path: str,
@@ -958,6 +1115,7 @@ def resolve_duplicate_jersey_numbers(
 ):
     """
     Resolves duplicate jersey numbers by identifying and correcting players with the same jersey number on the same team.
+    Optimized version with improved data structures and reduced complexity.
     
     Args:
         jsonl_path: Path to the input JSONL file with track data
@@ -972,11 +1130,10 @@ def resolve_duplicate_jersey_numbers(
         exit(1)
 
     team_jerseys = {
-        'home': home_jersey_numbers,
-        'away': away_jersey_numbers,
+        'home': set(home_jersey_numbers),  # Use sets for O(1) lookups
+        'away': set(away_jersey_numbers),
     }
         
-
     # Read all tracks into memory
     tracks = []
     with open(jsonl_path, 'r') as f:
@@ -984,78 +1141,90 @@ def resolve_duplicate_jersey_numbers(
             if line.strip():
                 tracks.append(json.loads(line))
     
-    # Create mapping from track_id to track
-    track_map = {track['track_id']: track for track in tracks}
+    # Create mapping from track_id to track and build efficient indexing
+    track_map = {}
+    frame_to_tracks = defaultdict(list)  # Maps frame -> list of (track_id, team, jersey_num)
+    track_jersey_cache = {}  # Cache jersey numbers per track per frame
     
-    # Find all frames in the dataset
-    all_frames = set()
+    print("🔄 Building optimized index structures...")
     for track in tracks:
+        track_id = track['track_id']
+        track_map[track_id] = track
+        team = track.get('team', '')
+        jersey_num = track.get('jersey_num', 'unsure')
+        
+        # Skip non-player tracks
+        if team in ['ball', 'referee', 'unsure'] or jersey_num == 'unsure' or jersey_num == []:
+            continue
+            
         frames = track.get('frames', [])
-        if frames:
-            all_frames.update(frames)
+        if not frames:
+            continue
+            
+        # Build index of frames to tracks
+        for i, frame in enumerate(frames):
+            # Get jersey number for this frame (either from list or single value)
+            current_jersey = jersey_num[i] if isinstance(jersey_num, list) and i < len(jersey_num) else jersey_num
+            if current_jersey == 'unsure' or current_jersey == -1:
+                continue
+                
+            # Store mapping for this frame
+            frame_to_tracks[frame].append((track_id, team, current_jersey))
+            
+            # Cache jersey confidence
+            if isinstance(track.get('jersey_conf', 0.0), list) and i < len(track.get('jersey_conf', [])):
+                track_jersey_cache[(track_id, frame)] = track.get('jersey_conf', [])[i]
+            else:
+                track_jersey_cache[(track_id, frame)] = track.get('jersey_conf', 0.0)
     
     # Find duplicate jersey numbers in each frame
-    duplicates_found = defaultdict(list)  # {track_id: [(conflicting_track_id, frame), ...]}
+    duplicates_found = defaultdict(list)  # {track_id: [(conflicting_track_id, frame, jersey), ...]}
     
-    print(f"🔄 Checking {len(all_frames)} frames for duplicate jersey numbers...")
-    for frame in sorted(all_frames):
-        # Get all tracks visible in this frame
-        frame_tracks = []
-        for track in tracks:
-            frames = track.get('frames', [])
-            if not frames:
-                continue
-                
-            if frame >= track.get('frame_range', [0, 0])[0] and frame <= track.get('frame_range', [0, 0])[1]:
-                # Track is visible in this frame
-                frame_idx = frames.index(frame) if frame in frames else None
-                if frame_idx is not None:
-                    frame_tracks.append((track, frame_idx))
-        
-        # Group tracks by team and jersey number
+    print(f"🔄 Checking {len(frame_to_tracks)} frames for duplicate jersey numbers...")
+    for frame, track_entries in frame_to_tracks.items():
+        # Group tracks by team and jersey number - using dictionary for O(1) lookups
         team_jersey_tracks = defaultdict(lambda: defaultdict(list))
-        for track, frame_idx in frame_tracks:
-            team = track.get('team', '')
-            if team in ['ball', 'referee', 'unsure']:
-                continue
-
-            jersey_num = track.get('jersey_num', 'unsure')
-            if jersey_num == 'unsure' or jersey_num == []:
-                continue
-                
-            # Check if jersey is a list (frame-by-frame) or single value
-            if isinstance(jersey_num, list):
-                if frame_idx < len(jersey_num):
-                    current_jersey = jersey_num[frame_idx]
-                else:
-                    continue
-            else:
-                current_jersey = jersey_num
-
-            if current_jersey != 'unsure':
-                team_jersey_tracks[team][current_jersey].append((track, frame_idx))
+        
+        for track_id, team, jersey_num in track_entries:
+            if jersey_num != 'unsure':
+                team_jersey_tracks[team][jersey_num].append(track_id)
         
         # Find duplicates within each team and jersey number
         for team, jersey_tracks in team_jersey_tracks.items():
-            for jersey_num, track_entries in jersey_tracks.items():
-                if len(track_entries) > 1:
+            for jersey_num, track_ids in jersey_tracks.items():
+                if len(track_ids) > 1:
                     # Sort by jersey number confidence (highest first)
-                    track_entries.sort(key=lambda x: get_jersey_num_confidence(x[0], x[1]), reverse=True)
+                    sorted_tracks = sorted(
+                        track_ids,
+                        key=lambda tid: track_jersey_cache.get((tid, frame), 0.0),
+                        reverse=True
+                    )
                     
                     # The first track has highest confidence, others are duplicates
-                    main_track, _ = track_entries[0]
-                    for dup_track, _ in track_entries[1:]:
-                        duplicates_found[dup_track['track_id']].append((main_track['track_id'], frame, jersey_num))
+                    main_track_id = sorted_tracks[0]
+                    for dup_track_id in sorted_tracks[1:]:
+                        duplicates_found[dup_track_id].append((main_track_id, frame, jersey_num))
+    
+    # Prepare similar jersey lookup tables
+    similar_jersey_cache = {}
+    for team, numbers in team_jerseys.items():
+        similar_jersey_cache[team] = {}
+        for num in numbers:
+            similar_jersey_cache[team][num] = find_similar_jersey_numbers(num, list(numbers))
+    
+    # Track frame usage of jersey numbers
+    frame_team_jersey_usage = defaultdict(lambda: defaultdict(set))
+    for frame, track_entries in frame_to_tracks.items():
+        for track_id, team, jersey_num in track_entries:
+            frame_team_jersey_usage[frame][(team, jersey_num)].add(track_id)
     
     # Resolve duplicates
     resolved_count = 0
     
     for track_id, conflicts in duplicates_found.items():
         track = track_map[track_id]
-        # Group conflicts by jersey number
-        conflicting_jerseys = defaultdict(list)
-        for _, _, jersey_num in conflicts:
-            conflicting_jerseys[jersey_num].append(jersey_num)
+        # Group conflicts by jersey number using Counter for efficient counting
+        conflicting_jerseys = Counter(jersey_num for _, _, jersey_num in conflicts)
         
         # For each conflicting jersey, find alternatives
         team = track.get('team', '')
@@ -1063,35 +1232,33 @@ def resolve_duplicate_jersey_numbers(
             continue
             
         jersey_conf = track.get('jersey_conf', 0.0)
-        alternative_jerseys = []
+        track_frames = set(track.get('frames', []))
         
-        for jersey_num in conflicting_jerseys:
-            similar_jerseys = find_similar_jersey_numbers(jersey_num, team_jerseys.get(team, []))
+        # Find available alternative jersey numbers
+        available_alternatives = set()
+        
+        for jersey_num, _ in conflicting_jerseys.items():
+            # Get pre-computed similar jersey numbers
+            team_key = 'home' if 'home' in team else 'away'
+            similar_jerseys = similar_jersey_cache.get(team_key, {}).get(jersey_num, [])
+            
             for similar in similar_jerseys:
                 # Check if this similar jersey number is used by anyone in the same frames
                 is_used = False
-                for frame in track.get('frames', []):
-                    for other_track in tracks:
-                        if other_track['track_id'] == track_id:
-                            continue
-                        if other_track.get('team', '') != team:
-                            continue
-                        if frame not in other_track.get('frames', []):
-                            continue
-
-                        other_jersey_num = other_track.get('jersey_num', 'unsure')
-                        if other_jersey_num == similar:
-                            is_used = True
-                            break
-                    if is_used:
+                
+                # Only check frames where this track appears
+                for frame in track_frames:
+                    if (team, similar) in frame_team_jersey_usage.get(frame, {}) and \
+                        track_id not in frame_team_jersey_usage[frame][(team, similar)]:
+                        is_used = True
                         break
                 
                 if not is_used:
-                    alternative_jerseys.append(similar)
+                    available_alternatives.add(similar)
         
-        if alternative_jerseys:
+        if available_alternatives:
             # Update the track with alternatives
-            track['jersey_num'] = alternative_jerseys
+            track['jersey_num'] = list(available_alternatives)  # Convert set to list
             track['jersey_conf'] = jersey_conf  # Keep same confidence
             resolved_count += 1
         else:
@@ -1179,6 +1346,7 @@ def prepare_background_and_tracks(
         raise FileNotFoundError(f"Failed to load image: {image_path}")
     bg_img = cv2.resize(bg_img, field_size)
 
+    start_load = time.time()
     # Merge and filter tracks
     load_and_spilt_tracks(
         json_path=json_path,
@@ -1194,13 +1362,17 @@ def prepare_background_and_tracks(
         threshold=threshold,
         max_step=max_step,
     )
+    end_load = time.time()
+    print(f"✅ Loaded and spilt tracks in {end_load - start_load:.2f} seconds")
 
     determine_track_jersey_number(
         jsonl_path=json_path.replace('.jsonl', '_spilt.jsonl'),
         output_path=json_path.replace('.jsonl', '_spilt_with_jersey.jsonl'),
-        confidence_threshold=0.995,
+        confidence_threshold=0.99,
         min_accepted_entries=7
     )
+    end_jersey = time.time()
+    print(f"✅ Determined jersey numbers in {end_jersey - end_load:.2f} seconds")
 
     hybrid_merge_stream_fixed(
         jsonl_path=json_path.replace('.jsonl', '_spilt_with_jersey.jsonl'),
@@ -1212,6 +1384,8 @@ def prepare_background_and_tracks(
         polyorder=polyorder,
         max_step=max_step,
     )
+    end_merge = time.time()
+    print(f"✅ Merged tracks in {end_merge - end_jersey:.2f} seconds")
 
     remove_tracks_near_boundary_stream(
         jsonl_path=json_path.replace('.jsonl', '_merged.jsonl'),
@@ -1219,12 +1393,16 @@ def prepare_background_and_tracks(
         field_size=field_size,
         margin_meter=30
     )
+    end_boundary = time.time()
+    print(f"✅ Removed boundary-only tracks in {end_boundary - end_merge:.2f} seconds")
 
     remove_static_ball_tracks(
         json_path.replace('.jsonl', '_merged_filtered_near_boundary.jsonl'),
         json_path.replace('.jsonl', '_merged_filtered.jsonl'),
         movement_threshold=30  # in meters (10 = 1m if 0.1m units)
     )
+    end_static_ball = time.time()
+    print(f"✅ Removed static ball tracks in {end_static_ball - end_boundary:.2f} seconds")
 
     detect_team_size_violations_streaming(
         jsonl_path=json_path.replace('.jsonl', '_merged_filtered.jsonl'),
@@ -1233,6 +1411,8 @@ def prepare_background_and_tracks(
         allowed_goalkeepers=1,
         allowed_referees=1
     )
+    end_violations = time.time()
+    print(f"✅ Detected team size violations in {end_violations - end_static_ball:.2f} seconds")
 
     start_merged = time.time()
     merged_window = merge_violation_windows_with_track_counts(

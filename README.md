@@ -8,7 +8,35 @@ docker exec -it yolov9_football bash
 ```
 
 ## Training
-We use the codes from [WongKinYu/yolov9](https://github.com/WongKinYiu/yolov9/tree/main) to train our ball detection model. For player detection model, we directly use the model weight trained on MS COCO provided by the above repo. Both model architecture are based on YOLOv9-S.
+We use the codes from [WongKinYu/yolov9](https://github.com/WongKinYiu/yolov9/tree/main) to train our ball detection model. For player detection model, we directly use the model weight trained on MS COCO provided by the above repo. Both model architecture are based on YOLOv9-S. See `scripts/train.sh` for more details. Ball dataset is downloaded from [Roboflow](https://universe.roboflow.com/roboflow-jvuqo/football-ball-detection-rejhg). We use yolov9-s pretrained weight for training ball detection model.
+
+```{shell}
+python train_dual.py \
+  --workers 8 \
+  --device 0 \
+  --batch 16 \
+  --data datasets/football-ball-detection-2/data.yaml \
+  --img 1280 \
+  --cfg '' \
+  --weights "./weight/yolov9-s.pt" \
+  --name yolov9-s-ball-detection-1280 \
+  --hyp hyp.scratch-high.yaml \ 
+  --min-items 0  \
+  --epochs 500  \
+  --close-mosaic 15
+```
+
+Note: for the `./data/hyps/hyp.scratch-high.yaml`, change the value of `copy_paste` into 0.
+
+Reparameterize the trained model weight for inference.
+
+```{shell}
+python ./reparam-yolov9.py \
+  --config ./models/detect/gelan-s.yaml \
+  --checkpoint "./weight/yolov9-s_ball_detection_1280_20250822.pt" \
+  --classes 1 \
+  --output "./weight/yolov9-s-converted_ball_detection_1280_20250822.pt"
+```
 
 ## Whole Match Pipeline
 This pipeline detects players and ball in the field, postprocess player tracks and ball tracks, and analyse players behaviour based on tracking data.
@@ -19,13 +47,38 @@ bash scripts/inference.sh
 ```
 
 ### 1️⃣ Inference
-Run detection on the whole match clip, and output detection results in JSONL format. Currently 1 JSONL file for player detection results, and 1 JSONL file for ball detection results. The jersey model weight is downloaded from [here](https://drive.google.com/file/d/1uRln22tlhneVt3P6MePmVxBWSLMsL3bm/view). In case the checkpoint does not match the model state_dict, run this command:
+The jersey model weight is downloaded from [here](https://drive.google.com/file/d/1uRln22tlhneVt3P6MePmVxBWSLMsL3bm/view). Put this weight under `./weight` folder. In case the checkpoint does not match the model state_dict, run this command:
 ```{shell}
 python3 ./old_function/convert_parseq_weight.py \
   --old_ckpt "./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255.ckpt" \
   --new_ckpt "./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255_new.ckpt"
 ```
 
+Prepare the clothes histogram data for all teams in the match, including away, awaygoalkeeper, home, homegoalkeeper, and referee team.
+
+Note: The file name must be in the format of `teamA_01.npy`, and `teamA` will be the team name in process. You may add more clothes data of the same team, named after `teamA_xx.npy`.
+
+```{shell}
+python3 identify_player_team.py \
+  --image ./data/images/0525/homegoalkeeper_01.jpg \
+  --histogram_save_path ./data/histograms/0525/homegoalkeeper_01.npy
+```
+
+The folder storing the histogram data should look like this:
+
+```text
+histograms
+├── 0525/
+│   ├── home_01.npy
+│   ├── homegoalkeeper_01.npy
+│   ├── away_01.npy
+│   ├── awaygoalkeeper_01.npy
+│   ├── referee_01.npy
+│   ├── ...
+```
+
+
+Run detection on the whole match clip, and output detection results in JSONL format. Currently 1 JSONL file for player detection results, and 1 JSONL file for ball detection results.
 ```{shell}
 # Player detection
 python3 mini_patch_detect_v1_for_video.py \
@@ -43,6 +96,8 @@ python3 mini_patch_detect_v1_for_video.py \
   --nosave
 ```
 
+IMPORTANT NOTE: use yolov9-s-converted.pt instead of yolov9-s.pt for more robust performance because after reparameterization the auxiliary components are removed.
+
 ```{shell}
 # Ball detection
 python3 mini_patch_detect_ball_for_video.py \
@@ -57,9 +112,10 @@ python3 mini_patch_detect_ball_for_video.py \
   --homography-dst-points 530 0 530 660 1060 660 1060 0 \
   --nosave
 ```
+Note: the input order of the homography-src-points and homography-dst-points matter, and wrong order can lead to wrong homographic projection.
 
 ### 2️⃣ Postprocess of Tracks
-The raw detection results are processed in `post-processing.py` and `post-processing-ball.py` sequentially. Both scripts would output several intermediate JSONL files. The final JSONL file to use is named `team_tracking_final.jsonl`.
+The raw detection results (JSONL files) are processed in `post-processing.py` and `post-processing-ball.py` sequentially. Both scripts would output several intermediate JSONL files. The final JSONL file to use is named `team_tracking_final.jsonl` and `ball_tracking_final.jsonl`.
 
 ```{shell}
 python3 post-processing.py \
@@ -76,7 +132,7 @@ python3 post-processing-ball.py \
   --image-path "./data/images/mongkok_football_field.png" \
   --output-name './runs/detect/test_4k_ball_640/ball_tracking_output'
 ```
-After that run this command to combine both JSONL files into one. The final JSONL file to use is named `team_tracking_final.jsonl`.
+After that run this command to combine both JSONL files into one. The final JSONL file to use is named `team_ball_tracking_final.jsonl`.
 ```{shell}
 python3 combine_team_ball_tracks.py \
   --player-jsonl "./runs/detect/test_4k_player_640/team_tracking_final.jsonl" \
@@ -321,3 +377,7 @@ Detections → detections_to_tracks_and_scores.py → tracks (players + ball)
 Tracks → render_track_on_video.py → video with overlays
 
 Tracks + Radar Speeds → analyze_goalkeeper_behavior.py → behavior tags
+
+## TODO:
+- [ ] Train a YOLO model for detecting both players and balls
+- [ ] Combine four camera views into one overall JSONL file

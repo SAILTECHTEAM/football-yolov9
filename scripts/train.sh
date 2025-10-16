@@ -12,9 +12,29 @@
 
 
 # Ball detection
-python train_dual.py --workers 8 --device 0 --batch 8 --data datasets/football-ball-detection-2/data.yaml --img 1280 --cfg '' --weights pretrained/yolov9-s.pt --name yolov9-s-ball-detection-1280 --hyp hyp.scratch-high.yaml --min-items 0 --epochs 500 --close-mosaic 15
+python train_dual.py \
+  --workers 8 \
+  --device 0 \
+  --batch 8 \
+  --data datasets/football-ball-detection-2/data.yaml \
+  --img 1280 \
+  --cfg '' \
+  --weights pretrained/yolov9-s.pt \
+  --name yolov9-s-ball-detection-1280 \
+  --hyp hyp.scratch-high.yaml \
+  --min-items 0 \
+  --epochs 500 \
+  --close-mosaic 15
 
-# Inference with slicer
-python detect.py --source './videos/C0478.MP4' --img 1280 --device 0 --weights './checkpoint/yolov9-s-converted_ball_detection_1280.pt' --use-slicer --slice-size 1280 1280 --nms-threshold 0.1 --name yolov9_s_c_1280_slicer_detect_
+# # Inference with slicer
+# python detect.py \
+#   --source './videos/C0478.MP4' \
+#   --img 1280 \
+#   --device 0 \
+#   --weights './checkpoint/yolov9-s-converted_ball_detection_1280.pt' \
+#   --use-slicer \
+#   --slice-size 1280 1280 \
+#   --nms-threshold 0.1 \
+#   --name yolov9_s_c_1280_slicer_detect
 
 

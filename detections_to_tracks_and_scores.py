@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from collections import defaultdict, OrderedDict
 from multiprocessing import Pool, cpu_count
-from tools.identify_goalkeeper import extract_color_histogram_with_specific_background_color, extract_color_histogram_from_rotated_skelton, compare_histograms, load_histogram
+from tools.identify_player_team import extract_color_histogram_with_specific_background_color, extract_color_histogram_from_rotated_skelton, compare_histograms, load_histogram
 # ByteTrack
 import supervision as sv
 

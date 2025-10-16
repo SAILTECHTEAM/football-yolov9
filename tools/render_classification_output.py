@@ -385,7 +385,7 @@ if __name__ == "__main__":
     parser.add_argument("--jsonl-path", type=str, required=True, help="Path to input JSONL file.")
     parser.add_argument("--video-paths", nargs="+", required=True, help="Paths to start and end videos.")
     parser.add_argument('--game-time', nargs='+', type=int, required=True,
-                        help="Game time in frames, e.g. '0 2700 3600 6300' for one game or '0 2700 3600 6300 100 2800 3700 6400' for two games. Each game should have four integers: start_frame, first_half_end_frame, second_half_start_frame, final_end_frame.")
+                        help="Game time in frames, e.g. '0 2700 3600 6300' for one game or '0 2700 3600 6300 100 2800 3700 6400' for two games. Each game should have four integers: first_half_start_second, first_half_end_second, second_half_start_second, second_half_end_second.")
     parser.add_argument("--bg-img-path", type=str, required=True, help="Path to background image.")
     parser.add_argument("--field-size", type=str, default="1060,660", help="Field size as 'width,height'.")
     parser.add_argument("--output-dir", type=str, required=True, help="Directory to save output.")

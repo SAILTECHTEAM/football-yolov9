@@ -28,7 +28,7 @@ from utils.torch_utils import select_device, smart_inference_mode
 from collections import defaultdict
 from numba import njit
 from tools.extract_homography_matrix import compute_homography, apply_homography_to_point
-from tools.identify_goalkeeper import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
+from tools.identify_player_team import extract_color_histogram_with_specific_background_color, compare_histograms, match_histograms_to_teams, load_team_histograms_from_folder
 from utils.ball import BallTracker, BallAnnotator
 
 
@@ -694,7 +694,7 @@ def parse_opt():
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolo.pt', help='model path or triton URL')
     parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='file/dir/URL/glob/screen/0(webcam)')
-    parser.add_argument('--game-time', type=int, nargs=4, default=[0, 2700, 3600, 6300], help='start time of first half in seconds')
+    parser.add_argument('--game-time', type=int, nargs=4, default=[0, 2700, 3600, 6300], help='Game time in seconds in source video: first_half_start_second, first_half_end_second, second_half_start_second, second_half_end_second.')
     parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='(optional) dataset.yaml path')
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
