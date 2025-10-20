@@ -1560,7 +1560,7 @@ def detect_delay_restart(
 # Suspicious Action 9 (completed)
 def count_abnormal_possession_changes_whole_match(
     possession_data_path: str = "../runs/detect/demo_video/possession_data.jsonl",
-    max_possession_changes: int = 20
+    max_possession_changes: int = 8
 ) -> Tuple[Dict[str, Tuple[int, int]], Dict[str, List[int]], Dict[str, Dict]]:
     """
     Count players with an unusually high number of possession changes in a match.
@@ -1646,12 +1646,13 @@ def detect_abnormal_tracks_from_jsonl(
     total_track_abnormal_frames.update({1: track_abnormal_frames})
     total_tracking_confidences.update({1: track_confidences})
 
+    # Suspicious Action 2: Slow Action Detection
     abnormal_tracks, track_abnormal_frames, track_confidences = detect_slow_action(
         jsonl_path,
         possession_data_path=possession_data_path,
         distance_threshold=100.0,  # 10 meters proximity to ball
         velocity_threshold=1.5,     # slow movement threshold, in m/s
-        min_valid_frames=5,          # minimum frames to consider as suspicious
+        min_valid_frames=200,          # minimum frames to consider as suspicious
         n_closest_players=3,          # number of closest players to track
     )
     # Update total results with tag 2
@@ -1659,9 +1660,10 @@ def detect_abnormal_tracks_from_jsonl(
     total_track_abnormal_frames.update({2: track_abnormal_frames})
     total_tracking_confidences.update({2: track_confidences})
 
+    # Suspicious Action 3: Stationary Player Detection
     abnormal_tracks, track_abnormal_frames, track_confidences = detect_stationary_players(
         jsonl_path,
-        velocity_threshold=1e-2,
+        velocity_threshold=1e-3,
         min_valid_frames=5,
         conf_threshold=0.5,
         frame_threshold=3,
@@ -1673,6 +1675,7 @@ def detect_abnormal_tracks_from_jsonl(
     total_track_abnormal_frames.update({3: track_abnormal_frames})
     total_tracking_confidences.update({3: track_confidences})
 
+    # Suspicious Action 4: Possession Change Detection
     abnormal_tracks, track_abnormal_frames, track_confidences = detect_possession_change_anomalies(
         jsonl_path=jsonl_path,
         possession_data_path=possession_data_path
@@ -1682,6 +1685,7 @@ def detect_abnormal_tracks_from_jsonl(
     total_track_abnormal_frames.update({4: track_abnormal_frames})
     total_tracking_confidences.update({4: track_confidences})
 
+    # Suspicious Action 5: Kicking Outside the Pitch
     abnormal_tracks, track_abnormal_frames, track_confidences = detect_kicking_outside_the_pitch(
         jsonl_path=jsonl_path,
         possession_data_path=possession_data_path,
@@ -1694,6 +1698,7 @@ def detect_abnormal_tracks_from_jsonl(
     total_track_abnormal_frames.update({5: track_abnormal_frames})
     total_tracking_confidences.update({5: track_confidences})
 
+    # Suspicious Action 6: Passive Play in Defense
     abnormal_tracks, track_abnormal_frames, track_confidences = detect_passive_play_in_defense(
         jsonl_path=jsonl_path,
         possession_data_path=possession_data_path,
@@ -1705,23 +1710,25 @@ def detect_abnormal_tracks_from_jsonl(
     total_track_abnormal_frames.update({6: track_abnormal_frames})
     total_tracking_confidences.update({6: track_confidences})
 
+    # Suspicious Action 7: Outpaced Player Detection
     abnormal_tracks, track_abnormal_frames, track_confidences = detect_outpaced_player(
         jsonl_path=jsonl_path,
         velocity_threshold = 3.0,
-        distance_threshold = 200.0,
+        distance_threshold = 100.0,
         min_valid_frames = 30,
-        max_players_to_compare = 2
+        max_players_to_compare = 3
     )
     # Update total results with tag 7
     total_abnormal_tracks.update({7: abnormal_tracks})
     total_track_abnormal_frames.update({7: track_abnormal_frames})
     total_tracking_confidences.update({7: track_confidences})
 
+    # Suspicious Action 8: Delay Restart Detection
     abnormal_tracks, track_abnormal_frames, track_confidences = detect_delay_restart(
         jsonl_path=jsonl_path,
         possession_data_path=possession_data_path,
         stationary_threshold=3.0,
-        delay_threshold=30,
+        delay_threshold=300,
         frame_window=60
     )
     # Update total results with tag 8
@@ -1729,9 +1736,10 @@ def detect_abnormal_tracks_from_jsonl(
     total_track_abnormal_frames.update({8: track_abnormal_frames})
     total_tracking_confidences.update({8: track_confidences})
 
+    # Suspicious Action 9: Abnormal Possession Changes
     suspicious_segments, track_abnormal_frames, track_confidences = count_abnormal_possession_changes_whole_match(
         possession_data_path=possession_data_path,
-        max_possession_changes=2
+        max_possession_changes=8
     )
     # Update total results with tag 9
     total_abnormal_tracks.update({9: suspicious_segments})

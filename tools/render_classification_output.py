@@ -213,7 +213,7 @@ def render_segments_to_images_and_videos(
             if "goalkeeper" in suspicious_player_team.lower():
                 suspicious_jersey_num = "GK"
             if isinstance(suspicious_jersey_num, list):
-                suspicious_jersey_num = "/".join(map(str, suspicious_jersey_num))
+                suspicious_jersey_num = track_id  # fallback to track_id to avoid file naming issues
             print(f"🎯 Rendering track {track_id}, team {suspicious_player_team}, player {suspicious_jersey_num} from {start_f} to {end_f}...")
             video_start_frame = convert_game_frame_to_video_frame(start_f, game_time[0], fps)
             video_end_frame = convert_game_frame_to_video_frame(end_f, game_time[0], fps)
@@ -227,6 +227,8 @@ def render_segments_to_images_and_videos(
             fig, ax = plt.subplots(figsize=(12, 7))
             bg_rgb = cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB)
             ax.imshow(bg_rgb, extent=[0, field_size[0], 0, field_size[1]])
+            # Invert y-axis to match the field coordinate system
+            ax.invert_yaxis()
 
             for t in tracks:
                 tid = t["track_id"]
@@ -393,11 +395,11 @@ if __name__ == "__main__":
 
     # Parameters for abnormal track detection
     parser.add_argument("--angle-threshold", type=float, default=120, help="Angle threshold for detection.")
-    parser.add_argument("--velocity-threshold", type=float, default=1e-1, help="Velocity threshold.")
+    parser.add_argument("--velocity-threshold", type=float, default=1e-2, help="Velocity threshold.")
     parser.add_argument("--min-valid-frames", type=int, default=5, help="Minimum number of valid frames.")
-    parser.add_argument("--conf-threshold", type=float, default=0.3, help="Confidence threshold.")
+    parser.add_argument("--conf-threshold", type=float, default=0.7, help="Confidence threshold.")
     parser.add_argument("--frame-threshold", type=int, default=3, help="Frame count threshold.")
-    parser.add_argument("--distance-threshold", type=float, default=0.5, help="Distance threshold in pixels or meters.")
+    parser.add_argument("--distance-threshold", type=float, default=50, help="Distance threshold in pixels or meters.")
     parser.add_argument("--homography", type=str, default="homography_matrix.npy", help="Path to homography matrix file.")
 
     args = parser.parse_args()
