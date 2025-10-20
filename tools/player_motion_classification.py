@@ -819,7 +819,7 @@ def detect_possession_change_anomalies(
         # Check if the changing player is close to the ball
         changing_player_pos = np.array(changing_player["projected"])
         distance_to_ball = np.linalg.norm(changing_player_pos - ball_pos)
-        if distance_to_ball > 200: # 20 m in radius?
+        if distance_to_ball > 100: # 10 m in radius?
             continue
 
         suspicious = True
@@ -834,7 +834,7 @@ def detect_possession_change_anomalies(
             changing_player_vec = player_pos_next - changing_player_pos
             other_player_vec = other_player_pos - changing_player_pos
             angle = calculate_angle(changing_player_vec, other_player_vec)
-            if angle <= 90 and np.linalg.norm(other_player_vec) < 100: # 10m
+            if angle <= 120 and np.linalg.norm(other_player_vec) < 100: # 10m
                 suspicious = False
                 # print(f"Frame {frame}: Possession change by player {player_id} from {possession_team} not suspicious due to nearby player {p['track_id']} at distance {np.linalg.norm(other_player_vec)/10:.2f}m and angle {angle:.2f}°")
                 break # This change of possession is not considered suspicious
@@ -1663,7 +1663,7 @@ def detect_abnormal_tracks_from_jsonl(
     # Suspicious Action 3: Stationary Player Detection
     abnormal_tracks, track_abnormal_frames, track_confidences = detect_stationary_players(
         jsonl_path,
-        velocity_threshold=1e-3,
+        velocity_threshold=1e-2,
         min_valid_frames=5,
         conf_threshold=0.5,
         frame_threshold=3,
@@ -1691,7 +1691,7 @@ def detect_abnormal_tracks_from_jsonl(
         possession_data_path=possession_data_path,
         field_bounds=(0, 0, 1060, 680),
         buffer=40.0,  # Buffer window for error in detection
-        frame_window=60  # Number of frames to include before and after trigger
+        frame_window=0  # Number of frames to include before and after trigger
     )
     # Update total results with tag 5
     total_abnormal_tracks.update({5: abnormal_tracks})
@@ -1703,7 +1703,7 @@ def detect_abnormal_tracks_from_jsonl(
         jsonl_path=jsonl_path,
         possession_data_path=possession_data_path,
         velocity_threshold=1.0,
-        min_valid_frames=5
+        min_valid_frames=60
     )
     # Update total results with tag 6
     total_abnormal_tracks.update({6: abnormal_tracks})
@@ -1715,7 +1715,7 @@ def detect_abnormal_tracks_from_jsonl(
         jsonl_path=jsonl_path,
         velocity_threshold = 3.0,
         distance_threshold = 100.0,
-        min_valid_frames = 30,
+        min_valid_frames = 60,
         max_players_to_compare = 3
     )
     # Update total results with tag 7
@@ -1729,7 +1729,7 @@ def detect_abnormal_tracks_from_jsonl(
         possession_data_path=possession_data_path,
         stationary_threshold=3.0,
         delay_threshold=300,
-        frame_window=60
+        frame_window=0
     )
     # Update total results with tag 8
     total_abnormal_tracks.update({8: abnormal_tracks})

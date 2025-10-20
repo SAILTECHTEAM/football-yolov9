@@ -177,7 +177,7 @@ def render_segments_to_images_and_videos(
         for k, v in team_colors_cv.items()
     }
 
-    buffer = 150  # frames before and after
+    buffer = 75  # frames before and after
 
     total_segments = sum(len(v) for v in suspicious_segments.values())
     current_segment = 0
@@ -207,13 +207,11 @@ def render_segments_to_images_and_videos(
                     break
                 if suspicious_jersey_num != "unsure":
                     break
-
-            if suspicious_jersey_num == "unsure":
+            
+            if suspicious_jersey_num == "unsure" or "/" in str(suspicious_jersey_num) or isinstance(suspicious_jersey_num, list):
                 suspicious_jersey_num = track_id  # fallback to track_id
             if "goalkeeper" in suspicious_player_team.lower():
                 suspicious_jersey_num = "GK"
-            if isinstance(suspicious_jersey_num, list):
-                suspicious_jersey_num = track_id  # fallback to track_id to avoid file naming issues
             print(f"🎯 Rendering track {track_id}, team {suspicious_player_team}, player {suspicious_jersey_num} from {start_f} to {end_f}...")
             video_start_frame = convert_game_frame_to_video_frame(start_f, game_time[0], fps)
             video_end_frame = convert_game_frame_to_video_frame(end_f, game_time[0], fps)
