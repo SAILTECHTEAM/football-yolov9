@@ -235,6 +235,7 @@ def save_histogram(hist, file_path):
         hist (np.ndarray): The histogram to save.
         file_path (str): Path to save the histogram file.
     """
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
     np.save(file_path, hist)
     print(f"Histogram saved to {file_path}")
 
@@ -311,7 +312,7 @@ def parse_opt():
     parser = argparse.ArgumentParser(description="Extract and save color histogram from an image.")
     
     parser.add_argument('--image', type=str,
-                        help="Path to the goalkeeper's clothes image.")
+                        help="Path to the player's clothes image.")
     parser.add_argument('--histogram_save_path', type=str,
                         help="Path to save the histogram file.")
     opt = parser.parse_args()
@@ -320,19 +321,19 @@ def parse_opt():
 
 def run(image, histogram_save_path):
     # Load the image
-    goalkeeper_clothe_image = cv2.imread(image)
-    if goalkeeper_clothe_image is None:
+    player_clothe_image = cv2.imread(image)
+    if player_clothe_image is None:
         print(f"Error: Could not load image from {image}")
         exit(1)
 
     # Extract histograms, ignoring white
-    goalkeeper_hist_from_image = extract_color_histogram_with_specific_background_color(goalkeeper_clothe_image)
+    player_hist_from_image = extract_color_histogram_with_specific_background_color(player_clothe_image)
     
     # Plot the histogram
-    # plot_hsv_histogram(goalkeeper_hist_from_image, bins=tuple(args.bins))
+    plot_hsv_histogram(player_hist_from_image)
     
     # Save the histogram
-    save_histogram(goalkeeper_hist_from_image, histogram_save_path)
+    save_histogram(player_hist_from_image, histogram_save_path)
 
 
 def main(opt):
@@ -343,4 +344,4 @@ def main(opt):
 if __name__ == "__main__":
     opt = parse_opt()
     main(opt)
-# python3 idenfity_goalkeeper.py --image ./data/images/goalkeeper_clothes.jpg --histogram_save_path ./data/histograms/goalkeeper_clothes.npy
+# python3 identify_player_team.py --image ./data/images/0525/player_clothes.jpg --histogram_save_path ./data/histograms/0525/player_clothes.npy

@@ -3,16 +3,23 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: pytorch/pytorch:2.8.0-cuda12.6-cudnn9-devel
-    container_name: yolov9
+    image: yolov9-football:latest
+    container_name: yolov9_football
     runtime: nvidia  # Use NVIDIA runtime
     volumes:
-      - ~/yolov9:/yolov9
+      - ~/football-yolov9:/yolov9-main
      # - /tmp/.X11-unix:/tmp/.X11-unix  # Mount X11 socket for OpenCV GUI, no use if the device does not support GUI
-     # - ~/yolov9/sports/examples/soccer/notebooks/datasets/football-players-detection-10/:/coco/
-    shm_size: 16g
+    shm_size: 32g
     tty: true
     stdin_open: true
     environment:
      # - DISPLAY=$DISPLAY
       - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all  # Request all capabilities
+    deploy:  # Alternative to "runtime: nvidia" for newer Docker versions
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility, compute, video]

@@ -5,8 +5,8 @@
 gitpython
 ipython
 matplotlib>=3.2.2
-numpy>=1.18.5
-opencv-python>=4.1.1
+numpy<2
+# opencv-python==4.11.0.86
 Pillow>=7.1.2
 psutil
 PyYAML>=5.3.1
@@ -48,3 +48,13 @@ pycocotools>=2.0
 supervision
 numba
 ijson
+shapely
+scikit-learn
+filterpy
+einops
+opencv-python-headless==4.11.0.86
+pytorch_lightning
+lmdb
+nltk
+timm==0.9.16
+# question: we use timm==0.4.9 for einops for ViTpose, not sure if there will be bugs

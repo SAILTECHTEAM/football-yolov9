@@ -107,7 +107,7 @@ def plot_height_map(avg_height_map, x_bins, y_bins):
     plt.grid(True)
     plt.show()
 
-def get_expected_height(x, y, height_map, x_bins, y_bins):
+def get_expected_height(x, y, hight_map, x_bins, y_bins):
     """
     Given a projected (x, y) coordinate, return the expected height from the grid.
     """
@@ -120,7 +120,7 @@ def get_expected_height(x, y, height_map, x_bins, y_bins):
     y_idx = np.clip(y_idx, 0, len(y_bins) - 2)
 
     # row = y-axis, col = x-axis
-    return height_map[y_idx, x_idx]
+    return hight_map[y_idx, x_idx]
 
 def build_height_model_from_jsonl(path, sample_size=50000, conf_thresh=0.5, outlier_thresh=2000):
     data = load_jsonl(path)
@@ -164,10 +164,10 @@ if __name__ == "__main__":
 
     # Load the saved height map and bin edges
     data = np.load("height_map_grid.npz")
-    height_map = data["height_map"]
+    hight_map = data["height_map"]
     x_bins = data["x_bins"]
     y_bins = data["y_bins"]
-    expected= get_expected_height(530, 330, height_map, x_bins, y_bins)  # Example usage
+    expected= get_expected_height(530, 330, hight_map, x_bins, y_bins)  # Example usage
     print(f"Expected height at : {expected}")
     # plot_height_map(height_map, x_bins, y_bins)
 
