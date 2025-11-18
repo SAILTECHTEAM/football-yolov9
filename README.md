@@ -132,6 +132,8 @@ python3 post-processing-ball.py \
   --image-path "./data/images/mongkok_football_field.png" \
   --output-name './runs/detect/test_4k_ball_640/ball_tracking_output'
 ```
+After that using all 4 jsonl files, construct more accurate players and ball tracks.
+
 After that run this command to combine both JSONL files into one. The final JSONL file to use is named `team_ball_tracking_final.jsonl`.
 ```{shell}
 python3 combine_team_ball_tracks.py \
