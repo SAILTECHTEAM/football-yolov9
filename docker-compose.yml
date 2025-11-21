@@ -7,7 +7,7 @@ services:
     container_name: yolov9_football
     runtime: nvidia  # Use NVIDIA runtime
     volumes:
-      - ~/football-yolov9:/yolov9-main
+      - ~/Documents/football-yolov9:/yolov9-main
      # - /tmp/.X11-unix:/tmp/.X11-unix  # Mount X11 socket for OpenCV GUI, no use if the device does not support GUI
     shm_size: 32g
     tty: true
