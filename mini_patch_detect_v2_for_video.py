@@ -395,6 +395,41 @@ def parse_time_str(time_str: str) -> float:
     h, m, s = map(int, time_str.strip().split(":"))
     return h * 3600 + m * 60 + s
 
+class FrameJsonlStreamer:
+    """
+    Streams per-frame data to disk as JSONL.
+    Each frame with ball detection is written as a single line.
+    """
+    def __init__(self, out_path: str, flush_interval: int = 50):
+        self.out_path = Path(out_path)
+        self.flush_interval = flush_interval
+        self.buffer = []
+        self.fh = self.out_path.open("w")
+
+    def update(self, frame_idx, bbox, proj_pt):
+        # Create a record for this specific frame
+        record = {
+            "frame_id": frame_idx,
+            "bbox": bbox,
+            "projected": proj_pt
+        }
+        self.buffer.append(record)
+
+    def maybe_flush(self, frame_idx):
+        if frame_idx % self.flush_interval == 0 and self.buffer:
+            self._write_buffer()
+
+    def _write_buffer(self):
+        for record in self.buffer:
+            json.dump(record, self.fh, ensure_ascii=False)
+            self.fh.write("\n")  # write as JSONL
+        self.buffer = []
+
+    def close(self):
+        if self.buffer:
+            self._write_buffer()
+        self.fh.close()
+
 class TrackJsonlStreamer:
     """
     Streams per-track data to disk as JSONL.
@@ -448,7 +483,7 @@ class TrackJsonlStreamer:
         for rec in self.records.values():
             self._write_record(rec)
         self.fh.close()
-
+    
 
 @smart_inference_mode()
 def run(
@@ -493,14 +528,6 @@ def run(
     valid_frame_ids = set()
     cap = cv2.VideoCapture(source)
     fps = cap.get(cv2.CAP_PROP_FPS) if cap.isOpened() else 29.97  # default to 29.97 FPS if not available
-    
-    # Create tracker args manually
-    tracker_args = SimpleNamespace(
-        track_activation_threshold=0.5,
-        lost_track_buffer=100,
-        minimum_matching_threshold=0.8,
-        fps=fps  # assuming you already have video fps
-    )
 
     if fps > 0:
         fh_start = int((game_time[0]) * fps)
@@ -525,8 +552,6 @@ def run(
     )[0]
 
     source = str(source)
-    save_img = not nosave and not source.endswith('.txt')  # save inference images
-    screenshot = source.lower().startswith('screen')
 
     # Directories
     save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
@@ -546,6 +571,7 @@ def run(
     # Load jersey number recognition model
     if jersey_weights and os.path.exists(jersey_weights):
         charset_test = string.digits
+        # print(charset_test) # 0123456789
         kwargs = {"charset_test": charset_test}
         jersey_model = load_from_checkpoint(jersey_weights, **kwargs).eval().to(device)
         hp = jersey_model.hparams
@@ -556,23 +582,21 @@ def run(
         print("⚠️ Jersey number recognition model not found or path not provided.")
 
     # init json
-    output_json_path = str(Path(save_dir) / "team_tracking.jsonl")
+    output_player_json_path = str(Path(save_dir) / "team_tracking.jsonl")
+    output_ball_json_path = str(Path(save_dir) / "ball_tracking.jsonl")
 
-    json_streamer = TrackJsonlStreamer(output_json_path,
+    player_json_streamer = TrackJsonlStreamer(output_player_json_path,
                                     flush_interval=500,
                                     lost_thresh=100)  # tune as needed
-    # # Initialize global dictionary once outside main loop if not already done
-    # if 'team_json_records' not in globals():
-    #     team_json_records = defaultdict(lambda: {'frame_id': [], 'team_conf': [], 'bbox': []})
+    ball_json_streamer = FrameJsonlStreamer(output_ball_json_path,
+                                    flush_interval=500)  # tune as needed, 50 and 10 for 30 seconds video testing
 
     if not nosave:
         print(f"🔄 Saving video to: {output_path}")
         out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
-    # print(f"🔄 Saving tracking JSON to: {output_json_path}")
     
     # Initialize tracker
-    # ball_tracker = BallTracker(buffer_size=20)
-    person_tracker = sv.ByteTrack(track_activation_threshold=0.5, lost_track_buffer=100, minimum_matching_threshold=0.8, frame_rate=fps)
+    player_tracker = sv.ByteTrack(track_activation_threshold=0.5, lost_track_buffer=100, minimum_matching_threshold=0.8, frame_rate=fps)
 
     # load the team reference features
     if clothes_folder_path and os.path.exists(clothes_folder_path):
@@ -589,7 +613,7 @@ def run(
         with torch.no_grad():
             h, w = image_slice.shape[:2]
             img_size = imgsz[0] # 640/1280
-            # Check if dimensions need padding to be same as expected slice size (1280*1280)
+            # Check if dimensions need padding to be same as expected slice size (640*640/ 1280*1280)
             need_padding = (h != img_size) or (w != img_size)
             # print(f"Before padding: {image_slice.shape}")
             if need_padding:
@@ -610,14 +634,12 @@ def run(
                 # print(f"After padding: {image_slice.shape}") # [640, 640, 3]
                 
             # Convert image to tensor (similar to the original preprocessing)
-            img = cv2.cvtColor(image_slice, cv2.COLOR_BGR2RGB)
-            img = torch.from_numpy(img).permute(2, 0, 1).float()  # [H, W, C] → [C, H, W]
-            img /= 255.0  # 0 - 255 to 0.0 - 1.0
-            img = img.half() if model.fp16 else img  # uint8 to fp16/32
+            img = torch.from_numpy(image_slice.transpose(2, 0, 1)).to(model.device)
+            img = img.half() if model.fp16 else img.float()  # uint8 to fp16/32
+            img /= 255  # 0 - 255 to 0.0 - 1.0
             if len(img.shape) == 3:
                 img = img[None]  # expand for batch dim
 
-            img = img.to(model.device)
             # Run inference (similar to original inference)
             pred = model(img, augment=augment)
         
@@ -667,6 +689,10 @@ def run(
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
 
     pbar = tqdm(total=len(valid_frame_ids), desc="Processing game-time frames", unit="frame", bar_format='{l_bar}{bar:20}{r_bar}{bar:-20b}')
+
+    # Use this to skip beginning frames
+    cap.set(cv2.CAP_PROP_POS_FRAMES, fh_start)
+    video_frame_idx = fh_start - 1  # set to one before the first valid frame
     while cap.isOpened():
         ret, high_resolution_image = cap.read()
         if not ret:
@@ -677,6 +703,11 @@ def run(
         if video_frame_idx % vid_stride != 0:
             continue
 
+        if video_frame_idx > fh_end and video_frame_idx < sh_start:
+            video_frame_idx = sh_start - 1  # jump to second half
+            cap.set(cv2.CAP_PROP_POS_FRAMES, sh_start)
+            continue
+
         if video_frame_idx not in valid_frame_ids:
             continue  # ⛔ skip frames not in game time
 
@@ -685,67 +716,44 @@ def run(
 
         # print(f"🔍 Processing frame {processed_frame_idx}")
 
-        # images, offsets = get_image_patches(high_resolution_image, crop_size=imgsz[0], overlap=0.3)
-
-        seen, windows, dt = 0, [], [Profile() for _ in range(8)]
-        # for path, im, im0s, vid_cap, s in dataset:
+        seen, windows, dt = 0, [], [Profile() for _ in range(6)]
+        # Inference + NMS
         with dt[0]:
-
-            # batch = preprocess_images(images, device, fp16=model.fp16)
-            pass
-
-        # Inference
-        with dt[1]:
-            player_detections = slicer(high_resolution_image).with_nms(threshold=nms_threshold)
-            # pred = model(batch, augment=augment)
-            # print("Predictions before NMS:", len(pred)) # 2
-            # print(len(pred[0])) # 2
-            # print(pred[0][0].shape) # torch.Size([32, 84, 8400])
-
-        # NMS
-        with dt[2]:
-            pass
-            # pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+            # ✅ Convert once at the start
+            high_resolution_image_rgb = cv2.cvtColor(high_resolution_image, cv2.COLOR_BGR2RGB)
+    
+            # v2 update: now both player and ball detection are done in one model forward pass
+            all_dets = slicer(high_resolution_image_rgb).with_nms(threshold=nms_threshold)
 
         # proprocess predictions
-        with dt[3]:
+        with dt[1]:
 
             # start = time.time()  # reset timer
             # Make a copy of the original 4K image for drawing
             annotated_image = high_resolution_image.copy()
-            player_dets = np.hstack(
+            all_dets_np = np.hstack(
                 (
-                    player_detections.xyxy,
-                    player_detections.confidence[:, np.newaxis],
-                    player_detections.class_id[:, np.newaxis],
+                    all_dets.xyxy,
+                    all_dets.confidence[:, np.newaxis],
+                    all_dets.class_id[:, np.newaxis],
                 )
             )
-            player_dets = torch.from_numpy(player_dets).to(device)
-            if player_dets.shape[0] > 0:
-                player_dets = remove_boxes_with_numba(player_dets, area_ratio_thresh=0.6, containment_thresh=0.9)
+            all_dets_np = torch.from_numpy(all_dets_np).to(device)
+            if all_dets_np.shape[0] > 0:
+                all_dets_np = remove_boxes_with_numba(all_dets_np, area_ratio_thresh=0.6, containment_thresh=0.9)
 
-        with dt[4]:
+        with dt[2]:
             # the shape of final is [N, 6] where N is the number of detections, the 6 columns are [x1, y1, x2, y2, conf, cls]
-            # print("Final detections after global NMS & remove enclosed boxes:", final.shape if isinstance(final, torch.Tensor) else len(final))
-            # Filter by class
-            # person_dets = final[final[:, 5] == 0]  # class 0 for person
-            # ball_dets = final[final[:, 5] == 32]   # example class id for ball (change if needed)
-            # person_dets = detections[detections.class_id in [1,2,3]] # class ids for player, goalkeeper and referee
-            # ball_dets = detections[detections.class_id == 0] # class id for sports ball
-            # person_dets_np = person_dets[:, :5].cpu().numpy() if person_dets.numel() else np.empty((0, 5))
-            # ball_dets_np = ball_dets[:, :5].cpu().numpy() if ball_dets.numel() else np.empty((0, 5))
 
-            player_dets = player_dets[:, :5].cpu().numpy() if player_dets.numel() else np.empty((0, 5))
-            online_persons = person_tracker.update_with_tensors(player_dets)
-            online_balls = [] # for testing purpose only
-            # online_persons = person_tracker.update(person_dets_np, [height, width], [height, width])
-            # online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
-            
-            
-            # online_persons = person_tracker.update(person_dets_np, [height, width], [height, width])
-            # online_balls = ball_tracker.update(ball_dets_np, [height, width], [height, width])
-            # print("Online persons after tracking:", len(online_persons))
-            # print("Online ball after tracking:", len(online_balls))
+            player_dets_np = all_dets_np[all_dets_np[:, 5] == 0]   # Class 0 for player
+            ball_dets_np = all_dets_np[all_dets_np[:, 5] == 1]  # Class 1 for ball
+            player_dets = player_dets_np[:, :5].cpu().numpy() if player_dets_np.numel() else np.empty((0, 5))
+            ball_dets = ball_dets_np.cpu().numpy() if ball_dets_np.numel() else np.empty((0, 5))
+            online_players = player_tracker.update_with_tensors(player_dets)
+            online_balls = ball_dets  # No tracking for ball
+
+            # print("Online players after tracking:", len(online_players))
+            # print("Online balls:", len(online_balls))
             
 
             # Store all crop tensors and track info for matching
@@ -757,7 +765,8 @@ def run(
 
             # Format detections with track ID
             final_detections = []
-            for t in online_persons:
+            jersey_crops = []
+            for t in online_players:
                 tlbr = t.tlbr  # (x1, y1, x2, y2)
                 track_id = t.external_track_id
                 conf = t.score
@@ -779,34 +788,10 @@ def run(
                 smoothed_cx = t.smooth_cx
                 smoothed_y2 = y1 + t.smooth_h
                 cx, cy = smoothed_cx, smoothed_y2  # use these instead of raw values
-                # hasattr(t, "smooth_h"):
-                #    print(f"Track ID: {track_id}, Smoothed Height: {t.smooth_h}, Smoothed Center X: {t.smooth_cx}")
-
-                # # smooth bottom center directly
-                # # Check for bbox height anomaly
-                # use_previous = False
-                # if hasattr(t, "prev_tlbr"):
-                #     prev_h = t.prev_tlbr[3] - t.prev_tlbr[1]
-                #     curr_h = tlbr[3] - tlbr[1]
-                #     if prev_h > 0 and curr_h < prev_h * 0.9:
-                #         use_previous = True # if current height is less than 50% of previous, use previous bbox
-                # if use_previous and hasattr(t, "prev_bottom_center"):
-                #     cx, cy = t.prev_bottom_center
-                # # EMA smoothing
-                # if not hasattr(t, "smooth_bottom_center"):
-                #     t.smooth_bottom_center = (cx, cy)
-                # else:
-                #     px, py = t.smooth_bottom_center
-                #     cx = ema_alpha * cx + (1 - ema_alpha) * px
-                #     cy = ema_alpha * cy + (1 - ema_alpha) * py
-                #     t.smooth_bottom_center = (cx, cy)
-                # # Store prev info for next frame
-                # t.prev_bottom_center = (cx, cy)
-                # t.prev_tlbr = tlbr
 
                 projected_position = apply_homography_to_point((cx, cy), H)  # (x, y) projected point
 
-                cls = 0  # hardcode as person
+                cls = 0 # Class 0 for player
                 final_detections.append((tlbr[0], tlbr[1], tlbr[2], tlbr[3], conf, cls, track_id, projected_position))
 
                 # Crop the clothing region
@@ -823,38 +808,50 @@ def run(
                 crop_img_jersey = crop_clothing_region(high_resolution_image, (x1, y1, x2, y2),top_ratio=0.1, bottom_ratio=0.6, left_ratio=0.25, right_ratio=0.75)
                 if crop_img_jersey.size == 0:
                     continue  # skip empty crops
-                # Run jersey number recognition if model is available
-                if jersey_model:
-                    crop_img_jersey_rgb = cv2.cvtColor(crop_img_jersey, cv2.COLOR_BGR2RGB)
-                    transform = SceneTextDataModule.get_transform(jersey_img_size)
-                    crop_img_jersey_rgb = Image.fromarray(crop_img_jersey_rgb)
-                    crop_img_jersey_rgb = transform(crop_img_jersey_rgb)
-                    crop_img_jersey_rgb = crop_img_jersey_rgb.unsqueeze(0)
-                    logits = jersey_model.forward(crop_img_jersey_rgb.to(jersey_model.device))
-                    probs_full = logits[:,:3,:11].softmax(-1)
-                    preds, probs = jersey_model.tokenizer.decode(probs_full)
-                    logits = logits[:,:3,:11].cpu().detach().numpy()[0].tolist()
-                    probs_full = probs_full.cpu().detach().numpy()[0].tolist()
-                    confidence = probs[0].cpu().detach().numpy().squeeze().tolist()
-                    jersey_numbers.append(preds[0]) # e.g. '10'
-                    jersey_confs.append(confidence) # e.g. ['0.9999', '0.999', '1.0'] corresponding to '1' '0' and EOS
+                crop_img_jersey_rgb = cv2.cvtColor(crop_img_jersey, cv2.COLOR_BGR2RGB)
+                jersey_crops.append(Image.fromarray(crop_img_jersey_rgb))
 
+            # Run jersey number recognition if model is available
+            if jersey_model and jersey_crops:
+                transform = SceneTextDataModule.get_transform(jersey_img_size)
+                valid_crops = [c for c in jersey_crops if c is not None]
+                if valid_crops:
+                    batch_imgs = torch.stack([transform(c) for c in valid_crops]).to(jersey_model.device)
+                    with torch.no_grad():
+                        logits = jersey_model.forward(batch_imgs)  # Batch forward
+                        probs_full = logits[:,:3,:11].softmax(-1)
+                        preds, probs = jersey_model.tokenizer.decode(probs_full)
+                        
+                    # Map back to detections
+                    jersey_numbers = [p for p in preds] # e.g. ['10', '23', ...]
+                    jersey_confs = [p.cpu().numpy().squeeze().tolist() for p in probs] # e.g. [['0.9999', '0.999', '1.0'], [...], ...]
 
-            # for t in online_balls:
-            #     tlbr = t.tlbr
-            #     track_id = t.track_id
-            #     conf = t.score
-            #     cls = 32  # hardcode as ball
-            #     x1, y1, x2, y2 = tlbr
-            #     cx = (x1 + x2) / 2
-            #     cy = y2
+                # crop_img_jersey_rgb = transform(crop_img_jersey_rgb)
+                # crop_img_jersey_rgb = crop_img_jersey_rgb.unsqueeze(0)
+                # logits = jersey_model.forward(crop_img_jersey_rgb.to(jersey_model.device))
+                # probs_full = logits[:,:3,:11].softmax(-1)
+                # preds, probs = jersey_model.tokenizer.decode(probs_full)
+                # logits = logits[:,:3,:11].cpu().detach().numpy()[0].tolist()
+                # probs_full = probs_full.cpu().detach().numpy()[0].tolist()
+                # confidence = probs[0].cpu().detach().numpy().squeeze().tolist()
+                # jersey_numbers.append(preds[0]) # e.g. '10'
+                # jersey_confs.append(confidence) # e.g. ['0.9999', '0.999', '1.0'] corresponding to '1' '0' and EOS
 
-            #     projected_position = apply_homography_to_point((cx, cy), H)  # (x, y) projected point
+            for t in online_balls:
+                tlbr = t[:4]
+                conf = t[4]
+                x1, y1, x2, y2 = tlbr
+                # Compute bbox properties
+                cx = (x1 + x2) / 2
+                cy = y2
 
+                projected_position = apply_homography_to_point((cx, cy), H)  # (x, y) projected point
 
-            #     final_detections.append((tlbr[0], tlbr[1], tlbr[2], tlbr[3], conf, cls, track_id, projected_position))
+                cls = 1  # Class 1 for ball
+                track_id = None
+                final_detections.append((tlbr[0], tlbr[1], tlbr[2], tlbr[3], conf, cls, track_id, projected_position))
 
-        with dt[5]:
+        with dt[3]:
             if crop_hists:  # crop_images = list of color histograms for each person
                 # Load team histograms from file (or define in code)
                 if team_histograms:
@@ -873,7 +870,7 @@ def run(
                 x1, y1, x2, y2, conf, cls, track_id, projected_position  = det
                 bbox_out = [int(x1), int(y1), int(x2), int(y2), float(conf)]
 
-                if cls == 0:                              # person
+                if cls == 0: # Class 0 for player
                     if feature_index_jersey < len(jersey_numbers):
                         jersey_str = jersey_numbers[feature_index_jersey]
                         jersey_num = int(jersey_str) if jersey_str.isdigit() else -1
@@ -889,19 +886,25 @@ def run(
                         feature_index_team += 1
                     else:
                         team_conf = {}
-                else:                                     # ball
-                    team_conf = {}
+                    # ⭐ update the streamer
+                    player_json_streamer.update(track_id, processed_frame_idx, bbox_out, team_conf, projected_position, jersey_num, jersey_confidence)
 
-                # ⭐ update the streamer
-                json_streamer.update(track_id, processed_frame_idx, bbox_out, team_conf, projected_position, jersey_num, jersey_confidence)
+                elif cls == 1: # Class 1 for ball
+                    team_conf = {}
+                    # ⭐ update the streamer
+                    ball_json_streamer.update(processed_frame_idx, bbox_out, projected_position)
+                else: # unknown class
+                    raise ValueError(f"Expected 0 (player) or 1 (ball). Got {cls} instead.")
+
 
         # save json every N frames
-        with dt[6]:
+        with dt[4]:
             # flush every N frames
-            json_streamer.maybe_flush(processed_frame_idx)
+            player_json_streamer.maybe_flush(processed_frame_idx)
+            ball_json_streamer.maybe_flush(processed_frame_idx)
 
         # Draw results
-        with dt[7]:
+        with dt[5]:
             if not nosave or view_img:
                 # print("team_scores: ",team_scores, )
                 draw_detections(annotated_image, final_detections, names)
@@ -912,14 +915,12 @@ def run(
         total_time = sum(dt[i].dt for i in range(len(dt)))
         # print(f"Frame {processed_frame_idx} total use: {total_time} (preprocessed: {dt[0].dt:.2f}s, inference: {dt[1].dt:.2f}s, NMS: {dt[2].dt:.2f}s, proprocess: {dt[3].dt:.2f}s, tracking & crop patches: {dt[4].dt:.2f}s, ReID: {dt[5].dt:.2f}s, Json: {dt[6].dt:.2f}s, Draw: {dt[7].dt:.2f}s)")
         pbar.set_postfix({
-            "pre": f"{dt[0].dt:.2f}s",
-            "inf": f"{dt[1].dt:.2f}s",
-            "nms": f"{dt[2].dt:.2f}s",
-            "proc": f"{dt[3].dt:.2f}s",
-            "trk": f"{dt[4].dt:.2f}s",
-            "reid": f"{dt[5].dt:.2f}s",
-            "json": f"{dt[6].dt:.2f}s",
-            "draw": f"{dt[7].dt:.2f}s",
+            "inf+nms": f"{dt[0].dt:.2f}s",
+            "proc": f"{dt[1].dt:.2f}s",
+            "trk": f"{dt[2].dt:.2f}s",
+            "reid": f"{dt[3].dt:.2f}s",
+            "json": f"{dt[4].dt:.2f}s",
+            "draw": f"{dt[5].dt:.2f}s",
             "total": f"{total_time:.2f}s"
         })
         pbar.update(1)
@@ -937,8 +938,10 @@ def run(
         print(f"✅ Saved video to: {output_path}")
 
     # close streamer → writes remaining tracks & final ‘]’
-    json_streamer.close()
-    print(f"✅ Streamed team tracking JSON to {output_json_path}")
+    player_json_streamer.close()
+    ball_json_streamer.close()
+    print(f"✅ Streamed team tracking JSON to {output_player_json_path}")
+    print(f"✅ Streamed ball tracking JSON to {output_ball_json_path}")
 
 
 def parse_opt():
@@ -1004,4 +1007,4 @@ if __name__ == "__main__":
     end_time = time.time()
     print(f"Total execution time(HH:MM:SS): {time.strftime('%H:%M:%S', time.gmtime(end_time - start_time))}")
 # Example usage:
-# python3 mini_patch_detect_v1_for_video.py --source './data/video/test_sample/C0478.MP4' --game-time 317 3085 3982 6809 --img 640 --device 0 --weights './weight/yolov9-s-converted.pt' --name test_4k --classes 0 32 --clothes-folder-path ./data/histograms/0525/ --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --jersey-weights ./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255.ckpt --nosave
+# python3 mini_patch_detect_v2_for_video.py --source './data/video/test_sample/C0478.MP4' --game-time 317 3085 3982 6809 --img 640 --device 0 --weights './weight/yolov9-s-converted.pt' --name test_4k --classes 0 1 --clothes-folder-path ./data/histograms/0525/ --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 --homography-dst-points 530 0 530 660 1060 660 1060 0 --jersey-weights ./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255.ckpt --nosave

@@ -513,7 +513,6 @@ def run(
             if len(img.shape) == 3:
                 img = img[None]  # expand for batch dim
 
-            # img = img.clone().detach()
             # Run inference (similar to original inference)
             pred = model(img, augment=augment)
         
