@@ -17,16 +17,36 @@ if str(ROOT) not in sys.path:
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 from models.common import DetectMultiBackend
-from utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadScreenshots, LoadStreams
+from utils.dataloaders import (
+    IMG_FORMATS,
+    VID_FORMATS,
+    LoadImages,
+    LoadScreenshots,
+    LoadStreams,
+)
 from utils.general import (
-    LOGGER, Profile, check_file, check_img_size, check_imshow, colorstr, cv2,
-    increment_path, non_max_suppression, print_args, scale_boxes, strip_optimizer, xyxy2xywh
+    LOGGER,
+    Profile,
+    check_file,
+    check_img_size,
+    check_imshow,
+    colorstr,
+    cv2,
+    increment_path,
+    non_max_suppression,
+    print_args,
+    scale_boxes,
+    strip_optimizer,
+    xyxy2xywh,
 )
 from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, smart_inference_mode
 from tools.goalkeeper_motion_classification import classify_goalkeeper_behavior
 from collections import deque, defaultdict
-from tools.extract_datetime import get_video_start_time_and_fps, calculate_real_timestamp
+from tools.extract_datetime import (
+    get_video_start_time_and_fps,
+    calculate_real_timestamp,
+)
 from tools.extract_speed_data import find_max_speed_in_range
 from tqdm import tqdm
 from collections import defaultdict
@@ -34,15 +54,11 @@ from typing import List, Tuple, Dict, Iterable
 
 detections_per_file = defaultdict(lambda: defaultdict(list))
 
+
 def compute_perspective_transform(pts, width, height):
     """Compute the perspective transform matrix from 4 points to (width x height)."""
     src = np.float32(pts)
-    dst = np.float32([
-        [0, 0],
-        [width - 1, 0],
-        [width - 1, height - 1],
-        [0, height - 1]
-    ])
+    dst = np.float32([[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]])
     M = cv2.getPerspectiveTransform(src, dst)
     return M
 
@@ -60,14 +76,12 @@ def perspective_transform_points(points, M):
 
 def prepare_perspective(goal_image_coordinate, goal_realworld_size):
     """
-    Compute perspective matrix if 4 corner points provided. 
+    Compute perspective matrix if 4 corner points provided.
     Returns (perspective_matrix, have_perspective).
     """
     if goal_image_coordinate and len(goal_image_coordinate) == 4:
         perspective_matrix = compute_perspective_transform(
-            goal_image_coordinate,
-            goal_realworld_size[0],
-            goal_realworld_size[1]
+            goal_image_coordinate, goal_realworld_size[0], goal_realworld_size[1]
         )
         print("Perspective matrix:", perspective_matrix)
         return perspective_matrix
@@ -80,7 +94,7 @@ def setup_output_dir(project, name, exist_ok, save_txt):
     Create the output directory and returns its path.
     """
     save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # e.g. runs/detect/exp
-    (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)
+    (save_dir / "labels" if save_txt else save_dir).mkdir(parents=True, exist_ok=True)
     return save_dir
 
 
@@ -102,9 +116,9 @@ def create_dataloader(source, imgsz, stride, pt, vid_stride):
     """
     source_str = str(source)
     is_file = Path(source_str).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
-    is_url = source_str.lower().startswith(('rtsp://', 'rtmp://', 'http://', 'https://'))
-    webcam = source_str.isnumeric() or source_str.endswith('.txt') or (is_url and not is_file)
-    screenshot = source_str.lower().startswith('screen')
+    is_url = source_str.lower().startswith(("rtsp://", "rtmp://", "http://", "https://"))
+    webcam = source_str.isnumeric() or source_str.endswith(".txt") or (is_url and not is_file)
+    screenshot = source_str.lower().startswith("screen")
 
     if is_url and is_file:
         # For example: download if it's a direct URL
@@ -112,13 +126,17 @@ def create_dataloader(source, imgsz, stride, pt, vid_stride):
 
     if webcam:
         view_img = check_imshow(warn=True)
-        dataset = LoadStreams(source_str, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride)
+        dataset = LoadStreams(
+            source_str, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride
+        )
         bs = len(dataset)
     elif screenshot:
         dataset = LoadScreenshots(source_str, img_size=imgsz, stride=stride, auto=pt)
         bs = 1
     else:
-        dataset = LoadImages(source_str, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride)
+        dataset = LoadImages(
+            source_str, img_size=imgsz, stride=stride, auto=pt, vid_stride=vid_stride
+        )
         bs = 1
 
     return dataset, bs, webcam
@@ -126,7 +144,7 @@ def create_dataloader(source, imgsz, stride, pt, vid_stride):
 
 def warmup_yolo_model(model, pt, bs, imgsz):
     """
-    Warm up model with a simple forward pass. 
+    Warm up model with a simple forward pass.
     """
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))
 
@@ -137,28 +155,36 @@ def parse_gopro_name(path_str: str) -> Tuple[str, int]:
     Fallback: (stem, 0)
     """
     stem = Path(path_str).stem
-    m = re.match(r'(?i)^GX(\d{2})(\d{4})$', stem)
+    m = re.match(r"(?i)^GX(\d{2})(\d{4})$", stem)
     if m:
         chap = int(m.group(1))
         base = m.group(2)
         return base, chap
     return stem, 0
 
+
 def apply_cooldown(trigs: List[int], fps: float, cooldown_s: float) -> List[int]:
-    if not trigs: return []
+    if not trigs:
+        return []
     cool = int(round(cooldown_s * fps))
-    kept, last = [], -10**12
+    kept, last = [], -(10**12)
     for f in sorted(set(trigs)):
         if f - last >= cool:
-            kept.append(f); last = f
+            kept.append(f)
+            last = f
     return kept
 
-def build_windows(triggers: List[int], fps: float, pre_s: float, post_s: float) -> List[Tuple[int,int,int]]:
+
+def build_windows(
+    triggers: List[int], fps: float, pre_s: float, post_s: float
+) -> List[Tuple[int, int, int]]:
     """
     Returns merged [(start_gf, end_gf, repr_gf), ...]; end is exclusive.
     """
-    if not triggers: return []
-    pre = int(round(pre_s * fps)); post = int(round(post_s * fps))
+    if not triggers:
+        return []
+    pre = int(round(pre_s * fps))
+    post = int(round(post_s * fps))
     spans = [(max(0, f - pre), f + post, f) for f in triggers]
     spans.sort(key=lambda x: x[0])
     merged = []
@@ -167,9 +193,11 @@ def build_windows(triggers: List[int], fps: float, pre_s: float, post_s: float) 
         if s2 <= e:
             e = max(e, e2)
         else:
-            merged.append((s, e, rf)); s, e, rf = s2, e2, rf2
+            merged.append((s, e, rf))
+            s, e, rf = s2, e2, rf2
     merged.append((s, e, rf))
     return merged
+
 
 def run_ffmpeg(cmd: List[str]):
     print("FFmpeg:", " ".join(cmd))
@@ -180,66 +208,147 @@ def run_ffmpeg(cmd: List[str]):
         print("-----------------------")
         raise subprocess.CalledProcessError(out.returncode, cmd, out.stdout, out.stderr)
 
+
 def ffmpeg_cut_piece(video_path, fps, start_frame, end_frame, out_path, reencode=False):
     start_sec = start_frame / fps
-    dur_sec   = max(0.1, (end_frame - start_frame) / fps)
+    dur_sec = max(0.1, (end_frame - start_frame) / fps)
     if not reencode:
-        cmd = ["ffmpeg","-y","-ss",f"{start_sec:.3f}","-i",str(video_path),
-               "-t",f"{dur_sec:.3f}","-c","copy",str(out_path)]
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{start_sec:.3f}",
+            "-i",
+            str(video_path),
+            "-t",
+            f"{dur_sec:.3f}",
+            "-c",
+            "copy",
+            str(out_path),
+        ]
     else:
-        cmd = ["ffmpeg","-y","-ss",f"{start_sec:.3f}","-i",str(video_path),
-               "-t",f"{dur_sec:.3f}","-c:v","libx264","-preset","veryfast","-crf","18",
-               "-c:a","copy",str(out_path)]
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{start_sec:.3f}",
+            "-i",
+            str(video_path),
+            "-t",
+            f"{dur_sec:.3f}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-c:a",
+            "copy",
+            str(out_path),
+        ]
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+
 def _probe_fps(path: str):
-    out = subprocess.run(
-        ["ffprobe","-v","error","-select_streams","v:0",
-         "-show_entries","stream=avg_frame_rate,r_frame_rate",
-         "-of","default=nokey=1:noprint_wrappers=1", path],
-        text=True, capture_output=True, check=True
-    ).stdout.strip().splitlines()
+    out = (
+        subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=avg_frame_rate,r_frame_rate",
+                "-of",
+                "default=nokey=1:noprint_wrappers=1",
+                path,
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        .stdout.strip()
+        .splitlines()
+    )
     rat = next((l for l in out if l and l != "0/0"), "30")
     if "/" in rat:
-        a,b = rat.split("/")
+        a, b = rat.split("/")
         fps = float(a) / float(b) if float(b) else 30.0
     else:
         fps = float(rat or 30.0)
     return fps, rat
 
+
 def _dense_gop_encoder_args(fps_int: int, no_bframes: bool = True):
     try:
-        encs = subprocess.run(["ffmpeg","-hide_banner","-encoders"],
-                              text=True, capture_output=True, check=True).stdout
+        encs = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
     except Exception:
         encs = ""
-    force_each_sec = ["-force_key_frames","expr:gte(t,n_forced*1)"]
+    force_each_sec = ["-force_key_frames", "expr:gte(t,n_forced*1)"]
     if "libx264" in encs:
         x264_params = f"keyint={fps_int}:min-keyint={fps_int}:scenecut=0:open_gop=0"
         if no_bframes:
             x264_params += ":bframes=0:ref=1"
-        return ["-c:v","libx264","-preset","veryfast","-crf","18",
-                "-pix_fmt","yuv420p","-profile:v","high","-level","4.1",
-                "-x264-params", x264_params, *force_each_sec]
+        return [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "high",
+            "-level",
+            "4.1",
+            "-x264-params",
+            x264_params,
+            *force_each_sec,
+        ]
     if "h264_nvenc" in encs:
-        base = ["-c:v","h264_nvenc","-preset","p4","-cq","19",
-                "-pix_fmt","yuv420p","-profile:v","high","-level","4.1",
-                "-g", str(fps_int), "-forced-idr","1", *force_each_sec]
+        base = [
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p4",
+            "-cq",
+            "19",
+            "-pix_fmt",
+            "yuv420p",
+            "-profile:v",
+            "high",
+            "-level",
+            "4.1",
+            "-g",
+            str(fps_int),
+            "-forced-idr",
+            "1",
+            *force_each_sec,
+        ]
         if no_bframes:
-            base += ["-bf","0"]
+            base += ["-bf", "0"]
         return base
-    return ["-c:v","mpeg4","-qscale:v","4","-pix_fmt","yuv420p"]
+    return ["-c:v", "mpeg4", "-qscale:v", "4", "-pix_fmt", "yuv420p"]
+
 
 def concat_cross_files_dense_video(parts: List[str], out_path: str, src_fps_rat: str, fps_int: int):
     enc = _dense_gop_encoder_args(fps_int, no_bframes=True)
-    cmd = ["ffmpeg","-y","-hide_banner","-loglevel","error"]
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
     for p in parts:
         cmd += ["-i", str(p)]
     n = len(parts)
 
     flines, vlabels = [], []
     for i in range(n):
-        v_in = f"[{i}:v:0]"; v_out = f"[v{i}]"
+        v_in = f"[{i}:v:0]"
+        v_out = f"[v{i}]"
         flines.append(
             f"{v_in}setpts=PTS-STARTPTS,scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,format=yuv420p{v_out}"
         )
@@ -247,18 +356,27 @@ def concat_cross_files_dense_video(parts: List[str], out_path: str, src_fps_rat:
     flines.append("".join(vlabels) + f"concat=n={n}:v=1:a=0[v]")
 
     cmd += [
-        "-filter_complex",";".join(flines),
-        "-map","[v]",
-        "-vsync","cfr","-r", src_fps_rat,
+        "-filter_complex",
+        ";".join(flines),
+        "-map",
+        "[v]",
+        "-vsync",
+        "cfr",
+        "-r",
+        src_fps_rat,
         *enc,
-        "-an","-movflags","+faststart",
-        str(out_path)
+        "-an",
+        "-movflags",
+        "+faststart",
+        str(out_path),
     ]
     subprocess.run(cmd, check=True)
+
 
 # =========================
 # RAM-safe detection sharder
 # =========================
+
 
 class DetShardWriter:
     """
@@ -266,18 +384,19 @@ class DetShardWriter:
     One JSON line per detection:
       {"frame_local": int, "cls_idx": int, "cls_name": str, "conf": float, "bbox_xyxy": [..], "bbox_warp":[..]?}
     """
+
     def __init__(self, root: Path, shard_size: int = 5000):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.shard_size = int(shard_size)
         # cache of open file handles { (fkey, shard_id) : file_obj }
-        self._open: Dict[Tuple[str,int], "io.TextIOWrapper"] = {}
+        self._open: Dict[Tuple[str, int], "io.TextIOWrapper"] = {}
 
     def _path_for(self, fkey: str, shard_id: int) -> Path:
         d = self.root / fkey
         d.mkdir(parents=True, exist_ok=True)
         start = shard_id * self.shard_size
-        end   = start + self.shard_size - 1
+        end = start + self.shard_size - 1
         return d / f"block_{start:06d}-{end:06d}.jsonl"
 
     def write_det(self, fkey: str, frame_local: int, record: dict):
@@ -293,9 +412,12 @@ class DetShardWriter:
 
     def close(self):
         for fh in self._open.values():
-            try: fh.close()
-            except Exception: pass
+            try:
+                fh.close()
+            except Exception:
+                pass
         self._open.clear()
+
 
 class DetShardReader:
     def __init__(self, root: Path, shard_size: int = 5000):
@@ -304,13 +426,14 @@ class DetShardReader:
 
     def _paths_for_range(self, fkey: str, start_local: int, end_local: int) -> List[Path]:
         """end_local is exclusive"""
-        if end_local <= start_local: return []
+        if end_local <= start_local:
+            return []
         first = start_local // self.shard_size
-        last  = (max(start_local, end_local - 1)) // self.shard_size
+        last = (max(start_local, end_local - 1)) // self.shard_size
         out = []
         for sid in range(first, last + 1):
             start = sid * self.shard_size
-            end   = start + self.shard_size - 1
+            end = start + self.shard_size - 1
             p = self.root / fkey / f"block_{start:06d}-{end:06d}.jsonl"
             if p.exists():
                 out.append(p)
@@ -326,18 +449,34 @@ class DetShardReader:
                     except Exception:
                         continue
                     fl = rec.get("frame_local")
-                    if fl is None: continue
+                    if fl is None:
+                        continue
                     if start_local <= int(fl) < end_local:
                         yield rec
+
 
 # =========================
 # Core phases
 # =========================
 
+
 def _scan_pass(
-    dataset, model, names, conf_thres, iou_thres, max_det, classes, agnostic_nms,
-    augment, perspective_matrix, save_crop, hide_labels, hide_conf,
-    use_tqdm: bool, batch_size: int, tmp_det_root: Path
+    dataset,
+    model,
+    names,
+    conf_thres,
+    iou_thres,
+    max_det,
+    classes,
+    agnostic_nms,
+    augment,
+    perspective_matrix,
+    save_crop,
+    hide_labels,
+    hide_conf,
+    use_tqdm: bool,
+    batch_size: int,
+    tmp_det_root: Path,
 ):
     """
     Returns:
@@ -348,6 +487,7 @@ def _scan_pass(
       writes per-detection JSONL shards under tmp_det_root/<fkey>/block_*.jsonl
     """
     from utils.general import LOGGER  # if you have it elsewhere, adjust
+
     dt = (Profile(), Profile(), Profile())
     shard_writer = DetShardWriter(tmp_det_root, shard_size=5000)
 
@@ -357,7 +497,7 @@ def _scan_pass(
     file_path_map, group_key_of_file, chapter_of_file = {}, {}, {}
     frame_counter_map = defaultdict(int)
 
-    total_frames = len(dataset) if hasattr(dataset, '__len__') else None
+    total_frames = len(dataset) if hasattr(dataset, "__len__") else None
     pbar = tqdm(total=total_frames, desc="Scan (two-pass)") if (use_tqdm and total_frames) else None
 
     # batch buffers
@@ -366,11 +506,14 @@ def _scan_pass(
     seen = 0
 
     # class id
-    ball_cls_id = names.index('ball') if isinstance(names, (list, tuple)) and 'ball' in names else 32
+    ball_cls_id = (
+        names.index("ball") if isinstance(names, (list, tuple)) and "ball" in names else 32
+    )
 
     def _flush_batch():
         nonlocal seen
-        if not batch_tensors: return
+        if not batch_tensors:
+            return
 
         with dt[0]:
             im = torch.stack(batch_tensors, 0).to(model.device)
@@ -379,12 +522,14 @@ def _scan_pass(
         with dt[1]:
             pred = model(im, augment=augment)
         with dt[2]:
-            preds = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+            preds = non_max_suppression(
+                pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det
+            )
 
         for k, det in enumerate(preds):
             seen += 1
             path = batch_paths[k]
-            im0  = batch_im0s[k]
+            im0 = batch_im0s[k]
             in_h, in_w = batch_in_shapes[k]
             s = batch_s_bases[k]
             frame_local = batch_frames_local[k]
@@ -401,7 +546,7 @@ def _scan_pass(
                 fps_per_file[fkey] = float(v_fps or 30.0)
                 start_time_per_file[fkey] = v_start_time
                 first_frame_in_file[fkey] = frame_local
-                last_frame_in_file[fkey]  = frame_local
+                last_frame_in_file[fkey] = frame_local
 
             last_frame_in_file[fkey] = max(last_frame_in_file[fkey], frame_local)
 
@@ -414,13 +559,23 @@ def _scan_pass(
                 for *xyxy, conf, cls in det:
                     x1, y1, x2, y2 = map(float, xyxy)
                     det_result = process_single_detection(
-                        xyxy, conf, cls, perspective_matrix,
-                        save_crop, hide_labels, hide_conf, names
+                        xyxy,
+                        conf,
+                        cls,
+                        perspective_matrix,
+                        save_crop,
+                        hide_labels,
+                        hide_conf,
+                        names,
                     )
                     rec = {
                         "file_key": fkey,
                         "cls_idx": int(cls.item() if hasattr(cls, "item") else cls),
-                        "cls_name": names[int(cls)] if isinstance(names, (list, tuple)) and int(cls) < len(names) else str(int(cls)),
+                        "cls_name": (
+                            names[int(cls)]
+                            if isinstance(names, (list, tuple)) and int(cls) < len(names)
+                            else str(int(cls))
+                        ),
                         "conf": float(conf.item() if hasattr(conf, "item") else conf),
                         "bbox_xyxy": [x1, y1, x2, y2],
                     }
@@ -429,8 +584,8 @@ def _scan_pass(
                     shard_writer.write_det(fkey, int(frame_local), rec)
 
                     # trigger logic
-                    if det_result and int(det_result['cls']) == int(ball_cls_id):
-                        wx1, wy1, wx2, wy2 = det_result['bbox_warp']
+                    if det_result and int(det_result["cls"]) == int(ball_cls_id):
+                        wx1, wy1, wx2, wy2 = det_result["bbox_warp"]
                         if (wx2 - wx1) >= 22 or (wy2 - wy1) >= 22:
                             triggered = True
 
@@ -439,22 +594,31 @@ def _scan_pass(
 
             # progress
             if pbar:
-                pbar.set_postfix_str(f"{s}{'' if (det is not None and len(det)) else '(no det), '}{dt[1].dt * 1E3:.1f}ms")
+                pbar.set_postfix_str(
+                    f"{s}{'' if (det is not None and len(det)) else '(no det), '}{dt[1].dt * 1E3:.1f}ms"
+                )
                 pbar.update(1)
             else:
-                LOGGER.info(f"{s}{'' if (det is not None and len(det)) else '(no det), '}{dt[1].dt * 1E3:.1f}ms")
+                LOGGER.info(
+                    f"{s}{'' if (det is not None and len(det)) else '(no det), '}{dt[1].dt * 1E3:.1f}ms"
+                )
 
         # clear batch
-        batch_tensors.clear(); batch_in_shapes.clear(); batch_im0s.clear()
-        batch_paths.clear(); batch_s_bases.clear(); batch_frames_local.clear(); batch_file_keys.clear()
+        batch_tensors.clear()
+        batch_in_shapes.clear()
+        batch_im0s.clear()
+        batch_paths.clear()
+        batch_s_bases.clear()
+        batch_frames_local.clear()
+        batch_file_keys.clear()
 
     # iterate dataset -> build batches
     for _idx, (path, im, im0s, vid_cap, s) in enumerate(dataset):
-        if hasattr(dataset, 'count') and isinstance(path, list):
+        if hasattr(dataset, "count") and isinstance(path, list):
             p, im0, frame_local = path[0], im0s[0].copy(), dataset.count
-            s_local = f'0: ' + s
+            s_local = f"0: " + s
         else:
-            p, im0, frame_local = path, im0s.copy(), getattr(dataset, 'frame', None)
+            p, im0, frame_local = path, im0s.copy(), getattr(dataset, "frame", None)
             s_local = s
 
         fkey = Path(p).stem
@@ -484,94 +648,126 @@ def _scan_pass(
             _flush_batch()
 
     _flush_batch()
-    if pbar: pbar.close()
+    if pbar:
+        pbar.close()
     shard_writer.close()
 
-    return (seen, dt,
-            file_path_map, fps_per_file, start_time_per_file, first_frame_in_file, last_frame_in_file,
-            group_key_of_file, chapter_of_file, triggers_per_file)
+    return (
+        seen,
+        dt,
+        file_path_map,
+        fps_per_file,
+        start_time_per_file,
+        first_frame_in_file,
+        last_frame_in_file,
+        group_key_of_file,
+        chapter_of_file,
+        triggers_per_file,
+    )
+
 
 def _build_segments(
-    file_path_map, fps_per_file, start_time_per_file,
-    first_frame_in_file, last_frame_in_file,
-    group_key_of_file, chapter_of_file
+    file_path_map,
+    fps_per_file,
+    start_time_per_file,
+    first_frame_in_file,
+    last_frame_in_file,
+    group_key_of_file,
+    chapter_of_file,
 ):
     groups_present = {group_key_of_file[fk] for fk in file_path_map.keys()}
     if len(groups_present) == 0:
         raise ValueError("No videos found in the dataset.")
     if len(groups_present) > 1:
-        raise ValueError(f"Multiple GoPro groups detected in folder: {sorted(groups_present)}. "
-                         f"Please pass a folder with a single chaptered sequence.")
+        raise ValueError(
+            f"Multiple GoPro groups detected in folder: {sorted(groups_present)}. "
+            f"Please pass a folder with a single chaptered sequence."
+        )
     gkey = list(groups_present)[0]
 
     segs = []
     for fkey, path_abs in file_path_map.items():
-        if group_key_of_file[fkey] != gkey: continue
-        segs.append({
-            'fkey': fkey,
-            'path': path_abs,
-            'chapter': chapter_of_file[fkey],
-            'fps': fps_per_file.get(fkey, 30.0),
-            'start_time': start_time_per_file.get(fkey),
-            'first_frame': int(first_frame_in_file.get(fkey, 0)),
-            'last_frame':  int(last_frame_in_file.get(fkey, 0)),
-        })
+        if group_key_of_file[fkey] != gkey:
+            continue
+        segs.append(
+            {
+                "fkey": fkey,
+                "path": path_abs,
+                "chapter": chapter_of_file[fkey],
+                "fps": fps_per_file.get(fkey, 30.0),
+                "start_time": start_time_per_file.get(fkey),
+                "first_frame": int(first_frame_in_file.get(fkey, 0)),
+                "last_frame": int(last_frame_in_file.get(fkey, 0)),
+            }
+        )
     if not segs:
         return gkey, [], None, None
 
-    segs.sort(key=lambda d: d['chapter'])
-    group_fps = float(segs[0]['fps'])
-    group_start_time = segs[0]['start_time']
+    segs.sort(key=lambda d: d["chapter"])
+    group_fps = float(segs[0]["fps"])
+    group_start_time = segs[0]["start_time"]
 
     # global offsets across chapters
     offset = 0
     for seg in segs:
-        seg_len = max(0, (int(seg['last_frame']) - int(seg['first_frame']) + 1))
-        seg['g_start'] = offset
-        seg['g_end']   = offset + seg_len
-        offset = seg['g_end']
+        seg_len = max(0, (int(seg["last_frame"]) - int(seg["first_frame"]) + 1))
+        seg["g_start"] = offset
+        seg["g_end"] = offset + seg_len
+        offset = seg["g_end"]
 
     return gkey, segs, group_fps, group_start_time
+
 
 def _compute_global_triggers(segs, triggers_per_file) -> List[int]:
     seg_by_fkey = {s["fkey"]: s for s in segs}
     gtrigs = []
     for fkey, locs in triggers_per_file.items():
         seg = seg_by_fkey.get(fkey)
-        if not seg: continue
-        f0 = int(seg['first_frame'])
-        g0 = int(seg['g_start'])
+        if not seg:
+            continue
+        f0 = int(seg["first_frame"])
+        g0 = int(seg["g_start"])
         for f in locs:
             gtrigs.append(g0 + (int(f) - f0))
     return gtrigs
 
+
 def _local_to_global_builder(segs):
     seg_by_fkey = {s["fkey"]: s for s in segs}
+
     def local_to_global(fkey: str, frame_local: int) -> int:
         seg = seg_by_fkey[fkey]
-        return int(seg['g_start'] + (int(frame_local) - int(seg['first_frame'])))
+        return int(seg["g_start"] + (int(frame_local) - int(seg["first_frame"])))
+
     return local_to_global
 
+
 def _write_clip_jsonl_for_window(
-    clip_path: Path, meta_info: dict, segs: List[dict],
-    gs_global: int, ge_global: int, reader: DetShardReader, local_to_global
+    clip_path: Path,
+    meta_info: dict,
+    segs: List[dict],
+    gs_global: int,
+    ge_global: int,
+    reader: DetShardReader,
+    local_to_global,
 ):
     out_path = clip_path.with_suffix(".jsonl")
     with open(out_path, "w", encoding="utf-8") as jf:
-        jf.write(json.dumps({"type":"meta", **meta_info}) + "\n")
+        jf.write(json.dumps({"type": "meta", **meta_info}) + "\n")
 
         for seg in segs:
-            s_int = max(gs_global, int(seg['g_start']))
-            e_int = min(ge_global, int(seg['g_end']))
-            if s_int >= e_int: continue
+            s_int = max(gs_global, int(seg["g_start"]))
+            e_int = min(ge_global, int(seg["g_end"]))
+            if s_int >= e_int:
+                continue
 
-            local_start = int(seg['first_frame'] + (s_int - seg['g_start']))
-            local_end   = int(local_start + (e_int - s_int))  # exclusive
+            local_start = int(seg["first_frame"] + (s_int - seg["g_start"]))
+            local_end = int(local_start + (e_int - s_int))  # exclusive
             fkey = seg["fkey"]
 
             for rec in reader.iter_range(fkey, local_start, local_end):
                 f_global = local_to_global(fkey, int(rec["frame_local"]))
-                f_clip   = int(f_global - gs_global)
+                f_clip = int(f_global - gs_global)
                 out = {
                     "type": "det",
                     "clip_frame": f_clip,
@@ -588,9 +784,11 @@ def _write_clip_jsonl_for_window(
                 jf.write(json.dumps(out) + "\n")
     return str(out_path)
 
+
 # =========================
 # Public API
 # =========================
+
 
 def infer_on_dataset(
     dataset,
@@ -602,15 +800,15 @@ def infer_on_dataset(
     classes,
     agnostic_nms,
     augment,
-    visualize,              # unused in two-pass
+    visualize,  # unused in two-pass
     perspective_matrix,
-    save_img,               # ignored in scan mode
-    save_txt,               # unused
-    save_conf,              # unused
+    save_img,  # ignored in scan mode
+    save_txt,  # unused
+    save_conf,  # unused
     save_crop,
     hide_labels,
     hide_conf,
-    view_img,               # ignored in scan mode
+    view_img,  # ignored in scan mode
     save_dir,
     radar_data_path,
     use_tqdm,
@@ -634,12 +832,34 @@ def infer_on_dataset(
     tmp_det_root.mkdir(parents=True, exist_ok=True)
 
     # ---- Pass-1
-    (seen, dt,
-     file_path_map, fps_per_file, start_time_per_file, first_frame_in_file, last_frame_in_file,
-     group_key_of_file, chapter_of_file, triggers_per_file) = _scan_pass(
-        dataset, model, names, conf_thres, iou_thres, max_det, classes, agnostic_nms,
-        augment, perspective_matrix, save_crop, hide_labels, hide_conf,
-        use_tqdm, batch_size, tmp_det_root
+    (
+        seen,
+        dt,
+        file_path_map,
+        fps_per_file,
+        start_time_per_file,
+        first_frame_in_file,
+        last_frame_in_file,
+        group_key_of_file,
+        chapter_of_file,
+        triggers_per_file,
+    ) = _scan_pass(
+        dataset,
+        model,
+        names,
+        conf_thres,
+        iou_thres,
+        max_det,
+        classes,
+        agnostic_nms,
+        augment,
+        perspective_matrix,
+        save_crop,
+        hide_labels,
+        hide_conf,
+        use_tqdm,
+        batch_size,
+        tmp_det_root,
     )
 
     # Quick out if empty
@@ -648,15 +868,19 @@ def infer_on_dataset(
 
     # ---- Segments
     gkey, segs, group_fps, group_start_time = _build_segments(
-        file_path_map, fps_per_file, start_time_per_file,
-        first_frame_in_file, last_frame_in_file,
-        group_key_of_file, chapter_of_file
+        file_path_map,
+        fps_per_file,
+        start_time_per_file,
+        first_frame_in_file,
+        last_frame_in_file,
+        group_key_of_file,
+        chapter_of_file,
     )
     if not segs:
         return seen, [], dt, []
 
     # fps + src rational
-    src_fps_float, src_fps_rat = _probe_fps(segs[0]['path'])
+    src_fps_float, src_fps_rat = _probe_fps(segs[0]["path"])
     fps_int = max(1, int(round(src_fps_float)))
 
     # Global triggers -> windows
@@ -682,14 +906,21 @@ def infer_on_dataset(
         try:
             # collect per-file parts
             for seg in segs:
-                s_int = max(gs, int(seg['g_start']))
-                e_int = min(ge, int(seg['g_end']))
-                if s_int >= e_int: continue
-                local_start = int(seg['first_frame'] + (s_int - seg['g_start']))
-                local_end   = int(local_start + (e_int - s_int))
+                s_int = max(gs, int(seg["g_start"]))
+                e_int = min(ge, int(seg["g_end"]))
+                if s_int >= e_int:
+                    continue
+                local_start = int(seg["first_frame"] + (s_int - seg["g_start"]))
+                local_end = int(local_start + (e_int - s_int))
                 part_path = out_group_dir / f"__part_{i:03d}_{int(seg['chapter']):02d}.mp4"
-                ffmpeg_cut_piece(seg['path'], float(group_fps), int(local_start), int(local_end),
-                                 part_path, reencode=ffmpeg_reencode)
+                ffmpeg_cut_piece(
+                    seg["path"],
+                    float(group_fps),
+                    int(local_start),
+                    int(local_end),
+                    part_path,
+                    reencode=ffmpeg_reencode,
+                )
                 parts.append(str(part_path))
 
             final_name = f"{Path(segs[0]['path']).stem}_clip_{i:03d}.mp4"
@@ -700,32 +931,42 @@ def infer_on_dataset(
             else:
                 concat_cross_files_dense_video(parts, final_path, src_fps_rat, fps_int)
                 for p in parts:
-                    try: os.remove(p)
-                    except Exception: pass
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
 
             # timestamps for representative frame (global)
             try:
-                trigger_time, video_time = calculate_real_timestamp(group_start_time, 0, int(repr_gf), float(group_fps))
+                trigger_time, video_time = calculate_real_timestamp(
+                    group_start_time, 0, int(repr_gf), float(group_fps)
+                )
             except Exception:
                 trigger_time, video_time = None, None
 
             # radar speed near trigger
             try:
-                speed = find_max_speed_in_range(radar_data_path, trigger_time, time_buffer=60, csv_utc_offset=8)
+                speed = find_max_speed_in_range(
+                    radar_data_path, trigger_time, time_buffer=60, csv_utc_offset=8
+                )
             except Exception:
                 speed = None
 
-            collection_of_speed_dict.append({
-                'clip_path': str(final_path),
-                'speed': speed,
-                'video_time': video_time,
-                'real_time': trigger_time
-            })
-            result_windows.append({
-                'start_frame_global': int(gs),
-                'end_frame_global': int(ge),
-                'fps': float(group_fps),
-            })
+            collection_of_speed_dict.append(
+                {
+                    "clip_path": str(final_path),
+                    "speed": speed,
+                    "video_time": video_time,
+                    "real_time": trigger_time,
+                }
+            )
+            result_windows.append(
+                {
+                    "start_frame_global": int(gs),
+                    "end_frame_global": int(ge),
+                    "fps": float(group_fps),
+                }
+            )
 
             # Per-clip detections JSONL
             meta = {
@@ -736,12 +977,15 @@ def infer_on_dataset(
                 "video_time_repr": video_time,
                 "real_time_repr": str(trigger_time) if trigger_time else None,
             }
-            _write_clip_jsonl_for_window(final_path, meta, segs, int(gs), int(ge), reader, local_to_global)
+            _write_clip_jsonl_for_window(
+                final_path, meta, segs, int(gs), int(ge), reader, local_to_global
+            )
 
         except Exception as e:
             LOGGER.warning(f"Failed to build clip window {i}: {e}")
 
     return seen, result_windows, dt, collection_of_speed_dict
+
 
 def process_single_detection(
     xyxy,
@@ -762,57 +1006,51 @@ def process_single_detection(
 
     # Initialize detection dictionary
     detection_result = {
-        'cls': c,
-        'conf': float(conf),
-        'bbox_src': [x1, y1, x2, y2],  # bounding box in original coords
-        'bbox_warp': None,            # bounding box in warped coords
-        'label_str': None,            # class + conf text
-        'keypoints': None,
-        'keypoints_conf': None,
-        'save_crop': save_crop,
-        'class_name': names[c] if c < len(names) else f"class_{c}",
-        'score': 0.0                  # color-matching score
+        "cls": c,
+        "conf": float(conf),
+        "bbox_src": [x1, y1, x2, y2],  # bounding box in original coords
+        "bbox_warp": None,  # bounding box in warped coords
+        "label_str": None,  # class + conf text
+        "keypoints": None,
+        "keypoints_conf": None,
+        "save_crop": save_crop,
+        "class_name": names[c] if c < len(names) else f"class_{c}",
+        "score": 0.0,  # color-matching score
     }
 
     # Build label text
     if not hide_labels:
         if hide_conf:
-            detection_result['label_str'] = f'{names[c]}'
+            detection_result["label_str"] = f"{names[c]}"
         else:
-            detection_result['label_str'] = f'{names[c]} {conf:.2f}'
+            detection_result["label_str"] = f"{names[c]} {conf:.2f}"
 
     # Warp bounding box corners
     corners_src = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32)
     corners_dst = perspective_transform_points(corners_src, perspective_matrix)
     wx1, wy1 = corners_dst[:, 0].min(), corners_dst[:, 1].min()
     wx2, wy2 = corners_dst[:, 0].max(), corners_dst[:, 1].max()
-    detection_result['bbox_warp'] = [wx1, wy1, wx2, wy2]
-
+    detection_result["bbox_warp"] = [wx1, wy1, wx2, wy2]
 
     return detection_result
 
 
-def save_all_detections_txt(
-    all_detections,
-    txt_path,
-    goal_realworld_size,
-    save_conf
-):
+def save_all_detections_txt(all_detections, txt_path, goal_realworld_size, save_conf):
     """
     Save all detections in YOLO format, in the *warped* coordinate domain.
     """
-    txt_out = f'{txt_path}.txt'
-    with open(txt_out, 'a') as f:
+    txt_out = f"{txt_path}.txt"
+    with open(txt_out, "a") as f:
         for det in all_detections:
-            c = det['cls']
-            conf = det['conf']
-            wx1, wy1, wx2, wy2 = det['bbox_warp']
+            c = det["cls"]
+            conf = det["conf"]
+            wx1, wy1, wx2, wy2 = det["bbox_warp"]
             keypoints_global = []
 
             # If we have keypoints, flatten them
-            if det['keypoints'] is not None and det['keypoints_conf'] is not None:
-                points = det['keypoints']
-                confs  = det['keypoints_conf']
+            if det["keypoints"] is not None and det["keypoints_conf"] is not None:
+                points = det["keypoints"]
+                confs = det["keypoints_conf"]
                 for (kx, ky), cpt in zip(points, confs):
                     keypoints_global.extend([kx, ky, float(cpt)])
 
@@ -825,15 +1063,15 @@ def save_all_detections_txt(
             # normalize
             norm_cx = cx / goal_realworld_size[0]
             norm_cy = cy / goal_realworld_size[1]
-            norm_w  = bw / goal_realworld_size[0]
-            norm_h  = bh / goal_realworld_size[1]
+            norm_w = bw / goal_realworld_size[0]
+            norm_h = bh / goal_realworld_size[1]
 
             if save_conf:
                 line = (c, norm_cx, norm_cy, norm_w, norm_h, conf, *keypoints_global)
             else:
                 line = (c, norm_cx, norm_cy, norm_w, norm_h, *keypoints_global)
 
-            f.write(('%g ' * len(line)).rstrip() % line + '\n' + '\n')
+            f.write(("%g " * len(line)).rstrip() % line + "\n" + "\n")
 
 
 def draw_all_detections(im0, all_detections, pose_model, line_thickness=1):
@@ -845,35 +1083,24 @@ def draw_all_detections(im0, all_detections, pose_model, line_thickness=1):
 
     for det in all_detections:
         # BBox data
-        x1, y1, x2, y2 = det['bbox_warp']
-        label_str = det['label_str']
-        cls_id = det['cls']
-        conf_val = det['conf']
+        x1, y1, x2, y2 = det["bbox_warp"]
+        label_str = det["label_str"]
+        cls_id = det["cls"]
+        conf_val = det["conf"]
 
         # Draw bounding box
         annotator.box_label([x1, y1, x2, y2], label_str, color=colors(cls_id, True))
 
         # Optionally save crop if needed
-        if det['save_crop']:
-            save_cropped(
-                annotator.im,
-                x1, y1, x2, y2,
-                det['class_name'],
-                det['txt_path']
-            )
+        if det["save_crop"]:
+            save_cropped(annotator.im, x1, y1, x2, y2, det["class_name"], det["txt_path"])
 
     # Replace the original image with the annotated one
     final_img = annotator.result()
     im0[:, :, :] = final_img  # copy back if needed so caller sees changes
 
 
-def handle_pose_estimation(
-    im0s,
-    x1, y1, x2, y2,
-    have_perspective,
-    perspective_matrix,
-    pose_model
-):
+def handle_pose_estimation(im0s, x1, y1, x2, y2, have_perspective, perspective_matrix, pose_model):
     """
     Crops the region for a person and runs pose estimation (OnePose).
     Returns:
@@ -890,8 +1117,8 @@ def handle_pose_estimation(
 
     cropped_img = im0s[y1_safe:y2_safe, x1_safe:x2_safe]
     keypoints_dict = pose_model(cropped_img)  # must return { 'points': Nx2, 'confidence': Nx1 }
-    points = keypoints_dict['points']         # shape: Nx2
-    confidences = keypoints_dict['confidence']  # shape: Nx1
+    points = keypoints_dict["points"]  # shape: Nx2
+    confidences = keypoints_dict["confidence"]  # shape: Nx1
 
     # Shift from local crop to original image coords
     for idx in range(len(points)):
@@ -905,18 +1132,13 @@ def handle_pose_estimation(
 
         # Optionally clamp them to the warped image size
         # but we can just pass them along if you don't need strict clamping
-        return keypoints_dict, skel_dst  
+        return keypoints_dict, skel_dst
     else:
         # Return the original coords
         return keypoints_dict, points
 
 
-def save_cropped(
-    im_warped,
-    wx1, wy1, wx2, wy2,
-    class_name,
-    txt_path
-):
+def save_cropped(im_warped, wx1, wy1, wx2, wy2, class_name, txt_path):
     """
     Save cropped region from warped image under `crops/<class_name>`.
     """
@@ -927,12 +1149,12 @@ def save_cropped(
     ih2 = min(int(wy2), h_warp)
 
     crop_img = im_warped[ih1:ih2, iw1:iw2]
-    outdir = Path(txt_path).parent.parent / 'crops' / class_name
+    outdir = Path(txt_path).parent.parent / "crops" / class_name
     outdir.mkdir(parents=True, exist_ok=True)
 
     # Use the txt_path stem as a reference
     parent_stem = Path(txt_path).stem
-    crop_path = outdir / f'{parent_stem}.jpg'
+    crop_path = outdir / f"{parent_stem}.jpg"
     cv2.imwrite(str(crop_path), crop_img)
 
 
@@ -940,7 +1162,7 @@ def handle_view_img(p, windows, im0_final):
     """
     Show results in a window, if user sets `view_img=True`.
     """
-    if platform.system() == 'Linux' and p not in windows:
+    if platform.system() == "Linux" and p not in windows:
         windows.append(p)
         cv2.namedWindow(str(p), cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
         cv2.resizeWindow(str(p), im0_final.shape[1], im0_final.shape[0])
@@ -948,19 +1170,12 @@ def handle_view_img(p, windows, im0_final):
     cv2.waitKey(1)
 
 
-def handle_save_results(
-    dataset,
-    i,
-    im0_final,
-    save_path,
-    vid_path,
-    vid_writer
-):
+def handle_save_results(dataset, i, im0_final, save_path, vid_path, vid_writer):
     """
     Save either a single image or frames of a video/stream.
     """
     # print(f"Dataset mode: {dataset.mode}")
-    if dataset.mode == 'image':
+    if dataset.mode == "image":
         # Save a single image
         cv2.imwrite(save_path, im0_final)
     else:
@@ -972,13 +1187,12 @@ def handle_save_results(
                     vid_writer[i].release()
 
                 fps, w_vid, h_vid = 30, im0_final.shape[1], im0_final.shape[0]
-                save_path = str(Path(save_path).with_suffix('.mp4'))
-                print(f"Initializing video writer: {save_path}, FPS: {fps}, Size: ({w_vid}, {h_vid})")
+                save_path = str(Path(save_path).with_suffix(".mp4"))
+                print(
+                    f"Initializing video writer: {save_path}, FPS: {fps}, Size: ({w_vid}, {h_vid})"
+                )
                 vid_writer[i] = cv2.VideoWriter(
-                    save_path,
-                    cv2.VideoWriter_fourcc(*'mp4v'),
-                    fps, 
-                    (w_vid, h_vid)
+                    save_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w_vid, h_vid)
                 )
 
             if not vid_writer[i].isOpened():
@@ -988,64 +1202,56 @@ def handle_save_results(
             vid_writer[i].write(im0_final)
 
 
-def summarize_and_cleanup(
-    dt,
-    seen,
-    imgsz,
-    save_dir,
-    save_txt,
-    save_img,
-    update,
-    weights
-):
+def summarize_and_cleanup(dt, seen, imgsz, save_dir, save_txt, save_img, update, weights):
     """
     Print speed summary, final results, and handle any final cleanups/updates.
     """
-    t = tuple(x.t / seen * 1E3 for x in dt) if seen else (0, 0, 0)
+    t = tuple(x.t / seen * 1e3 for x in dt) if seen else (0, 0, 0)
     LOGGER.info(
-        f'Speed: {t[0]:.1f}ms pre-process, {t[1]:.1f}ms inference, '
-        f'{t[2]:.1f}ms NMS per image at shape {(1, 3, *imgsz)}'
+        f"Speed: {t[0]:.1f}ms pre-process, {t[1]:.1f}ms inference, "
+        f"{t[2]:.1f}ms NMS per image at shape {(1, 3, *imgsz)}"
     )
 
     # Save summary
     if save_txt or save_img:
-        label_files = list(save_dir.glob('labels/*.txt'))
-        s = f"\n{len(label_files)} labels saved to {save_dir / 'labels'}" if save_txt else ''
+        label_files = list(save_dir.glob("labels/*.txt"))
+        s = f"\n{len(label_files)} labels saved to {save_dir / 'labels'}" if save_txt else ""
         LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
 
     # Update model if needed
     if update and weights and len(weights) > 0:
         strip_optimizer(weights[0])
 
+
 @smart_inference_mode()
 def run(
-    weights,         # model path or triton URL
-    source,      # file/dir/URL/glob/screen/0(webcam)
-    data,     # dataset.yaml path
-    imgsz,                 # inference size (height, width)
-    conf_thres,                  # confidence threshold
-    iou_thres,                   # NMS IOU threshold
-    max_det,                     # maximum detections per image
-    device,                        # cuda device, i.e. 0, 0,1,2,3 or cpu
-    view_img,                   # show results
-    save_txt,                   # save results to *.txt
-    save_conf,                  # save confidences in --save-txt labels
-    save_crop,                  # save cropped prediction boxes
-    nosave,                     # do not save images/videos
-    classes,                     # filter by class: --class 0, or --class 0 2 3
-    agnostic_nms,               # class-agnostic NMS
-    augment,                    # augmented inference
-    visualize,                  # visualize features
-    update,                     # update all models
-    project,     # save results to project/name
-    name,                       # save results to project/name
-    exist_ok,                   # existing project/name ok, do not increment
-    line_thickness,                 # bounding box thickness (pixels)
-    hide_labels,                # hide labels
-    hide_conf,                  # hide confidences
-    half,                       # use FP16 half-precision inference
-    dnn,                        # use OpenCV DNN for ONNX inference
-    vid_stride,                     # video frame-rate stride
+    weights,  # model path or triton URL
+    source,  # file/dir/URL/glob/screen/0(webcam)
+    data,  # dataset.yaml path
+    imgsz,  # inference size (height, width)
+    conf_thres,  # confidence threshold
+    iou_thres,  # NMS IOU threshold
+    max_det,  # maximum detections per image
+    device,  # cuda device, i.e. 0, 0,1,2,3 or cpu
+    view_img,  # show results
+    save_txt,  # save results to *.txt
+    save_conf,  # save confidences in --save-txt labels
+    save_crop,  # save cropped prediction boxes
+    nosave,  # do not save images/videos
+    classes,  # filter by class: --class 0, or --class 0 2 3
+    agnostic_nms,  # class-agnostic NMS
+    augment,  # augmented inference
+    visualize,  # visualize features
+    update,  # update all models
+    project,  # save results to project/name
+    name,  # save results to project/name
+    exist_ok,  # existing project/name ok, do not increment
+    line_thickness,  # bounding box thickness (pixels)
+    hide_labels,  # hide labels
+    hide_conf,  # hide confidences
+    half,  # use FP16 half-precision inference
+    dnn,  # use OpenCV DNN for ONNX inference
+    vid_stride,  # video frame-rate stride
     homography_path,
     # goal_image_coordinate,       # list of 4 points [[x,y], [x,y], [x,y], [x,y]]
     # goal_realworld_size,         # output width x height
@@ -1062,23 +1268,21 @@ def run(
 
     # --- 2) Setup output directory ---
     save_dir = setup_output_dir(project, name, exist_ok, save_txt)
-    save_img = not nosave and not str(source).endswith('.txt')
+    save_img = not nosave and not str(source).endswith(".txt")
 
     # --- 3) Load YOLO model ---
     model, stride, names, pt = load_yolo_model(weights, device, dnn, data, half)
     imgsz = check_img_size(imgsz, s=stride)
 
     # --- 4) Create dataloader ---
-    dataset, bs, webcam_mode = create_dataloader(
-        source, imgsz, stride, pt, vid_stride
-    )
+    dataset, bs, webcam_mode = create_dataloader(source, imgsz, stride, pt, vid_stride)
 
     # --- 5) Warm up YOLO model ---
     warmup_yolo_model(model, pt, bs, imgsz)
 
     # --- 6) Inference over dataset (main loop) ---
     seen, windows, dt, collection_of_speed_dict = infer_on_dataset(
-        dataset, 
+        dataset,
         model,
         names,
         conf_thres,
@@ -1102,56 +1306,80 @@ def run(
     )
 
     # --- 8) Summaries & Cleanup ---
-    summarize_and_cleanup(
-        dt,
-        seen,
-        imgsz,
-        save_dir,
-        save_txt,
-        save_img,
-        update,
-        weights
-    )
+    summarize_and_cleanup(dt, seen, imgsz, save_dir, save_txt, save_img, update, weights)
 
     print(collection_of_speed_dict)
 
 
 def parse_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolo.pt', help='model path')
-    parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='file/dir/URL/glob/screen/0(webcam)')
-    parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='dataset.yaml path')
-    parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640],
-                        help='inference size h,w')
-    parser.add_argument('--conf-thres', type=float, default=0.4, help='confidence threshold')
-    parser.add_argument('--iou-thres', type=float, default=0.35, help='NMS IoU threshold')
-    parser.add_argument('--max-det', type=int, default=1000, help='maximum detections per image')
-    parser.add_argument('--device', default=0, help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-    parser.add_argument('--view-img', action='store_true', help='show results')
-    parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
-    parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
-    parser.add_argument('--save-crop', action='store_true', help='save cropped prediction boxes')
-    parser.add_argument('--nosave', action='store_true', help='do not save images/videos')
-    parser.add_argument('--classes', nargs='+', type=int, default=[0 ,32], help='filter by class')
-    parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
-    parser.add_argument('--augment', action='store_true', help='augmented inference')
-    parser.add_argument('--visualize', action='store_true', help='visualize features')
-    parser.add_argument('--update', action='store_true', help='update all models')
-    parser.add_argument('--project', default=ROOT / 'runs/detect', help='save results to project/name')
-    parser.add_argument('--name', default='exp', help='save results to project/name')
-    parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
-    parser.add_argument('--line-thickness', default=1, type=int, help='bounding box thickness (pixels)')
-    parser.add_argument('--hide-labels', default=False, action='store_true', help='hide labels')
-    parser.add_argument('--hide-conf', default=False, action='store_true', help='hide confidences')
-    parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
-    parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
-    parser.add_argument('--vid-stride', type=int, default=1, help='video frame-rate stride')
-    parser.add_argument("--homography_path", type=str, default=None, help="Single 3x3 homography .npy applied to all")
+    parser.add_argument(
+        "--weights", nargs="+", type=str, default=ROOT / "yolo.pt", help="model path"
+    )
+    parser.add_argument(
+        "--source",
+        type=str,
+        default=ROOT / "data/images",
+        help="file/dir/URL/glob/screen/0(webcam)",
+    )
+    parser.add_argument(
+        "--data", type=str, default=ROOT / "data/coco128.yaml", help="dataset.yaml path"
+    )
+    parser.add_argument(
+        "--imgsz",
+        "--img",
+        "--img-size",
+        nargs="+",
+        type=int,
+        default=[640],
+        help="inference size h,w",
+    )
+    parser.add_argument("--conf-thres", type=float, default=0.4, help="confidence threshold")
+    parser.add_argument("--iou-thres", type=float, default=0.35, help="NMS IoU threshold")
+    parser.add_argument("--max-det", type=int, default=1000, help="maximum detections per image")
+    parser.add_argument("--device", default=0, help="cuda device, i.e. 0 or 0,1,2,3 or cpu")
+    parser.add_argument("--view-img", action="store_true", help="show results")
+    parser.add_argument("--save-txt", action="store_true", help="save results to *.txt")
+    parser.add_argument(
+        "--save-conf", action="store_true", help="save confidences in --save-txt labels"
+    )
+    parser.add_argument("--save-crop", action="store_true", help="save cropped prediction boxes")
+    parser.add_argument("--nosave", action="store_true", help="do not save images/videos")
+    parser.add_argument("--classes", nargs="+", type=int, default=[0, 32], help="filter by class")
+    parser.add_argument("--agnostic-nms", action="store_true", help="class-agnostic NMS")
+    parser.add_argument("--augment", action="store_true", help="augmented inference")
+    parser.add_argument("--visualize", action="store_true", help="visualize features")
+    parser.add_argument("--update", action="store_true", help="update all models")
+    parser.add_argument(
+        "--project", default=ROOT / "runs/detect", help="save results to project/name"
+    )
+    parser.add_argument("--name", default="exp", help="save results to project/name")
+    parser.add_argument(
+        "--exist-ok",
+        action="store_true",
+        help="existing project/name ok, do not increment",
+    )
+    parser.add_argument(
+        "--line-thickness", default=1, type=int, help="bounding box thickness (pixels)"
+    )
+    parser.add_argument("--hide-labels", default=False, action="store_true", help="hide labels")
+    parser.add_argument("--hide-conf", default=False, action="store_true", help="hide confidences")
+    parser.add_argument("--half", action="store_true", help="use FP16 half-precision inference")
+    parser.add_argument("--dnn", action="store_true", help="use OpenCV DNN for ONNX inference")
+    parser.add_argument("--vid-stride", type=int, default=1, help="video frame-rate stride")
+    parser.add_argument(
+        "--homography_path",
+        type=str,
+        default=None,
+        help="Single 3x3 homography .npy applied to all",
+    )
     # parser.add_argument('--goal_image_coordinate', nargs='*' ,type=int, default=None, help='four points(x1,y1,...,x4,y4) for perspective transform')
     # parser.add_argument('--goal_realworld_size', nargs='*' ,type=int, default=[2100, 700], help='output width x height')
-    parser.add_argument('--draw-bbox', action='store_true', help='draw bounding boxes')
-    parser.add_argument('--radar_data_path', type=str, default=None, help='radar data path csv file')
-    parser.add_argument('--use-tqdm', action='store_true', help='use tqdm for progress bar')
+    parser.add_argument("--draw-bbox", action="store_true", help="draw bounding boxes")
+    parser.add_argument(
+        "--radar_data_path", type=str, default=None, help="radar data path csv file"
+    )
+    parser.add_argument("--use-tqdm", action="store_true", help="use tqdm for progress bar")
 
     opt = parser.parse_args()
 
@@ -1159,9 +1387,9 @@ def parse_opt():
     # if opt.goal_image_coordinate:
     #     if len(opt.goal_image_coordinate) != 8:
     #         raise ValueError("Please provide 4 points x,y coordinate for perspective transform.")
-        
+
     #     opt.goal_image_coordinate = [
-    #         [opt.goal_image_coordinate[i], opt.goal_image_coordinate[i + 1]] 
+    #         [opt.goal_image_coordinate[i], opt.goal_image_coordinate[i + 1]]
     #         for i in range(0, len(opt.goal_image_coordinate), 2)
     #     ]
 
@@ -1180,6 +1408,6 @@ if __name__ == "__main__":
     main(opt)
 
 # sample usage
-# --goal_image_coordinate 77 233 1665 247 1655 758 79 765 --goal_realworld_size 640 213 
+# --goal_image_coordinate 77 233 1665 247 1655 758 79 765 --goal_realworld_size 640 213
 # python3 detect_goal_v2.py --weights "./weight/yolov9-s-converted.pt" --source "./data/video/GX010025_clips/" --name 'demo_video' --nosave --radar_data_path data/excel/PR_20250208_1739_session.csv --homography_path ./runs/detect/demo_video/homography_matrix.npy
 # standed goal size should be 24ft wide x 8ft tall = 732.6 cm wide x 244 cm tall, this is smaller only 21ft wide x 7ft tall = 640 cm wide x 213 cm tall

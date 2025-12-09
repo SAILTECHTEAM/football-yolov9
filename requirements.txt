@@ -7,7 +7,7 @@ ipython
 matplotlib>=3.2.2
 numpy<2
 # opencv-python==4.11.0.86
-Pillow>=7.1.2
+Pillow>=7.1.2,<10.0.0
 psutil
 PyYAML>=5.3.1
 requests>=2.23.0
@@ -57,4 +57,6 @@ pytorch_lightning
 lmdb
 nltk
 timm==0.9.16
-# question: we use timm==0.4.9 for einops for ViTpose, not sure if there will be bugs
+
+# Code formatting ---------------------------------------------------------------
+black

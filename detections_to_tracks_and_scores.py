@@ -8,7 +8,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from collections import defaultdict, OrderedDict
 from multiprocessing import Pool, cpu_count
-from tools.identify_player_team import extract_color_histogram_with_specific_background_color, extract_color_histogram_from_rotated_skelton, compare_histograms, load_histogram
+from tools.identify_player_team import (
+    extract_color_histogram_with_specific_background_color,
+    extract_color_histogram_from_rotated_skelton,
+    compare_histograms,
+    load_histogram,
+)
+
 # ByteTrack
 import supervision as sv
 
@@ -28,24 +34,16 @@ def load_pose_model():
     Load the ViTPose model instead of OnePose.
     """
     # Configuration paths for ViTPose
-    pose_config = '/ViTPose/configs/body/2d_kpt_sview_rgb_img/topdown_heatmap/coco/ViTPose_huge_simple_coco_256x192.py'
-    pose_checkpoint = '/ViTPose/checkpoints/vitpose-h-simple.pth'
-    
+    pose_config = "/ViTPose/configs/body/2d_kpt_sview_rgb_img/topdown_heatmap/coco/ViTPose_huge_simple_coco_256x192.py"
+    pose_checkpoint = "/ViTPose/checkpoints/vitpose-h-simple.pth"
+
     # Initialize the pose model
-    pose_model = init_pose_model(
-        pose_config, 
-        pose_checkpoint, 
-        device='cuda'
-    )
-    
+    pose_model = init_pose_model(pose_config, pose_checkpoint, device="cuda")
+
     return pose_model
 
 
-def handle_pose_estimation(
-    im0s,
-    x1, y1, x2, y2,
-    pose_model
-):
+def handle_pose_estimation(im0s, x1, y1, x2, y2, pose_model):
     """
     Crops the region for a person and runs pose estimation using ViTPose.
     Returns:
@@ -61,69 +59,92 @@ def handle_pose_estimation(
         return None, []
 
     # Prepare person detection result for ViTPose format
-    person_result = [{'bbox': [x1_safe, y1_safe, x2_safe, y2_safe, 1.0]}]
-    
+    person_result = [{"bbox": [x1_safe, y1_safe, x2_safe, y2_safe, 1.0]}]
+
     # Get dataset info
     dataset_info = pose_model.cfg.data.test.dataset_info
     dataset_info = DatasetInfo(dataset_info)
-    
+
     # Run inference
     pose_results, _ = inference_top_down_pose_model(
         pose_model,
         im0s,
         person_result,
         bbox_thr=0.0,  # Already filtered
-        format='xyxy',
-        dataset_info=dataset_info
+        format="xyxy",
+        dataset_info=dataset_info,
     )
-    
+
     if not pose_results:
         return None, []
-    
+
     # Extract keypoints and scores from ViTPose format
-    keypoints = pose_results[0]['keypoints']  # shape: Nx3 (x, y, score)
+    keypoints = pose_results[0]["keypoints"]  # shape: Nx3 (x, y, score)
     points = keypoints[:, :2]  # shape: Nx2
     confidences = keypoints[:, 2]  # shape: Nx1
-    
+
     # Create return structure to match expected format
-    keypoints_dict = {
-        'points': points,
-        'confidence': confidences
-    }
-    
+    keypoints_dict = {"points": points, "confidence": confidences}
+
     return keypoints_dict, points
+
 
 # ------------ ffprobe helpers ------------
 def _ffprobe_fps(path: str) -> float:
     try:
         out = subprocess.run(
-            ["ffprobe","-v","error","-select_streams","v:0",
-             "-show_entries","stream=avg_frame_rate",
-             "-of","default=nokey=1:noprint_wrappers=1", path],
-            text=True, capture_output=True, check=True
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=avg_frame_rate",
+                "-of",
+                "default=nokey=1:noprint_wrappers=1",
+                path,
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
         ).stdout.strip()
         if "/" in out:
-            a,b = out.split("/")
-            a = float(a); b = float(b) if float(b) else 0.0
+            a, b = out.split("/")
+            a = float(a)
+            b = float(b) if float(b) else 0.0
             return a / b if b > 0 else 0.0
         return float(out or 0.0)
     except Exception:
         return 0.0
 
+
 def _ffprobe_size(path: str):
     try:
         out = subprocess.run(
-            ["ffprobe","-v","error","-select_streams","v:0",
-             "-show_entries","stream=width,height",
-             "-of","csv=p=0:s=x", path],
-            text=True, capture_output=True, check=True
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=p=0:s=x",
+                path,
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
         ).stdout.strip()
         if "x" in out:
-            w_s,h_s = out.split("x")
+            w_s, h_s = out.split("x")
             return int(h_s), int(w_s)
     except Exception:
         pass
     return 0, 0
+
 
 # ------------ streaming JSONL reader ------------
 def stream_frames_from_jsonl(path: Path):
@@ -169,22 +190,29 @@ def stream_frames_from_jsonl(path: Path):
 
     return meta, list(classes.keys())
 
+
 def projected_point_from_warp(rec):
     bw = rec.get("bbox_warp")
-    if not bw: return None
+    if not bw:
+        return None
     x1, y1, x2, y2 = map(float, bw)
     return [(x1 + x2) * 0.5, (y1 + y2) * 0.5]
 
+
 def select_class_dets(dets, cls_idx: int, cls_name: str, conf_thres: float):
-    picked = [d for d in dets
-              if int(d.get("cls_idx", -9999)) == cls_idx
-              and d.get("cls_name") == cls_name
-              and float(d.get("conf", 0.0)) >= conf_thres]
+    picked = [
+        d
+        for d in dets
+        if int(d.get("cls_idx", -9999)) == cls_idx
+        and d.get("cls_name") == cls_name
+        and float(d.get("conf", 0.0)) >= conf_thres
+    ]
     if not picked:
-        return np.zeros((0,4), np.float32), np.zeros((0,), np.float32), []
-    boxes  = np.array([p["bbox_xyxy"] for p in picked], dtype=np.float32)
+        return np.zeros((0, 4), np.float32), np.zeros((0,), np.float32), []
+    boxes = np.array([p["bbox_xyxy"] for p in picked], dtype=np.float32)
     scores = np.array([p.get("conf", 1.0) for p in picked], dtype=np.float32)
     return boxes, scores, picked
+
 
 def iou_matrix_np(a, b):
     if a.size == 0 or b.size == 0:
@@ -201,29 +229,51 @@ def iou_matrix_np(a, b):
     union = area_a + area_b.T - inter
     return np.where(union > 0, inter / np.maximum(union, 1e-6), 0.0).astype(np.float32)
 
+
 # ------------ stream writer ------------
 class TrackJsonlStreamer:
-    def __init__(self, out_path: str, meta_head: dict, flush_interval: int = 200, lost_thresh: int = 50, is_person=False):
+    def __init__(
+        self,
+        out_path: str,
+        meta_head: dict,
+        flush_interval: int = 200,
+        lost_thresh: int = 50,
+        is_person=False,
+    ):
         self.out_path = Path(out_path)
         self.flush_interval = max(50, int(flush_interval))
         self.lost_thresh = max(25, int(lost_thresh))
         self.is_person = is_person
 
-        self.records = defaultdict(lambda: {
-            "track_id": None,
-            "frame_id": [],
-            "conf": [],
-            "bbox": [],
-            "projected": [],
-            **({"team_score": [], "skel": [], "skel_conf": []} if is_person else {})
-        })
+        self.records = defaultdict(
+            lambda: {
+                "track_id": None,
+                "frame_id": [],
+                "conf": [],
+                "bbox": [],
+                "projected": [],
+                **({"team_score": [], "skel": [], "skel_conf": []} if is_person else {}),
+            }
+        )
         self.last_seen = {}
 
         self.fh = self.out_path.open("w", encoding="utf-8")
         if meta_head:
-            json.dump(meta_head, self.fh, ensure_ascii=False); self.fh.write("\n")
+            json.dump(meta_head, self.fh, ensure_ascii=False)
+            self.fh.write("\n")
 
-    def update(self, tid, frame_idx, bbox, conf, proj_pt, *, team_score=None, skel=None, skel_conf=None):
+    def update(
+        self,
+        tid,
+        frame_idx,
+        bbox,
+        conf,
+        proj_pt,
+        *,
+        team_score=None,
+        skel=None,
+        skel_conf=None,
+    ):
         rec = self.records[tid]
         if rec["track_id"] is None:
             rec["track_id"] = tid
@@ -234,16 +284,21 @@ class TrackJsonlStreamer:
 
         if self.is_person:
             rec["team_score"].append(None if team_score is None else float(team_score))
-            rec["skel"].append(skel if skel is None else (skel.tolist() if isinstance(skel, np.ndarray) else skel))
-            rec["skel_conf"].append(skel_conf if skel_conf is None else (skel_conf.tolist() if isinstance(skel_conf, np.ndarray) else skel_conf))
+            rec["skel"].append(
+                skel if skel is None else (skel.tolist() if isinstance(skel, np.ndarray) else skel)
+            )
+            rec["skel_conf"].append(
+                skel_conf
+                if skel_conf is None
+                else (skel_conf.tolist() if isinstance(skel_conf, np.ndarray) else skel_conf)
+            )
 
         self.last_seen[tid] = int(frame_idx)
 
     def maybe_flush(self, frame_idx):
         if frame_idx % self.flush_interval != 0:
             return
-        stale = [tid for tid, last in self.last_seen.items()
-                 if frame_idx - last > self.lost_thresh]
+        stale = [tid for tid, last in self.last_seen.items() if frame_idx - last > self.lost_thresh]
         for tid in stale:
             self._write_record(self.records.pop(tid))
             self.last_seen.pop(tid, None)
@@ -261,17 +316,21 @@ class TrackJsonlStreamer:
         self.records.clear()
         self.last_seen.clear()
 
+
 # ------------ ball helpers ------------
 def _is_ball_class(ci, cn, args):
     name_ok = (args.ball_name is None) or (cn == args.ball_name)
     return (ci == args.ball_idx) and name_ok
 
+
 def _valid_number(x):
     return (x is not None) and not (isinstance(x, float) and np.isnan(x))
 
+
 def _bbox_center_xyxy(b):
     x1, y1, x2, y2 = map(float, b)
-    return (0.5*(x1+x2), 0.5*(y1+y2))
+    return (0.5 * (x1 + x2), 0.5 * (y1 + y2))
+
 
 def _projected_point_from_warp(rec):
     bw = rec.get("bbox_warp")
@@ -279,6 +338,7 @@ def _projected_point_from_warp(rec):
         return None
     x1, y1, x2, y2 = map(float, bw)
     return [(x1 + x2) * 0.5, (y1 + y2) * 0.5]
+
 
 class BallFuser:
     """
@@ -290,6 +350,7 @@ class BallFuser:
       - if we already have a previous center, choose candidate with min center distance
       - else choose highest conf (fallback to first)
     """
+
     def __init__(self, out_path: Path, meta_head: dict, conf_thres: float = 0.10):
         self.out_path = Path(out_path)
         self.conf_thres = float(conf_thres)
@@ -303,7 +364,8 @@ class BallFuser:
         # open file and write meta
         self.fh = self.out_path.open("w", encoding="utf-8")
         if self.meta_head:
-            json.dump(self.meta_head, self.fh, ensure_ascii=False); self.fh.write("\n")
+            json.dump(self.meta_head, self.fh, ensure_ascii=False)
+            self.fh.write("\n")
 
     @staticmethod
     def _center_xyxy(b):
@@ -326,16 +388,18 @@ class BallFuser:
             best_d2 = float("inf")
             for d in cands:
                 cx, cy = self._center_xyxy(d["bbox_xyxy"])
-                d2 = (cx - self._prev_center[0])**2 + (cy - self._prev_center[1])**2
+                d2 = (cx - self._prev_center[0]) ** 2 + (cy - self._prev_center[1]) ** 2
                 if d2 < best_d2:
-                    best_d2 = d2; pick = d
+                    best_d2 = d2
+                    pick = d
         else:
             # first: highest conf
             best_conf = -1.0
             for d in cands:
                 cc = float(d.get("conf", 0.0))
                 if cc > best_conf:
-                    best_conf = cc; pick = d
+                    best_conf = cc
+                    pick = d
 
         if pick is None:
             return
@@ -357,12 +421,15 @@ class BallFuser:
                 "bbox": self.boxes,
                 "projected": self.proj,
             }
-            json.dump(rec, self.fh, ensure_ascii=False); self.fh.write("\n")
+            json.dump(rec, self.fh, ensure_ascii=False)
+            self.fh.write("\n")
         self.fh.close()
+
 
 # ------------ utils ------------
 def _is_person_class(ci, cn):
     return (ci == 0) or (isinstance(cn, str) and cn.lower() == "person")
+
 
 def _is_ball_class(ci, cn):
     """
@@ -387,6 +454,7 @@ def _is_ball_class(ci, cn):
             pass
     return False
 
+
 def _resolve_hw(meta: dict, probe_video: bool = True):
     # try meta first
     H = int(meta.get("H", 0) or 0)
@@ -400,14 +468,17 @@ def _resolve_hw(meta: dict, probe_video: bool = True):
     # fallback
     return 1080, 1920
 
+
 def load_histogram_any(path: str):
-    if not path: return None
+    if not path:
+        return None
     ext = os.path.splitext(path)[1].lower()
     try:
         if ext in (".npy", ".npz"):
             arr = np.load(path, allow_pickle=False)
             if isinstance(arr, np.lib.npyio.NpzFile):
-                key = list(arr.keys())[0]; arr = arr[key]
+                key = list(arr.keys())[0]
+                arr = arr[key]
         elif ext in (".pkl", ".pickle", ".joblib"):
             arr = joblib.load(path)
         else:
@@ -420,7 +491,9 @@ def load_histogram_any(path: str):
         arr /= s
     return arr
 
+
 # ------------ core per-file ------------
+
 
 def process_single_detection(
     im0s,
@@ -444,54 +517,49 @@ def process_single_detection(
 
     # Initialize detection dictionary
     detection_result = {
-        'cls': c,
-        'conf': float(conf),
-        'bbox_src': [x1, y1, x2, y2],  # bounding box in original coords
-        'bbox_warp': None,            # bounding box in warped coords
-        'label_str': None,            # class + conf text
-        'keypoints': None,
-        'keypoints_conf': None,
-        'save_crop': save_crop,
-        'class_name': names[c] if c < len(names) else f"class_{c}",
-        'score': 0.0                  # color-matching score
+        "cls": c,
+        "conf": float(conf),
+        "bbox_src": [x1, y1, x2, y2],  # bounding box in original coords
+        "bbox_warp": None,  # bounding box in warped coords
+        "label_str": None,  # class + conf text
+        "keypoints": None,
+        "keypoints_conf": None,
+        "save_crop": save_crop,
+        "class_name": names[c] if c < len(names) else f"class_{c}",
+        "score": 0.0,  # color-matching score
     }
 
     # Build label text
     if not hide_labels:
         if hide_conf:
-            detection_result['label_str'] = f'{names[c]}'
+            detection_result["label_str"] = f"{names[c]}"
         else:
-            detection_result['label_str'] = f'{names[c]} {conf:.2f}'
+            detection_result["label_str"] = f"{names[c]} {conf:.2f}"
 
-
-    detection_result['bbox_warp'] = [x1, y1, x2, y2]
+    detection_result["bbox_warp"] = [x1, y1, x2, y2]
 
     # ----------------------------------
     # If it's a person (cls=0), do pose and color check
     # ----------------------------------
     if c == 0:
-        keypoints_dict, warped_points = handle_pose_estimation(
-            im0s,
-            x1, y1, x2, y2,
-            pose_model
-        )
+        keypoints_dict, warped_points = handle_pose_estimation(im0s, x1, y1, x2, y2, pose_model)
         if keypoints_dict and len(warped_points) > 0:
-            detection_result['keypoints'] = warped_points
-            detection_result['keypoints_conf'] = keypoints_dict['confidence']
+            detection_result["keypoints"] = warped_points
+            detection_result["keypoints_conf"] = keypoints_dict["confidence"]
 
             # If clothes_colors is not None, do color matching
             if clothes_colors_histogram is not None:
                 # Extract torso keypoints
                 keypoints = {
-                    'left_shoulder': keypoints_dict['points'][5],
-                    'right_shoulder': keypoints_dict['points'][6],
-                    'left_hip': keypoints_dict['points'][11],
-                    'right_hip': keypoints_dict['points'][12]
+                    "left_shoulder": keypoints_dict["points"][5],
+                    "right_shoulder": keypoints_dict["points"][6],
+                    "left_hip": keypoints_dict["points"][11],
+                    "right_hip": keypoints_dict["points"][12],
                 }
                 # if bbox is too small, skip
                 if (x2 - x1) * (y2 - y1) < skip_small_area:
                     return None
-                
+
                 else:
                     # Extract colors from the person's torso
                     skelton_colors_histogram = extract_color_histogram_from_rotated_skelton(
@@ -500,13 +568,13 @@ def process_single_detection(
 
                     # Compute match score
                     score_val = compare_histograms(
-                        clothes_colors_histogram,
-                        skelton_colors_histogram
+                        clothes_colors_histogram, skelton_colors_histogram
                     )
                     # print(f"Color match score: {score_val}")
-                    detection_result['score'] = score_val
+                    detection_result["score"] = score_val
 
     return detection_result
+
 
 def process_one_file(jsonl_path: Path, args) -> str:
     # read meta + classes quickly (first pass only over meta line)
@@ -515,7 +583,8 @@ def process_one_file(jsonl_path: Path, args) -> str:
     with open(jsonl_path, "r", encoding="utf-8") as f_head:
         for ln in f_head:
             ln = ln.strip()
-            if not ln: continue
+            if not ln:
+                continue
             rec = json.loads(ln)
             if rec.get("type") == "meta":
                 meta = rec
@@ -524,7 +593,8 @@ def process_one_file(jsonl_path: Path, args) -> str:
     with open(jsonl_path, "r", encoding="utf-8") as f_cls:
         for ln in f_cls:
             ln = ln.strip()
-            if not ln: continue
+            if not ln:
+                continue
             rec = json.loads(ln)
             if rec.get("type") != "det":
                 continue
@@ -543,7 +613,7 @@ def process_one_file(jsonl_path: Path, args) -> str:
     imsz = [max(1, H), max(1, W)]
 
     # open video (only if person+pose is needed)
-    need_pose = any(_is_person_class(ci, cn) for (ci,cn) in class_list) and (not args.no_pose)
+    need_pose = any(_is_person_class(ci, cn) for (ci, cn) in class_list) and (not args.no_pose)
     cap = None
     if need_pose:
         vp = meta.get("clip_path", "")
@@ -556,19 +626,23 @@ def process_one_file(jsonl_path: Path, args) -> str:
 
     # trackers & writers (but: ball class uses a fuser instead)
     trackers = {}
-    writers  = {}
-    fusers   = {}
-    outputs  = []
+    writers = {}
+    fusers = {}
+    outputs = []
 
-    for (ci, cn) in class_list:
+    for ci, cn in class_list:
         tag = f"{cn}" if cn else f"cls{ci}"
         out_path = jsonl_path.with_suffix(f".cls_{tag}.tracks.jsonl")
-        meta_head = {"type":"meta", **{k:v for k,v in meta.items() if k!="type"},
-                     "class_idx": ci, "class_name": cn}
+        meta_head = {
+            "type": "meta",
+            **{k: v for k, v in meta.items() if k != "type"},
+            "class_idx": ci,
+            "class_name": cn,
+        }
 
         if _is_ball_class(ci, cn):
             # no tracker for ball; create a fuser that writes meta now
-            fusers[(ci,cn)] = BallFuser(out_path, meta_head, conf_thres=args.det_conf)
+            fusers[(ci, cn)] = BallFuser(out_path, meta_head, conf_thres=args.det_conf)
             outputs.append(str(out_path))
             continue
 
@@ -577,14 +651,15 @@ def process_one_file(jsonl_path: Path, args) -> str:
             track_activation_threshold=args.track_thresh,
             lost_track_buffer=args.track_buffer,
             minimum_matching_threshold=args.match_thresh,
-            frame_rate=fps
+            frame_rate=fps,
         )
-        trackers[(ci,cn)] = sv.ByteTrack(**vars(tr_args))
-        writers[(ci,cn)]  = TrackJsonlStreamer(
-            out_path, meta_head,
+        trackers[(ci, cn)] = sv.ByteTrack(**vars(tr_args))
+        writers[(ci, cn)] = TrackJsonlStreamer(
+            out_path,
+            meta_head,
             flush_interval=args.flush_interval,
             lost_thresh=args.lost_thresh,
-            is_person=_is_person_class(ci, cn)
+            is_person=_is_person_class(ci, cn),
         )
         outputs.append(str(out_path))
 
@@ -603,7 +678,8 @@ def process_one_file(jsonl_path: Path, args) -> str:
                 while current_video_frame < cf:
                     ok = cap.grab()
                     if not ok:
-                        img = None; break
+                        img = None
+                        break
                     current_video_frame += 1
                 if current_video_frame == cf:
                     ok, fr = cap.read()
@@ -622,15 +698,15 @@ def process_one_file(jsonl_path: Path, args) -> str:
             boxes, scores, det_list = select_class_dets(dets, ci, cn, args.det_conf)
 
             if len(det_list) == 0:
-                tracker.update_with_tensors(np.zeros((0,5), np.float32))
-                writers[(ci,cn)].maybe_flush(cf)
+                tracker.update_with_tensors(np.zeros((0, 5), np.float32))
+                writers[(ci, cn)].maybe_flush(cf)
                 continue
 
-            det_np = np.concatenate([boxes, scores[:,None]], axis=1)
+            det_np = np.concatenate([boxes, scores[:, None]], axis=1)
             online = tracker.update_with_tensors(det_np)
 
             if not online:
-                writers[(ci,cn)].maybe_flush(cf)
+                writers[(ci, cn)].maybe_flush(cf)
                 continue
 
             tids, tlbrs = [], []
@@ -638,31 +714,34 @@ def process_one_file(jsonl_path: Path, args) -> str:
                 if hasattr(t, "tlbr"):
                     box = np.asarray(t.tlbr, np.float32)
                 elif hasattr(t, "tlwh"):
-                    x,y,w,h = map(float, t.tlwh)
-                    box = np.array([x,y,x+w,y+h], dtype=np.float32)
+                    x, y, w, h = map(float, t.tlwh)
+                    box = np.array([x, y, x + w, y + h], dtype=np.float32)
                 else:
                     arr = np.asarray(t, np.float32).ravel()
                     box = arr[:4]
                 tlbrs.append(box)
                 tids.append(int(t.external_track_id))
-            tlbrs = np.stack(tlbrs, axis=0) if len(tlbrs) else np.zeros((0,4), np.float32)
+            tlbrs = np.stack(tlbrs, axis=0) if len(tlbrs) else np.zeros((0, 4), np.float32)
 
             # associate to pick conf + proj
             if tlbrs.size and boxes.size:
                 M = iou_matrix_np(tlbrs, boxes)
                 used_t, used_d = set(), set()
                 pairs = []
-                flat = [(M[i,j], i, j) for i in range(M.shape[0]) for j in range(M.shape[1])]
+                flat = [(M[i, j], i, j) for i in range(M.shape[0]) for j in range(M.shape[1])]
                 flat.sort(key=lambda x: x[0], reverse=True)
                 for val, i_t, j_d in flat:
-                    if val < 1e-6: break
-                    if i_t in used_t or j_d in used_d: continue
-                    used_t.add(i_t); used_d.add(j_d)
+                    if val < 1e-6:
+                        break
+                    if i_t in used_t or j_d in used_d:
+                        continue
+                    used_t.add(i_t)
+                    used_d.add(j_d)
                     pairs.append((i_t, j_d))
             else:
                 pairs = []
 
-            WRT = writers[(ci,cn)]
+            WRT = writers[(ci, cn)]
             is_person = WRT.is_person
             do_pose_this_frame = (img is not None) and (frame_counter % pose_every == 0)
 
@@ -674,16 +753,25 @@ def process_one_file(jsonl_path: Path, args) -> str:
                 proj = projected_point_from_warp(det_rec)
 
                 # defaults
-                team_score = None; skel = None; skel_conf = None
+                team_score = None
+                skel = None
+                skel_conf = None
 
                 if is_person and do_pose_this_frame and (not args.no_pose):
-                    x1,y1,x2,y2 = map(int, box)
+                    x1, y1, x2, y2 = map(int, box)
                     if (x2 - x1) * (y2 - y1) >= args.skip_small_area:
                         det_pose = process_single_detection(
-                            img, (x1,y1,x2,y2), 1.0, 0,
-                            pose_model, False, True, True, ('person',),
+                            img,
+                            (x1, y1, x2, y2),
+                            1.0,
+                            0,
+                            pose_model,
+                            False,
+                            True,
+                            True,
+                            ("person",),
                             clothes_colors_histogram=_HIST_,
-                            skip_small_area=args.skip_small_area
+                            skip_small_area=args.skip_small_area,
                         )
                         if det_pose is not None:
                             team_score = float(det_pose.get("score", 0.0))
@@ -694,8 +782,16 @@ def process_one_file(jsonl_path: Path, args) -> str:
                             if sc is not None:
                                 skel_conf = sc.tolist() if isinstance(sc, np.ndarray) else sc
 
-                WRT.update(tid, cf, box, conf, proj,
-                           team_score=team_score, skel=skel, skel_conf=skel_conf)
+                WRT.update(
+                    tid,
+                    cf,
+                    box,
+                    conf,
+                    proj,
+                    team_score=team_score,
+                    skel=skel,
+                    skel_conf=skel_conf,
+                )
 
             WRT.maybe_flush(cf)
 
@@ -715,6 +811,7 @@ def process_one_file(jsonl_path: Path, args) -> str:
 
     return ";".join(outputs)
 
+
 # ------------ discovery / CLI ------------
 def find_all_jsonls(root: Path):
     out = []
@@ -724,10 +821,13 @@ def find_all_jsonls(root: Path):
         out.append(Path(p))
     return sorted(out)
 
+
 _HIST_ = None
+
 
 def _worker(args_tuple):
     return process_one_file(*args_tuple)
+
 
 def main():
     ap = argparse.ArgumentParser("detections_to_tracks_and_scores_streaming")
@@ -745,7 +845,12 @@ def main():
     ap.add_argument("--hist", type=str, default=None)
     ap.add_argument("--skip-small-area", type=int, default=5000)
     ap.add_argument("--no-pose", action="store_true")
-    ap.add_argument("--pose-every-k", type=int, default=1, help="compute pose/team score every k-th frame per track")
+    ap.add_argument(
+        "--pose-every-k",
+        type=int,
+        default=1,
+        help="compute pose/team score every k-th frame per track",
+    )
     # Exec
     ap.add_argument("--workers", type=int, default=max(1, cpu_count() // 2))
     args = ap.parse_args()
@@ -775,6 +880,7 @@ def main():
         with Pool(processes=args.workers) as pool:
             for out in pool.imap_unordered(_worker, work):
                 print(" ->", out)
+
 
 if __name__ == "__main__":
     main()

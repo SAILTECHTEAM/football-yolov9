@@ -47,11 +47,12 @@ bash scripts/inference.sh
 ```
 
 ### 1️⃣ Inference
-The jersey model weight is downloaded from [here](https://drive.google.com/file/d/1uRln22tlhneVt3P6MePmVxBWSLMsL3bm/view). Put this weight under `./weight` folder. In case the checkpoint does not match the model state_dict, run this command:
+The jersey model weight is downloaded from [here](https://drive.google.com/file/d/1uRln22tlhneVt3P6MePmVxBWSLMsL3bm/view), provided by [
+mkoshkina/jersey-number-pipeline](https://github.com/mkoshkina/jersey-number-pipeline). Put this weight under `./weight` folder. In case the checkpoint does not match the model state_dict, run this command:
 ```{shell}
 python3 ./old_function/convert_parseq_weight.py \
-  --old_ckpt "./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255.ckpt" \
-  --new_ckpt "./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255_new.ckpt"
+  "./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255.ckpt" \
+  "./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255_new.ckpt"
 ```
 
 Prepare the clothes histogram data for all teams in the match, including away, awaygoalkeeper, home, homegoalkeeper, and referee team.
@@ -94,6 +95,7 @@ python3 mini_patch_detect_v1_for_video.py \
   --homography-dst-points 530 0 530 660 1060 660 1060 0 \
   --jersey-weights ./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255.ckpt \
   --nosave
+  --half
 ```
 
 IMPORTANT NOTE: use yolov9-s-converted.pt instead of yolov9-s.pt for more robust performance because after reparameterization the auxiliary components are removed.
@@ -136,7 +138,7 @@ After that using all 4 jsonl files, construct more accurate players and ball tra
 
 After that run this command to combine both JSONL files into one. The final JSONL file to use is named `team_ball_tracking_final.jsonl`.
 ```{shell}
-python3 combine_team_ball_tracks.py \
+python3 ./tools/combine_team_ball_tracks.py \
   --player-jsonl "./runs/detect/test_4k_player_640/team_tracking_final.jsonl" \
   --ball-jsonl "./runs/detect/test_4k_ball_640/ball_tracking_final.jsonl" \
   --output-jsonl "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl"
