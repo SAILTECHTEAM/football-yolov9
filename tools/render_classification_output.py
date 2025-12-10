@@ -121,7 +121,8 @@ def render_segments_to_images_and_videos(
     field_size: tuple,
     output_dir: str,
     fps: float = 29.97,
-    homography=np.eye(3)
+    homography=np.eye(3),
+    flip_horizontally: bool = False,
 ):
     os.makedirs(output_dir, exist_ok=True)
     # resize background image to match field size
@@ -142,7 +143,8 @@ def render_segments_to_images_and_videos(
         jersey_num = t.get("jersey_num", "unsure")
         if isinstance(jersey_num, list):
             # [12,13,14] -> "12/13/14"
-            jersey_num = "/".join(map(str, jersey_num))
+            # jersey_num = "/".join(map(str, jersey_num))
+            jersey_num = "U"  # mark as unsure if multiple jersey numbers
 
         if jersey_num == "unsure":
             jersey_num = "U"
@@ -163,10 +165,10 @@ def render_segments_to_images_and_videos(
                 frame_to_objects[f_id].append((pt, tid, jersey_num, team))
 
     team_colors_cv = {
-        'home': (255, 0, 0),
-        'homegoalkeeper': (0, 255, 0),
-        'away': (255, 192, 203),
-        'awaygoalkeeper': (0, 165, 255),
+        'home': (255, 192, 203),
+        'homegoalkeeper': (0, 165, 255),
+        'away': (255, 0, 0),
+        'awaygoalkeeper': (0, 255, 0),
         'referee': (0, 255, 255),
         'ball': (0, 0, 0),
         'unsure': (128, 128, 128),
@@ -261,8 +263,11 @@ def render_segments_to_images_and_videos(
                 ax.text(xs[-1], ys[-1], str(jersey_num), fontsize=8, color=label_color)
 
             # Top left corner is the origin
-            ax.set_xlim(0, field_size[0])
-            ax.set_ylim(field_size[1], 0)
+            ax.set_xlim([0, field_size[0]])
+            if flip_horizontally:
+                ax.set_ylim([0, field_size[1]])
+            else:
+                ax.set_ylim([field_size[1], 0])
             ax.set_title(f"Track {track_id} [{frame_to_time(start_f)} → {frame_to_time(end_f)}]")
             plt.tight_layout()
             image_path = os.path.join(track_output_dir, f"{track_id}_{suspicious_player_team}_{suspicious_jersey_num}_{frame_to_time(video_start_frame, no_colon=True)}_{frame_to_time(video_end_frame, no_colon=True)}.png")
@@ -270,6 +275,24 @@ def render_segments_to_images_and_videos(
             plt.close()
             print(f"🖼️ Saved image: {image_path}")
 
+            # === 🎥 Render Video ===
+            height, width, _ = bg_img.shape
+            video_path = os.path.join(track_output_dir, f"{track_id}_{suspicious_player_team}_{suspicious_jersey_num}_{frame_to_time(video_start_frame, no_colon=True)}_{frame_to_time(video_end_frame, no_colon=True)}.mp4")
+            writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
+
+            for f in range(start_f, end_f + 1):
+                frame_img = bg_img.copy()
+                for pt, tid, jersey_num, team in frame_to_objects.get(f, []):
+                    x, y = int(pt[0]), int(pt[1])
+                    color = team_colors_cv.get(team, (128, 128, 128))
+                    text_color = (0, 0, 255) if tid == track_id else (0, 0, 0)
+                    cv2.circle(frame_img, (x, y), 5, color, -1)
+                    cv2.putText(frame_img, str(jersey_num), (x + 6, y - 6),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, text_color, 1, cv2.LINE_AA)
+                writer.write(frame_img)
+
+            writer.release()
+            print(f"🎞️ Saved video: {video_path}")
             # === 🎥 Crop raw clips from each video angle ===
             for idx, (video_file, align_time) in enumerate(zip(video_paths, game_time)):
                 video_start_frame = convert_game_frame_to_video_frame(start_f, align_time, fps)
@@ -313,24 +336,6 @@ def render_segments_to_images_and_videos(
                 print(f"🎥 Saved annotated clip → {annotated_clip_path}")
                 cap.release()
 
-            # === 🎥 Render Video ===
-            height, width, _ = bg_img.shape
-            video_path = os.path.join(track_output_dir, f"{track_id}_{suspicious_player_team}_{suspicious_jersey_num}_{frame_to_time(video_start_frame, no_colon=True)}_{frame_to_time(video_end_frame, no_colon=True)}.mp4")
-            writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
-
-            for f in range(start_f, end_f + 1):
-                frame_img = bg_img.copy()
-                for pt, tid, jersey_num, team in frame_to_objects.get(f, []):
-                    x, y = int(pt[0]), int(pt[1])
-                    color = team_colors_cv.get(team, (128, 128, 128))
-                    text_color = (0, 0, 255) if tid == track_id else (0, 0, 0)
-                    cv2.circle(frame_img, (x, y), 5, color, -1)
-                    cv2.putText(frame_img, str(jersey_num), (x + 6, y - 6),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, text_color, 1, cv2.LINE_AA)
-                writer.write(frame_img)
-
-            writer.release()
-            print(f"🎞️ Saved video: {video_path}")
     print("✅ All segments rendered successfully.")
 
 def main(args):

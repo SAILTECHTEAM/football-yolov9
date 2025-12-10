@@ -1,15 +1,16 @@
 import json
 import os
 
-from click import group
 import numpy as np
 from typing import List, Tuple, Dict, Optional, Set
 from scipy.spatial.distance import euclidean
-from scipy.interpolate import interp1d
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.signal import savgol_filter
-from collections import defaultdict
+from collections import defaultdict, Counter
 import argparse
+from tqdm import tqdm
+from numba import njit, prange
+import re
 
 from tools.player_motion_classification import calculate_angle
 
@@ -17,6 +18,12 @@ from tools.player_motion_classification import calculate_angle
 def find_overlapping_frames(track1: Dict, track2: Dict) -> List[int]:
     """
     Find frames that exist in both tracks.
+    e.g. if track1["frames"] is [1,2,3,4] and track2["frames"] is [3,4,5,6],
+    this function will return [3,4].
+
+    Args:
+        track1: A dictionary representing the first track with a "frames" key.
+        track2: A dictionary representing the second track with a "frames" key.
 
     Returns:
         List of frame numbers that overlap between the two tracks
@@ -55,6 +62,78 @@ def get_position_at_specific_frame(track: Dict, target_frame: int) -> Optional[n
     return None
 
 
+# Helper functions
+@njit(parallel=True)
+def calculate_distance_numba(pos1: np.ndarray, pos2: np.ndarray) -> float:
+    """
+    Calculate Euclidean distance between two positions using Numba for speed.
+    Args:
+        pos1: np.ndarray of shape (N,2) representing [x, y]
+        pos2: np.ndarray of shape (N,2) representing [x, y]
+    Returns:
+        Euclidean distance as a float
+    """
+    n = pos1.shape[0]
+    dists = np.empty(n, dtype=np.float32)
+    for i in prange(n):
+        dx = pos1[i, 0] - pos2[i, 0]
+        dy = pos1[i, 1] - pos2[i, 1]
+        dists[i] = np.sqrt(dx * dx + dy * dy)
+    return dists
+
+@njit
+def find_common_frame_indices(frames1: np.ndarray, frames2: np.ndarray, 
+                              overlapping_frames: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Find indices of common frames between two tracks.
+    Returns (indices_in_track1, indices_in_track2)
+    
+    FAST: O(n) with sorted arrays using two-pointer technique.
+    """
+    idx1_list = []
+    idx2_list = []
+    
+    i, j, k = 0, 0, 0
+    n1, n2, n_overlap = len(frames1), len(frames2), len(overlapping_frames)
+    
+    # Three-way merge (assumes all arrays are sorted)
+    while i < n1 and j < n2 and k < n_overlap:
+        f1 = frames1[i]
+        f2 = frames2[j]
+        f_target = overlapping_frames[k]
+        
+        if f1 == f2 == f_target:
+            # Found a match!
+            idx1_list.append(i)
+            idx2_list.append(j)
+            i += 1
+            j += 1
+            k += 1
+        elif f1 < f_target:
+            i += 1
+        elif f2 < f_target:
+            j += 1
+        elif f1 == f_target:
+            # f1 matches but f2 doesn't - advance f2
+            if f2 < f1:
+                j += 1
+            else:
+                i += 1
+                k += 1
+        elif f2 == f_target:
+            # f2 matches but f1 doesn't - advance f1
+            if f1 < f2:
+                i += 1
+            else:
+                j += 1
+                k += 1
+        else:
+            k += 1
+    
+    return np.array(idx1_list, dtype=np.int32), np.array(idx2_list, dtype=np.int32)
+
+
+
 def calculate_pairwise_distances(
     track1: Dict,
     track2: Dict,
@@ -75,9 +154,45 @@ def calculate_pairwise_distances(
         Tuple of (list of valid distances, metadata_dict)
         Returns ([], metadata) if too many outliers or insufficient data
     """
+
+    # # Convert to sorted numpy arrays
+    # frames1 = np.array(track1.get("frames", []), dtype=np.int32)
+    # frames2 = np.array(track2.get("frames", []), dtype=np.int32)
+    # projected1 = np.array(track1.get("projected", []), dtype=np.float32)
+    # projected2 = np.array(track2.get("projected", []), dtype=np.float32)
+    # overlapping_frames_arr = np.array(sorted(overlapping_frames), dtype=np.int32)
+    
+    # # ⚡ Numba-accelerated frame matching
+    # idx1, idx2 = find_common_frame_indices(frames1, frames2, overlapping_frames_arr)
+    
+    # if len(idx1) == 0:
+    #     metadata = {
+    #         "rejected": True,
+    #         "reason": "no_valid_positions",
+    #         "n_skipped_missing": len(overlapping_frames),
+    #     }
+    #     return [], metadata
+    
+    # skipped_missing = len(overlapping_frames) - len(idx1)
+    
+    # # ⚡ Direct indexing - single operation
+    # positions1 = projected1[idx1]
+    # positions2 = projected2[idx2]
+    
+    # # ⚡ Numba distance calculation
+    # distances = calculate_distance_numba(positions1, positions2)
+
     distances = []
     outlier_frames = []
     skipped_missing = 0
+
+    # # Check for outliers
+    # for i, dist in enumerate(distances):
+    #     if dist > max_distance:
+    #         outlier_frames.append((overlapping_frames_arr[i], dist))
+    #     else:
+    #         distances.append(dist)
+
 
     for frame in overlapping_frames:
         pos1 = get_position_at_specific_frame(track1, frame)
@@ -460,6 +575,12 @@ def calculate_match_score(
         max_outlier_ratio=max_outlier_ratio,
     )
 
+    # Check if either total distance was rejected due to outliers
+    if total_distance_track1 == float("inf"):
+        metadata["reason"] = "track1_total_distance_rejected"
+        metadata["track1_distance_metadata"] = td1_meta
+        return float("inf"), metadata
+    
     # Calculate total distances of track 2
     total_distance_track2, td2_meta = calculate_total_distance(
         track2,
@@ -467,12 +588,6 @@ def calculate_match_score(
         max_step_distance=max_step_distance,
         max_outlier_ratio=max_outlier_ratio,
     )
-
-    # Check if either total distance was rejected due to outliers
-    if total_distance_track1 == float("inf"):
-        metadata["reason"] = "track1_total_distance_rejected"
-        metadata["track1_distance_metadata"] = td1_meta
-        return float("inf"), metadata
 
     if total_distance_track2 == float("inf"):
         metadata["reason"] = "track2_total_distance_rejected"
@@ -548,10 +663,11 @@ def greedy_match_tracks(
     jsonl_paths: List[str],
     min_overlap_frames: int = 10,
     max_analysis_frames: int = 150,
-    filter_by_team: bool = True,
+    filter_by_team: bool = False,
     filter_by_jersey: bool = False,
     direction_frame_stride: int = 3,
     max_score_threshold: float = 50.0,
+    # max_initial_distance: float = 150.0,
     temporal_overlap_threshold: float = 0.3,
     max_point_distance: float = 100.0,
     max_step_distance: float = 50.0,
@@ -598,17 +714,14 @@ def greedy_match_tracks(
     print(f"Total tracks: {n_total} from {n_files} files")
 
     # Step 1: Compute all pairwise scores
-    print("\n📊 Computing pairwise match scores...")
+    print("\n📊 Stage 1/2: Computing pairwise match scores...")
     all_pairs = []
 
     total_pairs = 0
     skipped_filter = 0
     skipped_incompatible = 0
 
-    for i in range(n_total):
-        if (i + 1) % 20 == 0:
-            print(f"  Processing track {i + 1}/{n_total}...")
-
+    for i in tqdm(range(n_total), desc="Tracks processed", unit="track"):
         t1 = all_tracks[i]
 
         for j in range(i + 1, n_total):
@@ -756,7 +869,9 @@ def greedy_match_tracks(
                             return True
 
         return False
-
+    
+    print("🎯 Stage 2/2: Performing greedy matching...")
+    
     for score, idx1, idx2, metadata in all_pairs:
         if score > max_score_threshold:
             continue
@@ -842,7 +957,6 @@ def greedy_match_tracks(
         # Extract numeric part from track_id for sorting (e.g., '12a' -> 12)
         def extract_numeric(track_id):
             """Extract numeric part from track_id like '12a' -> 12"""
-            import re
 
             match = re.match(r"(\d+)", str(track_id))
             return int(match.group(1)) if match else 0
@@ -1431,7 +1545,6 @@ def majority_vote(values: List, ignore_values: List = None) -> Optional:
         return "unsure"
 
     # Count frequencies
-    from collections import Counter
 
     counts = Counter(filtered)
 
@@ -1449,7 +1562,7 @@ def majority_vote(values: List, ignore_values: List = None) -> Optional:
     if len(most_common) == 1:
         return most_common[0]
     else:
-        return most_common  # Return list of tied values
+        return most_common[0]  # Return list of tied values
 
 
 def fuse_matched_tracks(
@@ -1568,6 +1681,7 @@ def fuse_matched_tracks(
         "source_track": matched_group["track_id"],
         "source_idx": matched_group["source_idx"],
         "is_fused": True,
+        "is_spatial_merged": False,
     }
 
     return fused_track
@@ -1672,11 +1786,11 @@ def fuse_all_matched_groups(
     print(f"\n📊 Final Track Breakdown:")
     print(f"  Multi-source fused: {multi_source}")
     print(f"  Spatially merged: {spatial_merged}")
-    print(f"  Single-source: {single_source}")
-    print(f"  Total: {len(fused_tracks)}")
-    print(
-        f"  Reduction from spatial clustering: {tracks_before_spatial - tracks_after_spatial} tracks"
-    )
+    # print(f"  Single-source: {single_source}")
+    # print(f"  Total: {len(fused_tracks)}")
+    # print(
+    #    f"  Reduction from spatial clustering: {tracks_before_spatial - tracks_after_spatial} tracks"
+    # )
 
     return fused_tracks, spatial_stats
 
@@ -1696,6 +1810,8 @@ def save_fused_tracks(fused_tracks: List[Dict], output_path: str):
                 track_copy["projected"] = [
                     p if isinstance(p, list) else p.tolist() for p in track_copy["projected"]
                 ]
+            if track_copy["jersey_num"] == "NA" and track_copy["team"] != "referee":
+                track_copy["jersey_num"] = "unsure"
             f.write(json.dumps(track_copy) + "\n")
 
     print(f"💾 Saved {len(fused_tracks)} fused tracks to {output_path}")
@@ -1715,6 +1831,8 @@ def save_fused_tracks(fused_tracks: List[Dict], output_path: str):
                 continue  # Skip unmatched tracks if desired
             if "projected" in track_copy:
                 track_copy["projected"] = [p if isinstance(p, list) else p.tolist() for p in points]
+            if track_copy["jersey_num"] == "NA" and track_copy["team"] != "referee":
+                track_copy["jersey_num"] = "unsure"
             f.write(json.dumps(track_copy) + "\n")
 
 
@@ -1968,9 +2086,9 @@ def spatial_cluster_tracks(
             merged_tracks.append(fused_tracks[track_indices[0]])
         else:
             # Merge multiple tracks
-            print(
-                f"    Merging cluster {cluster_id}: {[fused_tracks[i]['track_id'] for i in track_indices]}"
-            )
+            # print(
+            #     f"    Merging cluster {cluster_id}: {[fused_tracks[i]['track_id'] for i in track_indices]}"
+            # )
             merged = merge_track_cluster(
                 [fused_tracks[i] for i in track_indices],
                 new_id=f"{merged_tracks.__len__() + 1}_spatial_merged",
@@ -2053,6 +2171,7 @@ def merge_track_cluster(tracks: List[Dict], new_id: str) -> Dict:
         "bbox_area": merged_bbox_area,
         "source_track": source_tracks,
         "source_idx": source_indices,
+        "is_fused": False,
         "is_spatial_merged": True,
         "merged_count": len(tracks),
     }
@@ -2183,6 +2302,14 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--max-initial-distance",
+        type=float,
+        default=150.0,
+        metavar="D",
+        help="Maximum allowed initial distance between tracks (default: 150.0, lower = stricter)",
+    )
+
+    parser.add_argument(
         "--max-point-distance",
         type=float,
         default=100.0,
@@ -2270,6 +2397,7 @@ def main():
             filter_by_jersey=args.filter_jersey,
             direction_frame_stride=args.direction_frame_stride,
             max_score_threshold=args.max_score,
+            #max_initial_distance=args.max_initial_distance,
             max_point_distance=args.max_point_distance,
             max_step_distance=args.max_step_distance,
             max_outlier_ratio=args.max_outlier_ratio,
@@ -2295,7 +2423,7 @@ def main():
         results["spatial_clustering"] = spatial_stats
         results["fused_tracks_path"] = fused_output
         results["fused_tracks_count"] = len(fused_tracks)
-        results["stats"]["final_track_count_after_spatial"] = len(fused_tracks)
+        results["stats"]["final_track_count_after_spatial"] = spatial_stats["tracks_after_spatial"]
         results["stats"]["tracks_merged_by_spatial"] = spatial_stats["tracks_merged_by_spatial"]
     else:
         results, all_tracks_by_file = compare_tracks_between_files(
@@ -2327,10 +2455,10 @@ def main():
         print(f"Matches accepted: {results['stats'].get('matches_accepted')}")
         print(f"Match rate: {results['stats'].get('match_rate', 0):.1%}")
         print(
-            f"Final tracks after spatial clustering: {results['stats'].get('final_track_count_after_spatial', 'N/A')}"
+            f"Final tracks after spatial clustering: {results['stats'].get('final_track_count_after_spatial', 'NA')}"
         )
         print(
-            f"Tracks merged by spatial clustering: {results['stats'].get('tracks_merged_by_spatial', 'N/A')}"
+            f"Tracks merged by spatial clustering: {results['stats'].get('tracks_merged_by_spatial', 'NA')}"
         )
     else:
         print(f"Total comparisons: {results['stats'].get('total_comparisons')}")
@@ -2365,14 +2493,14 @@ def main():
     if results.get("spatial_clustering"):
         sc = results["spatial_clustering"]
         print(f"\n🔗 Spatial Clustering Summary:")
-        print(f"  Tracks before: {sc['tracks_before_spatial']}")
-        print(f"  Tracks after: {sc['tracks_after_spatial']}")
-        print(f"  Tracks merged: {sc['tracks_merged_by_spatial']}")
+        print(f"  Tracks before spatial clustering: {sc['tracks_before_spatial']}")
+        print(f"  Tracks after spatial clustering (including unmatched): {sc['tracks_after_spatial']}")
+        print(f"  Tracks merged by spatial clustering: {sc['tracks_merged_by_spatial']}")
         print(f"  Distance threshold: {sc['spatial_distance_threshold']} units")
         print(f"  Breakdown:")
         print(f"    - Multi-source fused: {sc['multi_source_fused']}")
         print(f"    - Spatially merged: {sc['spatial_merged']}")
-        print(f"    - Single-source: {sc['single_source']}")
+        print(f"    - Single-source (discarded): {sc['single_source']}")
 
     print("\n" + "=" * 60)
     print(f"✅ Results saved to: {args.output}")
