@@ -28,6 +28,7 @@ from sklearn.linear_model import RANSACRegressor
 from scipy.linalg import expm
 from filterpy.kalman import KalmanFilter
 from filterpy.common import Q_discrete_white_noise
+from tqdm import tqdm
 
 
 # --- Ball tracking specific functions --#
@@ -1349,7 +1350,10 @@ def smoothen_fused_ball_tracking(json_path, save_path):
     print(f"📊 Processing tracks from {json_path}")
 
     with open(json_path, "r") as f_in:
-        for line_idx, line in enumerate(f_in):
+        line_count = sum(1 for _ in f_in)
+        f_in.seek(0)
+
+        for line_idx, line in tqdm(enumerate(f_in), total=line_count):
             if not line.strip():
                 continue
 
@@ -1362,13 +1366,13 @@ def smoothen_fused_ball_tracking(json_path, save_path):
             positions = np.array(track["projected"])
 
             if len(frames) < 10:
-                print(f"  ⚠️ Skipping track {track.get('track_id', line_idx)}: too short")
+                # print(f"  ⚠️ Skipping track {track.get('track_id', line_idx)}: too short")
                 continue
 
-            print(f"\n  Processing track {track.get('track_id', line_idx)}: {len(frames)} frames")
+            # print(f"\n  Processing track {track.get('track_id', line_idx)}: {len(frames)} frames")
 
             # ===== STEP 1: Apply Kalman filter to get smooth acceleration =====
-            print("    🔧 Applying Kalman filter for smooth derivatives...")
+            # print("    🔧 Applying Kalman filter for smooth derivatives...")
             smoother = BallKalmanSmoother(measurement_noise=10.0, process_noise=10.0)
 
             try:
@@ -1378,10 +1382,10 @@ def smoothen_fused_ball_tracking(json_path, save_path):
 
                 # Use Kalman acceleration magnitude
                 acc_magnitude = np.linalg.norm(accelerations, axis=1)
-                print(f"    ✓ Kalman filtering completed")
+                # print(f"    ✓ Kalman filtering completed")
 
             except Exception as e:
-                print(f"    ⚠️ Kalman filtering failed: {e}, using numerical derivatives")
+                # print(f"    ⚠️ Kalman filtering failed: {e}, using numerical derivatives")
                 # Fallback to numerical derivatives
                 dt = np.diff(frames)
                 dt = np.where(dt == 0, 1, dt)
@@ -1406,7 +1410,7 @@ def smoothen_fused_ball_tracking(json_path, save_path):
                 smoothed_positions = positions  # Use original positions
 
             # ===== STEP 2: RANSAC segmentation =====
-            print("    🔍 Running RANSAC segmentation...")
+            # print("    🔍 Running RANSAC segmentation...")
             all_ins, ins = process_trajectory_in_chunks(
                 smoothed_positions,
                 frames,
@@ -1423,7 +1427,7 @@ def smoothen_fused_ball_tracking(json_path, save_path):
                 ends = np.sort(np.array([seg[-1] for seg in ins]))
 
             # ===== STEP 3: Find peaks =====
-            print("    🔝 Finding acceleration peaks...")
+            # print("    🔝 Finding acceleration peaks...")
             fs = 29.97  # frame rate
             peaks, _ = find_peaks(acc_magnitude, distance=int(0.8 * fs), prominence=1)
             peaks_frames = frames[peaks]
@@ -1463,6 +1467,7 @@ def smoothen_fused_ball_tracking(json_path, save_path):
             processed_track = {
                 "track_id": track.get("track_id", line_idx),
                 "team": "ball",
+                "frame_range": [int(interpolated_frames[0]), int(interpolated_frames[-1])],
                 "frames": interpolated_frames.tolist(),
                 "frame_range": [int(interpolated_frames[0]), int(interpolated_frames[-1])],
                 "projected": interpolated_positions.tolist(),

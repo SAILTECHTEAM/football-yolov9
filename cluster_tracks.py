@@ -62,78 +62,6 @@ def get_position_at_specific_frame(track: Dict, target_frame: int) -> Optional[n
     return None
 
 
-# Helper functions
-@njit(parallel=True)
-def calculate_distance_numba(pos1: np.ndarray, pos2: np.ndarray) -> float:
-    """
-    Calculate Euclidean distance between two positions using Numba for speed.
-    Args:
-        pos1: np.ndarray of shape (N,2) representing [x, y]
-        pos2: np.ndarray of shape (N,2) representing [x, y]
-    Returns:
-        Euclidean distance as a float
-    """
-    n = pos1.shape[0]
-    dists = np.empty(n, dtype=np.float32)
-    for i in prange(n):
-        dx = pos1[i, 0] - pos2[i, 0]
-        dy = pos1[i, 1] - pos2[i, 1]
-        dists[i] = np.sqrt(dx * dx + dy * dy)
-    return dists
-
-@njit
-def find_common_frame_indices(frames1: np.ndarray, frames2: np.ndarray, 
-                              overlapping_frames: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Find indices of common frames between two tracks.
-    Returns (indices_in_track1, indices_in_track2)
-    
-    FAST: O(n) with sorted arrays using two-pointer technique.
-    """
-    idx1_list = []
-    idx2_list = []
-    
-    i, j, k = 0, 0, 0
-    n1, n2, n_overlap = len(frames1), len(frames2), len(overlapping_frames)
-    
-    # Three-way merge (assumes all arrays are sorted)
-    while i < n1 and j < n2 and k < n_overlap:
-        f1 = frames1[i]
-        f2 = frames2[j]
-        f_target = overlapping_frames[k]
-        
-        if f1 == f2 == f_target:
-            # Found a match!
-            idx1_list.append(i)
-            idx2_list.append(j)
-            i += 1
-            j += 1
-            k += 1
-        elif f1 < f_target:
-            i += 1
-        elif f2 < f_target:
-            j += 1
-        elif f1 == f_target:
-            # f1 matches but f2 doesn't - advance f2
-            if f2 < f1:
-                j += 1
-            else:
-                i += 1
-                k += 1
-        elif f2 == f_target:
-            # f2 matches but f1 doesn't - advance f1
-            if f1 < f2:
-                i += 1
-            else:
-                j += 1
-                k += 1
-        else:
-            k += 1
-    
-    return np.array(idx1_list, dtype=np.int32), np.array(idx2_list, dtype=np.int32)
-
-
-
 def calculate_pairwise_distances(
     track1: Dict,
     track2: Dict,
@@ -154,33 +82,6 @@ def calculate_pairwise_distances(
         Tuple of (list of valid distances, metadata_dict)
         Returns ([], metadata) if too many outliers or insufficient data
     """
-
-    # # Convert to sorted numpy arrays
-    # frames1 = np.array(track1.get("frames", []), dtype=np.int32)
-    # frames2 = np.array(track2.get("frames", []), dtype=np.int32)
-    # projected1 = np.array(track1.get("projected", []), dtype=np.float32)
-    # projected2 = np.array(track2.get("projected", []), dtype=np.float32)
-    # overlapping_frames_arr = np.array(sorted(overlapping_frames), dtype=np.int32)
-    
-    # # ⚡ Numba-accelerated frame matching
-    # idx1, idx2 = find_common_frame_indices(frames1, frames2, overlapping_frames_arr)
-    
-    # if len(idx1) == 0:
-    #     metadata = {
-    #         "rejected": True,
-    #         "reason": "no_valid_positions",
-    #         "n_skipped_missing": len(overlapping_frames),
-    #     }
-    #     return [], metadata
-    
-    # skipped_missing = len(overlapping_frames) - len(idx1)
-    
-    # # ⚡ Direct indexing - single operation
-    # positions1 = projected1[idx1]
-    # positions2 = projected2[idx2]
-    
-    # # ⚡ Numba distance calculation
-    # distances = calculate_distance_numba(positions1, positions2)
 
     distances = []
     outlier_frames = []
@@ -1515,12 +1416,13 @@ def calculate_weighted_average_position(
 
 
 # different from assign_team_by_majority_vote() from post_processing.py
-def majority_vote(values: List, ignore_values: List = None) -> Optional:
+def majority_vote(values: List, confidences: List[float] = None, ignore_values: List = None, vote: str = "team") -> Optional:
     """
     Return the most common value, ignoring specified values.
 
     Args:
         values: List of values to vote on
+        confidences: List of confidence scores for each value
         ignore_values: Values to ignore (e.g., "unsure", list types)
 
     Returns:
@@ -1530,39 +1432,89 @@ def majority_vote(values: List, ignore_values: List = None) -> Optional:
         ignore_values = ["unsure", None]
 
     filtered = []
-    for v in values:
+    filtered_confidences = []
+    print("Majority vote input values:", values)
+    print("Majority vote input confidences:", confidences)
+    for v, confs in zip(values, confidences):
         if v in ignore_values:
             continue
         elif isinstance(v, list):
-            # flatten list and add non-ignored values
-            for item in v:
-                if item not in ignore_values:
-                    filtered.append(item)
+            # Flatten list and add non-ignored values (e.g. [[1, 10], 11] -> [1, 10, 11])
+            if isinstance(confs, list):
+                for item, conf in zip(v, confs):
+                    if item not in ignore_values:
+                        filtered.append(item)
+                        filtered_confidences.append(conf)
+            else:
+                # If confs is not a list, use same confidence for all items
+                for item in v:
+                    if item not in ignore_values:
+                        filtered.append(item)
+                        filtered_confidences.append(confs)
         else:
             filtered.append(v)
+            filtered_confidences.append(confs if not isinstance(confs, list) else confs[0])
 
     if not filtered:
-        return "unsure"
+        return "unsure", 0.0
 
-    # Count frequencies
+    # ===== TEAM VOTING =====
+    if vote == "team":
+        counts = Counter(filtered)
 
-    counts = Counter(filtered)
+        # Find maximum frequency
+        max_count = max(counts.values())
 
-    # Find maximum frequency
-    max_count = max(counts.values())
+        # Get all values with maximum frequency
+        most_common = [
+            value
+            for value, count in counts.items()
+            if count == max_count and value not in ignore_values
+        ]
 
-    # Get all values with maximum frequency
-    most_common = [
-        value
-        for value, count in counts.items()
-        if count == max_count and value not in ignore_values
-    ]
+        # Calculate average confidence for the most common team(s)
+        if len(most_common) == 1:
+            team = most_common[0]
+            # Average confidence for this team
+            team_confs = [conf for v, conf in zip(filtered, filtered_confidences) if v == team]
+            avg_conf = np.mean(team_confs) if team_confs else 0.0
+            return team, avg_conf
+        else:
+            # Multiple teams with same frequency - return list with their avg confidences
+            results = []
+            for team in most_common:
+                team_confs = [conf for v, conf in zip(filtered, filtered_confidences) if v == team]
+                avg_conf = np.mean(team_confs) if team_confs else 0.0
+                results.append((team, avg_conf))
+            # Sort by confidence descending
+            results.sort(key=lambda x: x[1], reverse=True)
+            return results[0] if results else ("unsure", 0.0)
 
-    # Return single value if only one, otherwise return list
-    if len(most_common) == 1:
-        return most_common[0]
+    # ===== JERSEY VOTING =====
+    elif vote == "jersey":
+        # Group by jersey number and average confidences
+        jersey_conf_map = defaultdict(list)
+        
+        for jersey, conf in zip(filtered, filtered_confidences):
+            jersey_conf_map[jersey].append(conf)
+        
+        # Calculate average confidence for each jersey number
+        jersey_results = []
+        for jersey_num, conf_list in jersey_conf_map.items():
+            avg_conf = np.mean(conf_list)
+            jersey_results.append((jersey_num, avg_conf))
+        
+        # Sort by confidence descending
+        jersey_results.sort(key=lambda x: x[1], reverse=True)
+        
+        # Separate into two lists
+        jersey_nums = [jersey for jersey, _ in jersey_results]
+        jersey_confs = [conf for _, conf in jersey_results]
+        
+        return jersey_nums, jersey_confs
+    
     else:
-        return most_common[0]  # Return list of tied values
+        raise ValueError(f"Unknown vote type: {vote}")
 
 
 def fuse_matched_tracks(
@@ -1592,10 +1544,23 @@ def fuse_matched_tracks(
 
     # 1. Majority vote on team and jersey number
     teams = [t.get("team") for t in tracks]
+    team_confs = [t.get("team_conf", 0.5) for t in tracks]
     jersey_nums = [t.get("jersey_num") for t in tracks]
+    jersey_confs = [t.get("jersey_conf", 0.5) for t in tracks]
 
-    fused_team = majority_vote(teams, ignore_values=["unsure", None, ""])
-    fused_jersey = majority_vote(jersey_nums, ignore_values=["unsure", None, ""])
+    fused_team, fused_team_conf = majority_vote(
+        teams, 
+        team_confs, 
+        ignore_values=["unsure", None, ""], 
+        vote="team"
+    )
+    
+    fused_jersey_nums, fused_jersey_confs = majority_vote(
+        jersey_nums, 
+        jersey_confs, 
+        ignore_values=["unsure", None, ""], 
+        vote="jersey"
+    )
 
     # 2. Track ID
     fused_track_id = f"{fused_id}_fused"
@@ -1648,32 +1613,27 @@ def fuse_matched_tracks(
         fused_bbox_area.append(avg_bbox)
 
     # 5. Confidence merging - weighted average by track duration
-    team_confs = []
-    jersey_confs = []
     durations = []
+    team_confs_for_merge = []
 
     for t in tracks:
         duration = len(t.get("frames", [1]))
         durations.append(duration)
-        team_confs.append(t.get("team_conf", 0.5))
-        jersey_confs.append(t.get("jersey_conf", 0.5))
+        team_confs_for_merge.append(t.get("team_conf", 0.5))
 
     total_duration = sum(durations)
     if total_duration > 0:
-        # Later need error handling to ensure input is valid
-        fused_team_conf = sum(tc * d for tc, d in zip(team_confs, durations)) / total_duration
-        fused_jersey_conf = sum(jc * d for jc, d in zip(jersey_confs, durations)) / total_duration
+        final_team_conf = sum(tc * d for tc, d in zip(team_confs_for_merge, durations)) / total_duration
     else:
-        fused_team_conf = np.mean(team_confs)
-        fused_jersey_conf = np.mean(jersey_confs)
+        final_team_conf = np.mean(team_confs_for_merge) if team_confs_for_merge else 0.5
 
     # Build fused track
     fused_track = {
         "track_id": fused_track_id,
         "team": fused_team,
-        "jersey_num": fused_jersey,
-        "jersey_conf": fused_jersey_conf,
-        "team_conf": fused_team_conf,
+        "jersey_num": fused_jersey_nums,
+        "jersey_conf": fused_jersey_confs,
+        "team_conf": final_team_conf,
         "frame_range": frame_range,
         "frames": fused_frames,
         "projected": fused_projected,
@@ -2105,11 +2065,12 @@ def merge_track_cluster(tracks: List[Dict], new_id: str) -> Dict:
     """
     # Majority vote on metadata
     teams = [t.get("team") for t in tracks]
-    jerseys = [t.get("jersey_num") for t in tracks]
+    team_confs = [t.get("team_conf", 0.5) for t in tracks]
+    jersey_nums = [t.get("jersey_num") for t in tracks]
+    jersey_confs = [t.get("jersey_conf", 0.5) for t in tracks]
 
-    merged_team = majority_vote(teams, ignore_values=["unsure", None, ""])
-    merged_jersey = majority_vote(jerseys, ignore_values=["unsure", None, ""])
-
+    merged_team, team_conf = majority_vote(teams, team_confs, ignore_values=["unsure", None, ""], vote="team")
+    merged_jersey_num, jersey_conf = majority_vote(jersey_nums, jersey_confs, ignore_values=["unsure", None, ""], vote="jersey")
     # Union of all frames
     all_frames = set()
     for t in tracks:
@@ -2162,9 +2123,9 @@ def merge_track_cluster(tracks: List[Dict], new_id: str) -> Dict:
     return {
         "track_id": new_id,
         "team": merged_team,
-        "jersey_num": merged_jersey,
-        "jersey_conf": np.mean([t.get("jersey_conf", 0.5) for t in tracks]),
-        "team_conf": np.mean([t.get("team_conf", 0.5) for t in tracks]),
+        "jersey_num": merged_jersey_num,
+        "jersey_conf": jersey_conf,
+        "team_conf": team_conf,
         "frame_range": [min(all_frames), max(all_frames)],
         "frames": merged_frames,
         "projected": merged_projected,
@@ -2204,9 +2165,9 @@ def parse_args():
     parser.add_argument(
         "--min-overlap",
         type=int,
-        default=10,
+        default=50,
         metavar="N",
-        help="Minimum overlapping frames required for matching (default: 10)",
+        help="Minimum overlapping frames required for matching (default: 50)",
     )
 
     parser.add_argument(
@@ -2218,11 +2179,45 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--total-distance-diff-threshold",
+        type=float,
+        default=50.0,
+        metavar="D",
+        help="Maximum allowed difference in distance for matching (default: 50.0 units)",
+    )
+
+    parser.add_argument(
+        "--direction-threshold",
+        type=float,
+        default=0.3,
+        metavar="S",
+        help="Minimum direction similarity score [0-1] (default: 0.3, higher = stricter)",
+    )
+
+    parser.add_argument(
+        "--direction-consistency-threshold",
+        type=float,
+        default=0.6,
+        metavar="C",
+        help="Minimum ratio of frames with similar direction [0-1] (default: 0.6)",
+    )
+
+    parser.add_argument(
+        "--direction-frame-stride",
+        type=int,
+        default=3,
+        metavar="N",
+        help="Frame stride for direction sampling (default: 3). "
+        "Higher values = smoother/less noisy (1=consecutive, 3=every 3rd frame, 10=every 10th frame). "
+        "At 29.97fps: stride 1≈33ms, stride 3≈100ms, stride 10≈333ms",
+    )
+
+    parser.add_argument(
         "--max-frames",
         type=int,
-        default=150,
+        default=1500,
         metavar="N",
-        help="Maximum frames to analyze per comparison (default: 150)",
+        help="Maximum frames to analyze per comparison (default: 1500)",
     )
 
     parser.add_argument(
@@ -2254,40 +2249,6 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--total-distance-diff-threshold",
-        type=float,
-        default=15.0,
-        metavar="D",
-        help="Maximum allowed difference in distance for matching (default: 15.0 units)",
-    )
-
-    parser.add_argument(
-        "--direction-threshold",
-        type=float,
-        default=0.6,
-        metavar="S",
-        help="Minimum direction similarity score [0-1] (default: 0.6, higher = stricter)",
-    )
-
-    parser.add_argument(
-        "--direction-consistency-threshold",
-        type=float,
-        default=0.5,
-        metavar="C",
-        help="Minimum ratio of frames with similar direction [0-1] (default: 0.5)",
-    )
-
-    parser.add_argument(
-        "--direction-frame-stride",
-        type=int,
-        default=3,
-        metavar="N",
-        help="Frame stride for direction sampling (default: 3). "
-        "Higher values = smoother/less noisy (1=consecutive, 3=every 3rd frame, 10=every 10th frame). "
-        "At 29.97fps: stride 1≈33ms, stride 3≈100ms, stride 10≈333ms",
-    )
-
-    parser.add_argument(
         "--greedy",
         action="store_true",
         help="Use greedy matching algorithm (ensures maximum coverage)",
@@ -2296,9 +2257,9 @@ def parse_args():
     parser.add_argument(
         "--max-score",
         type=float,
-        default=50.0,
+        default=100.0,
         metavar="S",
-        help="Maximum acceptable score for greedy matching (default: 50.0, lower = stricter)",
+        help="Maximum acceptable score for greedy matching (default: 100.0, lower = stricter)",
     )
 
     parser.add_argument(
@@ -2336,9 +2297,9 @@ def parse_args():
     parser.add_argument(
         "--spatial-distance",
         type=float,
-        default=50.0,
+        default=40.0,
         metavar="D",
-        help="Distance threshold for spatial merging (default: 50.0 units, ~5.0m)",
+        help="Distance threshold for spatial merging (default: 40.0 units, ~4.0m)",
     )
 
     args = parser.parse_args()

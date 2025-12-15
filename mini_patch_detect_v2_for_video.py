@@ -72,75 +72,6 @@ def is_bbox_anomalous(curr_bbox, prev_bbox, height_thresh_ratio=0.5):
     return curr_h < prev_h * height_thresh_ratio
 
 
-# Not used as this cropping is done in sv.InferenceSlicer()
-def crop_image_with_overlap(image, crop_size=640, overlap=0.2):
-    """
-    Split a large image into overlapping patches.
-
-    Args:
-        image (ndarray): Original image (e.g., 4K image)
-        crop_size (int): Patch size (default 640)
-        overlap (float): Overlap ratio between 0 and <1 (e.g., 0.2 = 20%)
-
-    Returns:
-        List of (patch, (x_offset, y_offset))
-    """
-    h, w = image.shape[:2]
-    stride = int(crop_size * (1 - overlap))
-    patches = []
-
-    for y in range(0, h - crop_size + 1, stride):
-        for x in range(0, w - crop_size + 1, stride):
-            patch = image[y : y + crop_size, x : x + crop_size]
-            patches.append((patch, (x, y)))
-
-    # Edge padding if needed (right/bottom borders)
-    if (w - crop_size) % stride != 0:
-        x = w - crop_size
-        for y in range(0, h - crop_size + 1, stride):
-            patch = image[y : y + crop_size, x : x + crop_size]
-            patches.append((patch, (x, y)))
-
-    if (h - crop_size) % stride != 0:
-        y = h - crop_size
-        for x in range(0, w - crop_size + 1, stride):
-            patch = image[y : y + crop_size, x : x + crop_size]
-            patches.append((patch, (x, y)))
-
-    # Bottom-right corner
-    if (w - crop_size) % stride != 0 and (h - crop_size) % stride != 0:
-        x = w - crop_size
-        y = h - crop_size
-        patch = image[y : y + crop_size, x : x + crop_size]
-        patches.append((patch, (x, y)))
-
-    return patches
-
-
-def match_features_to_teams_in_memory(crop_features, team_data):
-    team_features = team_data["features"]
-    team_names = team_data["filenames"]
-    team_features = F.normalize(team_features, dim=1)
-
-    results = []
-
-    for crop in crop_features:
-        crop = F.normalize(crop.unsqueeze(0), dim=1)  # [1, 512]
-        sims = torch.mm(team_features, crop.T).squeeze(1)  # [M]
-
-        # 分類到 team
-        team_scores = {}
-        for team, sim in zip(team_names, sims):
-            team_key = os.path.basename(team).split("_")[0]
-            team_scores.setdefault(team_key, []).append(sim.item())
-
-        # 對每個 team 做平均
-        team_avg_scores = {team: sum(scores) / len(scores) for team, scores in team_scores.items()}
-        results.append(team_avg_scores)  # 儲存每個人對每隊的分數
-
-    return results
-
-
 def crop_clothing_region(
     image, bbox, top_ratio=0.25, bottom_ratio=0.45, left_ratio=0.3, right_ratio=0.7
 ):
@@ -374,26 +305,6 @@ def remove_partially_enclosed_boxes_same_class(
             keep.append(i)
 
     return detections[keep]
-
-
-# Replaced by with_nms from sv
-def simple_global_nms(dets, iou_thres=0.45, max_det=300):
-    if dets.size(0) == 0:
-        return dets
-    max_wh = 4096  # for offsetting by class
-    offsets = dets[:, 5] * max_wh
-    boxes = dets[:, :4] + offsets[:, None]
-    scores = dets[:, 4]
-    keep = nms(boxes, scores, iou_thres)
-    return dets[keep[:max_det]]
-
-
-# Not used as this is done in sv.InferenceSlicer()
-def get_image_patches(image_4k, crop_size=640, overlap=0.2):
-    patches = crop_image_with_overlap(image_4k, crop_size, overlap)
-    images = [patch for patch, _ in patches]
-    offsets = [offset for _, offset in patches]
-    return images, offsets
 
 
 # Not used as this is done in sv.InferenceSlicer()
@@ -781,6 +692,7 @@ def run(
         if video_frame_idx % vid_stride != 0:
             continue
 
+        # Skip frames between halves
         if video_frame_idx > fh_end and video_frame_idx < sh_start:
             video_frame_idx = sh_start - 1  # jump to second half
             cap.set(cv2.CAP_PROP_POS_FRAMES, sh_start)
@@ -936,17 +848,6 @@ def run(
                     jersey_confs = [
                         p.cpu().numpy().squeeze().tolist() for p in probs
                     ]  # e.g. [['0.9999', '0.999', '1.0'], [...], ...]
-
-                # crop_img_jersey_rgb = transform(crop_img_jersey_rgb)
-                # crop_img_jersey_rgb = crop_img_jersey_rgb.unsqueeze(0)
-                # logits = jersey_model.forward(crop_img_jersey_rgb.to(jersey_model.device))
-                # probs_full = logits[:,:3,:11].softmax(-1)
-                # preds, probs = jersey_model.tokenizer.decode(probs_full)
-                # logits = logits[:,:3,:11].cpu().detach().numpy()[0].tolist()
-                # probs_full = probs_full.cpu().detach().numpy()[0].tolist()
-                # confidence = probs[0].cpu().detach().numpy().squeeze().tolist()
-                # jersey_numbers.append(preds[0]) # e.g. '10'
-                # jersey_confs.append(confidence) # e.g. ['0.9999', '0.999', '1.0'] corresponding to '1' '0' and EOS
 
             for t in online_balls:
                 tlbr = t[:4]

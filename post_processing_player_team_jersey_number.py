@@ -233,7 +233,7 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
 
     relabel_count = 0
     relabel_map = {}  # tid -> new label
-    
+
     # 👇 Deep copy and sort windows by count (descending)
     team_windows = {
         k: sorted([w.copy() for w in v], key=lambda x: x["count"], reverse=True)
@@ -590,6 +590,244 @@ def find_similar_jersey_numbers(jersey_num, available_jerseys):
     return similar_jerseys
 
 
+def allocate_jersey_numbers_by_confidence(
+    jsonl_path: str,
+    output_path: str,
+    home_jersey_numbers: List[int],
+    away_jersey_numbers: List[int],
+):
+    """
+    Allocate jersey numbers to tracks based on confidence scores and handle conflicts.
+
+    Args:
+        jsonl_path: Path to the input JSONL file with track data
+        output_path: Path to save the output JSONL with allocated jersey numbers
+        home_jersey_numbers: List of valid jersey numbers for the home team
+        away_jersey_numbers: List of valid jersey numbers for the away team
+    """
+
+    # Create sets for O(1) lookup
+    valid_jerseys = {
+        "home": set(home_jersey_numbers),
+        "away": set(away_jersey_numbers),
+    }
+
+    # Read all tracks
+    tracks = []
+    with open(jsonl_path, "r") as f:
+        for line in f:
+            if line.strip():
+                tracks.append(json.loads(line))
+
+    print(f"📊 Processing {len(tracks)} tracks for jersey number allocation...")
+
+    # Step 1: Allocate jersey numbers based on confidence and validity
+    for track in tracks:
+        track_id = track.get("track_id", "")
+        team = track.get("team", "")
+
+        # Skip non-player tracks
+        if team in ["ball", "referee", "unsure"]:
+            track["allocated_jersey"] = "NA" if team == "referee" else "unsure"
+            track["allocated_conf"] = 0.0
+            continue
+
+        # Determine team key
+        team_key = "home" if "home" in team.lower() else "away" if "away" in team.lower() else None
+        if team_key is None:
+            track["allocated_jersey"] = "unsure"
+            track["allocated_conf"] = 0.0
+            continue
+
+        jersey_nums = track.get("jersey_num", "unsure")
+        jersey_confs = track.get("jersey_conf", 0.0)
+
+        # Handle unsure cases
+        if jersey_nums == "unsure" or not jersey_nums:
+            track["allocated_jersey"] = "unsure"
+            track["allocated_conf"] = 0.0
+            continue
+
+        # Normalize to lists
+        if not isinstance(jersey_nums, list):
+            jersey_nums = [jersey_nums]
+        if not isinstance(jersey_confs, list):
+            jersey_confs = [jersey_confs]
+
+        # Sort by confidence (descending)
+        jersey_conf_pairs = sorted(zip(jersey_nums, jersey_confs), key=lambda x: x[1], reverse=True)
+
+        # Find first valid jersey number
+        allocated = False
+        for jersey_num, conf in jersey_conf_pairs:
+            if jersey_num in valid_jerseys[team_key]:
+                track["allocated_jersey"] = jersey_num
+                track["allocated_conf"] = conf
+                allocated = True
+                break
+
+        if not allocated:
+            track["allocated_jersey"] = "unsure"
+            track["allocated_conf"] = 0.0
+
+    print("✅ Initial allocation complete. Resolving conflicts...")
+
+    # Step 2: Resolve conflicts where same jersey number is assigned to overlapping tracks
+    # Build frame-to-track mapping for efficient conflict detection
+    frame_team_jersey_tracks = defaultdict(lambda: defaultdict(list))
+
+    for track in tracks:
+        allocated_jersey = track.get("allocated_jersey")
+        team = track.get("team", "")
+
+        if allocated_jersey == "unsure" or allocated_jersey == "NA":
+            continue
+
+        frames = track.get("frames", [])
+        track_id = track.get("track_id", "")
+        allocated_conf = track.get("allocated_conf", 0.0)
+
+        for frame in frames:
+            frame_team_jersey_tracks[frame][(team, allocated_jersey)].append(
+                {"track_id": track_id, "conf": allocated_conf}
+            )
+
+    # Find conflicting tracks (same team + jersey in overlapping frames)
+    conflicts = defaultdict(set)  # track_id -> set of conflicting track_ids
+
+    for frame, team_jersey_dict in frame_team_jersey_tracks.items():
+        for (team, jersey), track_list in team_jersey_dict.items():
+            if len(track_list) > 1:
+                # Multiple tracks with same jersey in this frame
+                for track_info in track_list:
+                    other_tracks = [
+                        t["track_id"] for t in track_list if t["track_id"] != track_info["track_id"]
+                    ]
+                    conflicts[track_info["track_id"]].update(other_tracks)
+
+    print(f"⚠️  Found {len(conflicts)} tracks with conflicts")
+
+    # Step 3: Resolve conflicts - keep highest confidence, reassign others
+    track_map = {track["track_id"]: track for track in tracks}
+    resolved_count = 0
+
+    for track_id in conflicts:
+        track = track_map[track_id]
+        conflicting_ids = conflicts[track_id]
+
+        # Get all conflicting tracks including self
+        all_conflicting = [track] + [track_map[cid] for cid in conflicting_ids if cid in track_map]
+
+        # Filter to only those with same allocated jersey and team
+        same_jersey_tracks = [
+            t
+            for t in all_conflicting
+            if t.get("allocated_jersey") == track.get("allocated_jersey")
+            and t.get("team") == track.get("team")
+        ]
+
+        if len(same_jersey_tracks) <= 1:
+            continue
+
+        # Sort by confidence
+        same_jersey_tracks.sort(key=lambda t: t.get("allocated_conf", 0.0), reverse=True)
+
+        # Keep highest confidence track, reassign others
+        winner = same_jersey_tracks[0]
+
+        for loser_track in same_jersey_tracks[1:]:
+            if loser_track["track_id"] == winner["track_id"]:
+                continue
+
+            # Try to find alternative jersey number
+            team = loser_track.get("team", "")
+            team_key = "home" if "home" in team.lower() else "away"
+
+            jersey_nums = loser_track.get("jersey_num", [])
+            jersey_confs = loser_track.get("jersey_conf", [])
+
+            if not isinstance(jersey_nums, list):
+                jersey_nums = [jersey_nums]
+            if not isinstance(jersey_confs, list):
+                jersey_confs = [jersey_confs]
+
+            # Sort by confidence and find alternative
+            jersey_conf_pairs = sorted(
+                zip(jersey_nums, jersey_confs), key=lambda x: x[1], reverse=True
+            )
+
+            reallocated = False
+            for jersey_num, conf in jersey_conf_pairs:
+                if jersey_num == loser_track.get("allocated_jersey"):
+                    continue  # Skip the conflicting one
+
+                if jersey_num in valid_jerseys[team_key]:
+                    # Check if this alternative also conflicts
+                    frames = loser_track.get("frames", [])
+                    has_conflict = False
+
+                    for frame in frames:
+                        if (team, jersey_num) in frame_team_jersey_tracks[frame]:
+                            existing_tracks = frame_team_jersey_tracks[frame][(team, jersey_num)]
+                            if any(
+                                t["track_id"] != loser_track["track_id"] for t in existing_tracks
+                            ):
+                                has_conflict = True
+                                break
+
+                    if not has_conflict:
+                        loser_track["allocated_jersey"] = jersey_num
+                        loser_track["allocated_conf"] = conf
+                        reallocated = True
+                        resolved_count += 1
+                        break
+
+            if not reallocated:
+                loser_track["allocated_jersey"] = "unsure"
+                loser_track["allocated_conf"] = 0.0
+                resolved_count += 1
+
+    print(f"✅ Resolved {resolved_count} conflicts")
+
+    # Step 4: Write output
+    with open(output_path, "w") as out_f:
+        for track in tracks:
+            # Create output with allocated jersey as the main jersey_num
+            output_track = {
+                "track_id": track.get("track_id", ""),
+                "team": track.get("team", ""),
+                "team_conf": track.get("team_conf", 0.0),
+                "jersey_num": track.get("allocated_jersey", "unsure"),
+                "jersey_conf": track.get("allocated_conf", 0.0),
+                "frame_range": track.get("frame_range", []),
+                "frames": track.get("frames", []),
+                "projected": track.get("projected", []),
+                "bbox_area": track.get("bbox_area", []),
+            }
+            out_f.write(json.dumps(output_track) + "\n")
+
+    print(f"✅ Jersey number allocation complete. Saved to {output_path}")
+
+    # Print summary statistics
+    allocated_counts = defaultdict(int)
+    for track in tracks:
+        allocated_counts[track.get("allocated_jersey", "unsure")] += 1
+
+    print("\n📊 Allocation Summary:")
+    print(allocated_counts)
+
+    # Convert all keys to strings for sorting, with numeric jerseys sorted numerically
+    def sort_key(item):
+        key = item[0]
+        if isinstance(key, int):
+            return (0, key)  # Numeric jerseys first, sorted by value
+        else:
+            return (1, key)  # String categories second, sorted alphabetically
+
+    for jersey, count in sorted(allocated_counts.items(), key=sort_key):
+        print(f"   Jersey {jersey}: {count} tracks")
+
+
 def prepare_background_and_tracks(
     json_path,
     image_path,
@@ -620,18 +858,17 @@ def prepare_background_and_tracks(
 
     detect_team_size_violations_streaming(
         jsonl_path=json_path,
-        save_path=json_path.replace('.jsonl', '_team_size_violations.jsonl'),
+        save_path=json_path.replace(".jsonl", "_team_size_violations.jsonl"),
         max_team_size=10,
         allowed_goalkeepers=1,
-        allowed_referees=1
+        allowed_referees=1,
     )
     end_violations = time.time()
     print(f"✅ Detected team size violations in {end_violations - start_load:.2f} seconds")
 
     start_merged = time.time()
     merged_window = merge_violation_windows_with_track_counts(
-        jsonl_path=json_path.replace('.jsonl', '_team_size_violations.jsonl'),
-        min_gap=3
+        jsonl_path=json_path.replace(".jsonl", "_team_size_violations.jsonl"), min_gap=3
     )
     end_merged = time.time()
 
@@ -642,9 +879,9 @@ def prepare_background_and_tracks(
     relabel_count = relabel_tracks_by_confidence_and_decrement_windows_streaming(
         track_jsonl_path=json_path,
         team_windows=merged_window,
-        output_jsonl_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
+        output_jsonl_path=json_path.replace(".jsonl", "_relabeled.jsonl"),
         conf_threshold=0.007,
-        not_sure_label="unsure"
+        not_sure_label="unsure",
     )
     end_relabel = time.time()
     print(f"✅ Relabeled {relabel_count} tracks in {end_relabel - end_merged:.2f} seconds")
@@ -656,17 +893,25 @@ def prepare_background_and_tracks(
     )
 
     process_jsonl_detect_replace(
-        input_path=json_path.replace('.jsonl', '_smoothed.jsonl'),
-        output_path=json_path.replace('.jsonl', '_smoothed_again.jsonl'),
-        detector_kwargs=detector_secondpass_kwargs
-     )
+        input_path=json_path.replace(".jsonl", "_smoothed.jsonl"),
+        output_path=json_path.replace(".jsonl", "_smoothed_again.jsonl"),
+        detector_kwargs=detector_secondpass_kwargs,
+    )
 
-    resolve_duplicate_jersey_numbers(
-        jsonl_path=json_path.replace('.jsonl', '_smoothed_again.jsonl'),
-        output_path=json_path.replace('.jsonl', '_final.jsonl'),
+    allocate_jersey_numbers_by_confidence(
+        jsonl_path=json_path.replace(".jsonl", "_smoothed_again.jsonl"),
+        output_path=json_path.replace(".jsonl", "_final_1215.jsonl"),
         home_jersey_numbers=home_jersey_numbers,
         away_jersey_numbers=away_jersey_numbers,
     )
+    end_allocation = time.time()
+    print(f"✅ Allocated jersey numbers in {end_allocation - end_relabel:.2f} seconds")
+    # resolve_duplicate_jersey_numbers(
+    #     jsonl_path=json_path.replace('.jsonl', '_smoothed_again.jsonl'),
+    #     output_path=json_path.replace('.jsonl', '_final.jsonl'),
+    #     home_jersey_numbers=home_jersey_numbers,
+    #     away_jersey_numbers=away_jersey_numbers,
+    # )
     return bg_img
 
 
