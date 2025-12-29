@@ -86,10 +86,10 @@ python3 mini_patch_detect_v2_for_video.py \
   --source './data/video/test_sample/C0478.MP4' \
   --game-time 317 3085 3982 6809 \
   --img 640 \
-  --device 0 1 \
+  --device 0 \
   --weights './weights/yolov9-s-converted_player_ball_detection_1280.pt' \
   --name test_4k_640_cam0 \
-  --classes 0 \
+  --classes 0 1 \
   --clothes-folder-path ./data/histograms/0525/ \
   --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 \
   --homography-dst-points 530 0 530 660 1060 660 1060 0 \
