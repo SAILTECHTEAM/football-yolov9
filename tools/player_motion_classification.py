@@ -22,7 +22,10 @@ def track_ball_possession(
     output_path: str,
     window_size: int = 11,
     max_distance_threshold: float = 5.0,
-    min_possession_frames: int = 3
+    min_possession_frames: int = 3,
+    grace_period: float = 4.0,
+    ball_grace_period: float = 2.0,
+    fps: int = 30,
 ):
     """
     Track which player is holding the ball throughout the match.
@@ -39,12 +42,18 @@ def track_ball_possession(
         Maximum distance between player and ball to be considered possession (default: 5.0)
     min_possession_frames: int
         Minimum consecutive frames needed to register a possession event (default: 3)
-    
+    grace_period: float
+        Time in seconds to retain possession after ball moves away from player (default: 4.0)
+    ball_grace_period: float
+        Time in seconds to retain possession when ball detection is lost (default: 2.0)
+    fps: int
+        Frames per second of the video (default: 30)
     """
-    import json
-    import numpy as np
-    from collections import defaultdict
-    
+
+     # Convert grace periods to frames
+    grace_period_frames = int(grace_period * fps)  # 4 seconds * 30 fps = 120 frames
+    ball_grace_period_frames = int(ball_grace_period * fps)  # 2 seconds * 30 fps = 60 frames
+
     # Load all tracks from JSONL
     with open(jsonl_path, 'r') as f:
         tracks = [json.loads(line) for line in f if line.strip()]
@@ -75,8 +84,13 @@ def track_ball_possession(
     
     # Create ball position lookup by frame
     ball_positions = {}
-    ball_frames = ball_tracks[0].get("frames", [])
-    ball_coords = ball_tracks[0].get("projected", [])
+    ball_coords = []
+    ball_frames = []
+
+    for ball_track in ball_tracks:
+        ball_frames.extend(ball_track.get("frames", []))
+        ball_coords.extend(ball_track.get("projected", []))
+
     
     for frame, pos in zip(ball_frames, ball_coords):
         if pos is not None and len(pos) >= 2:
@@ -92,36 +106,98 @@ def track_ball_possession(
     possession_frames = []
     possession_ball_pos = []
     possession_player_pos = []
+
+    # Grace period tracking variables
+    last_player_w_ball = None  # Last player who had possession
+    last_possession_frame = None  # Frame when last possession was recorded
+    last_possessing_team = None  # Team of last possessor
+    ball_lost_frame = None  # Frame when ball detection was lost
     
     # Process each frame
     for frame in range(min_frame, max_frame + 1):
-        # Skip if no ball position for this frame
-        if frame not in ball_positions:
-            continue
+        # Check if ball is detected in this frame
+        ball_detected = frame in ball_positions
             
         # Skip if no players detected in this frame
         if frame not in player_by_frame:
             continue
         
-        if (frame % 500) == 0:
+        if (frame % 5000) == 0:
             print(f"Processing frame {frame}/{max_frame}")
-        ball_pos = np.array(ball_positions[frame])
+
         closest_player = None
         closest_distance = float('inf')
         
-        # Find the closest player to the ball
-        for player in player_by_frame[frame]:
-            player_pos = np.array(player["position"])
-            distance = np.linalg.norm(player_pos - ball_pos)
+        # Try to find closest player if ball is detected
+        if ball_detected:
+            ball_pos = np.array(ball_positions[frame])
             
-            if distance < closest_distance and distance <= max_distance_threshold:
-                closest_distance = distance
-                closest_player = player
+            # Find the closest player to the ball
+            for player in player_by_frame[frame]:
+                player_pos = np.array(player["position"])
+                distance = np.linalg.norm(player_pos - ball_pos)
+                
+                if distance < closest_distance and distance <= max_distance_threshold:
+                    closest_distance = distance
+                    closest_player = player
+            
+            # Reset ball lost tracking when ball is detected
+            if ball_lost_frame is not None:
+                ball_lost_frame = None
+        else:
+            # Ball not detected - enter ball grace period
+            if ball_lost_frame is None:
+                ball_lost_frame = frame  # Mark when ball detection was lost
         
-        # Process possession
+        # Grace period logic
+        player_to_assign = None
+        
         if closest_player:
-            player_id = closest_player["track_id"]
-            team = closest_player["team"]
+            # Ball detected and player is close enough
+            player_to_assign = closest_player
+            last_player_w_ball = closest_player
+            last_possession_frame = frame
+            last_possessing_team = closest_player["team"]
+        
+        elif last_player_w_ball is not None:
+            # No player close enough, check grace periods
+            
+            if ball_detected:
+                # CASE 1: Ball visible but no player close (PLAYER GRACE PERIOD)
+                elapsed_frames = frame - last_possession_frame
+                
+                if elapsed_frames <= grace_period_frames:
+                    # Within player grace period - keep possession
+                    player_to_assign = last_player_w_ball
+                    # if frame % 100 == 0:  # Log occasionally
+                    #     print(f"  Frame {frame}: Player grace period active "
+                    #           f"({elapsed_frames}/{grace_period_frames} frames)")
+                else:
+                    # Grace period expired - release possession
+                    last_player_w_ball = None
+                    last_possession_frame = None
+                    last_possessing_team = None
+            
+            else:
+                # CASE 2: Ball not detected (BALL GRACE PERIOD)
+                elapsed_frames_since_ball_lost = frame - ball_lost_frame if ball_lost_frame else 0
+                
+                if elapsed_frames_since_ball_lost <= ball_grace_period_frames:
+                    # Within ball grace period - keep possession
+                    player_to_assign = last_player_w_ball
+                    # if frame % 100 == 0:  # Log occasionally
+                    #     print(f"  Frame {frame}: Ball grace period active "
+                    #           f"({elapsed_frames_since_ball_lost}/{ball_grace_period_frames} frames)")
+                else:
+                    # Ball grace period expired - release possession
+                    last_player_w_ball = None
+                    last_possession_frame = None
+                    last_possessing_team = None
+        
+        # Process possession assignment
+        if player_to_assign:
+            player_id = player_to_assign["track_id"]
+            team = player_to_assign["team"]
             
             # New possession starts
             if current_possession is None or current_possession["player_track_id"] != player_id:
@@ -143,13 +219,25 @@ def track_ball_possession(
                     "team": team
                 }
                 possession_frames = [frame]
-                possession_ball_pos = [ball_positions[frame]]
-                possession_player_pos = [closest_player["position"]]
+                
+                # Use ball position if available, else use player position
+                if ball_detected:
+                    possession_ball_pos = [ball_positions[frame]]
+                else:
+                    possession_ball_pos = [player_to_assign["position"]]
+                
+                possession_player_pos = [player_to_assign["position"]]
             else:
                 # Continue current possession
                 possession_frames.append(frame)
-                possession_ball_pos.append(ball_positions[frame])
-                possession_player_pos.append(closest_player["position"])
+                
+                if ball_detected:
+                    possession_ball_pos.append(ball_positions[frame])
+                else:
+                    # During grace period, use last known ball position
+                    possession_ball_pos.append(possession_ball_pos[-1] if possession_ball_pos else player_to_assign["position"])
+                
+                possession_player_pos.append(player_to_assign["position"])
         else:
             # No player close enough to the ball - potential end of possession
             if current_possession and len(possession_frames) >= min_possession_frames:
@@ -215,6 +303,7 @@ def track_ball_possession(
         possession_events = smoothed_events
     
     # Save possession data to JSONL
+    print(f"Saving possession data to {output_path}...")
     with open(output_path, 'w') as f:
         for event in possession_events:
             f.write(json.dumps(event) + '\n')
@@ -255,7 +344,7 @@ def detect_abnormal_player_movement_direction(
         tracks = [json.loads(line) for line in f]
 
     ball_tracks = [t for t in tracks if t["team"] == "ball"]
-    player_tracks = [t for t in tracks if t["team"] != "ball"]
+    player_tracks = [t for t in tracks if t["team"] != "ball" and t["team"] != "referee"]
 
     # Build ball position lookup
     ball_by_frame: Dict[int, Tuple[float, float]] = {}
@@ -587,7 +676,7 @@ def detect_stationary_players(
         tracks = [json.loads(line) for line in f]
 
     ball_tracks = [t for t in tracks if t["team"] == "ball"]
-    player_tracks = [t for t in tracks if t["team"] != "ball"]
+    player_tracks = [t for t in tracks if t["team"] != "ball" and t["team"] != "referee"]
 
     # Build ball position lookup
     ball_by_frame: Dict[int, Tuple[float, float]] = {}
@@ -936,7 +1025,7 @@ def detect_kicking_outside_the_pitch(
         is_out_of_bounds = (x < min_x or x > max_x or y < min_y or y > max_y)
         
         if is_out_of_bounds:
-            print(f"Frame {frame}: Ball out of bounds")
+            # print(f"Frame {frame}: Ball out of bounds")
             # Get player in possession when ball went out of bounds
             possession_info = possession_by_frame.get(frame, {})
 
@@ -960,7 +1049,7 @@ def detect_kicking_outside_the_pitch(
         else:
             # Ball came back in bounds, record the event if we have a start frame
             if out_of_bounds_start is not None and current_possession_player:
-                print(f"Frame {frame}: Ball back in bounds, was out from frame {out_of_bounds_start} by player {current_possession_player}")
+                # print(f"Frame {frame}: Ball back in bounds, was out from frame {out_of_bounds_start} by player {current_possession_player}")
                 # Include frames before and after the out-of-bounds sequence
                 f_start = max(0, out_of_bounds_start - frame_window)
                 f_end = frame + frame_window

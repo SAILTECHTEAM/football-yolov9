@@ -241,11 +241,11 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
     }
 
     team_windows = {k: [w.copy() for w in v] for k, v in team_windows.items()}
-    print(team_windows.items())
+    # print(team_windows.items())
 
     for team, windows in team_windows.items():
         while windows:
-            print(f"🔄 Processing team: {team}, remaining windows: {len(windows)}")
+            # print(f"🔄 Processing team: {team}, remaining windows: {len(windows)}")
             window = windows.pop(0)
             win_start, win_end = window["range"]
             count = window["count"]
@@ -280,7 +280,7 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
 
             # Only take lowest confidence ones
             candidate_tracks = nsmallest(excess, candidate_tracks)
-            print(f"  Found {candidate_tracks} candidate tracks for relabeling.")
+            # print(f"  Found {candidate_tracks} candidate tracks for relabeling.")
 
             relabeled_in_window = 0
             for conf, tid, t_start, t_end in candidate_tracks:
@@ -343,9 +343,9 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
                 windows = new_windows
 
             # If still unresolved, re-add current window
-            print(f"  Relabeled {relabeled_in_window} tracks in this window.")
+            # print(f"  Relabeled {relabeled_in_window} tracks in this window.")
             window["count"] -= relabeled_in_window
-            print(window["count"])
+            # print(window["count"])
             if window["count"] > allowed_count and relabeled_in_window > 0:
                 windows.append(window)
 
@@ -362,181 +362,6 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
 
     print(f"✅ Relabeled {relabel_count} tracks.")
     return relabel_count
-
-
-def resolve_duplicate_jersey_numbers(
-    jsonl_path: str,
-    output_path: str,
-    home_jersey_numbers: list = None,
-    away_jersey_numbers: list = None,
-):
-    """
-    Resolves duplicate jersey numbers by identifying and correcting players with the same jersey number on the same team.
-    Optimized version with improved data structures and reduced complexity.
-
-    Args:
-        jsonl_path: Path to the input JSONL file with track data
-        output_path: Path to save the output JSONL with resolved jersey numbers
-        home_jersey_numbers: List of valid jersey numbers for the home team
-        away_jersey_numbers: List of valid jersey numbers for the away team
-    """
-
-    # Read team jersey number lists
-    if home_jersey_numbers is None or away_jersey_numbers is None:
-        print("No team jersey number lists provided.")
-        exit(1)
-
-    team_jerseys = {
-        "home": set(home_jersey_numbers),  # Use sets for O(1) lookups
-        "away": set(away_jersey_numbers),
-    }
-
-    # Read all tracks into memory
-    tracks = []
-    with open(jsonl_path, "r") as f:
-        for line in f:
-            if line.strip():
-                tracks.append(json.loads(line))
-
-    # Create mapping from track_id to track and build efficient indexing
-    track_map = {}
-    frame_to_tracks = defaultdict(list)  # Maps frame -> list of (track_id, team, jersey_num)
-    track_jersey_cache = {}  # Cache jersey numbers per track per frame
-
-    print("🔄 Building optimized index structures...")
-    for track in tracks:
-        track_id = track["track_id"]
-        track_map[track_id] = track
-        team = track.get("team", "")
-        jersey_num = track.get("jersey_num", "unsure")
-
-        # Skip non-player tracks
-        if team in ["ball", "referee", "unsure"] or jersey_num == "unsure" or jersey_num == []:
-            continue
-
-        frames = track.get("frames", [])
-        if not frames:
-            continue
-
-        # Build index of frames to tracks
-        for i, frame in enumerate(frames):
-            # Get jersey number for this frame (either from list or single value)
-            current_jersey = (
-                jersey_num[i]
-                if isinstance(jersey_num, list) and i < len(jersey_num)
-                else jersey_num
-            )
-            if current_jersey == "unsure" or current_jersey == -1:
-                continue
-
-            # Store mapping for this frame
-            frame_to_tracks[frame].append((track_id, team, current_jersey))
-
-            # Cache jersey confidence
-            if isinstance(track.get("jersey_conf", 0.0), list) and i < len(
-                track.get("jersey_conf", [])
-            ):
-                track_jersey_cache[(track_id, frame)] = track.get("jersey_conf", [])[i]
-            else:
-                track_jersey_cache[(track_id, frame)] = track.get("jersey_conf", 0.0)
-
-    # Find duplicate jersey numbers in each frame
-    duplicates_found = defaultdict(list)  # {track_id: [(conflicting_track_id, frame, jersey), ...]}
-
-    print(f"🔄 Checking {len(frame_to_tracks)} frames for duplicate jersey numbers...")
-    for frame, track_entries in frame_to_tracks.items():
-        # Group tracks by team and jersey number - using dictionary for O(1) lookups
-        team_jersey_tracks = defaultdict(lambda: defaultdict(list))
-
-        for track_id, team, jersey_num in track_entries:
-            if jersey_num != "unsure":
-                team_jersey_tracks[team][jersey_num].append(track_id)
-
-        # Find duplicates within each team and jersey number
-        for team, jersey_tracks in team_jersey_tracks.items():
-            for jersey_num, track_ids in jersey_tracks.items():
-                if len(track_ids) > 1:
-                    # Sort by jersey number confidence (highest first)
-                    sorted_tracks = sorted(
-                        track_ids,
-                        key=lambda tid: track_jersey_cache.get((tid, frame), 0.0),
-                        reverse=True,
-                    )
-
-                    # The first track has highest confidence, others are duplicates
-                    main_track_id = sorted_tracks[0]
-                    for dup_track_id in sorted_tracks[1:]:
-                        duplicates_found[dup_track_id].append((main_track_id, frame, jersey_num))
-
-    # Prepare similar jersey lookup tables
-    similar_jersey_cache = {}
-    for team, numbers in team_jerseys.items():
-        similar_jersey_cache[team] = {}
-        for num in numbers:
-            similar_jersey_cache[team][num] = find_similar_jersey_numbers(num, list(numbers))
-
-    # Track frame usage of jersey numbers
-    frame_team_jersey_usage = defaultdict(lambda: defaultdict(set))
-    for frame, track_entries in frame_to_tracks.items():
-        for track_id, team, jersey_num in track_entries:
-            frame_team_jersey_usage[frame][(team, jersey_num)].add(track_id)
-
-    # Resolve duplicates
-    resolved_count = 0
-
-    for track_id, conflicts in duplicates_found.items():
-        track = track_map[track_id]
-        # Group conflicts by jersey number using Counter for efficient counting
-        conflicting_jerseys = Counter(jersey_num for _, _, jersey_num in conflicts)
-
-        # For each conflicting jersey, find alternatives
-        team = track.get("team", "")
-        if not team or team in ["ball", "referee", "unsure"]:
-            continue
-
-        jersey_conf = track.get("jersey_conf", 0.0)
-        track_frames = set(track.get("frames", []))
-
-        # Find available alternative jersey numbers
-        available_alternatives = set()
-
-        for jersey_num, _ in conflicting_jerseys.items():
-            # Get pre-computed similar jersey numbers
-            team_key = "home" if "home" in team else "away"
-            similar_jerseys = similar_jersey_cache.get(team_key, {}).get(jersey_num, [])
-
-            for similar in similar_jerseys:
-                # Check if this similar jersey number is used by anyone in the same frames
-                is_used = False
-
-                # Only check frames where this track appears
-                for frame in track_frames:
-                    if (team, similar) in frame_team_jersey_usage.get(
-                        frame, {}
-                    ) and track_id not in frame_team_jersey_usage[frame][(team, similar)]:
-                        is_used = True
-                        break
-
-                if not is_used:
-                    available_alternatives.add(similar)
-
-        if available_alternatives:
-            # Update the track with alternatives
-            track["jersey_num"] = list(available_alternatives)  # Convert set to list
-            track["jersey_conf"] = jersey_conf  # Keep same confidence
-            resolved_count += 1
-        else:
-            # No alternatives found, mark as unsure
-            track["jersey_num"] = "unsure"
-            track["jersey_conf"] = 0.0
-            resolved_count += 1
-
-    # Write updated tracks to output file
-    with open(output_path, "w") as out_f:
-        for track in tracks:
-            out_f.write(json.dumps(track) + "\n")
-
-    print(f"✅ Resolved {resolved_count} duplicate jersey numbers. Results saved to {output_path}")
 
 
 def get_jersey_num_confidence(track, frame_idx=None):
@@ -630,6 +455,7 @@ def allocate_jersey_numbers_by_confidence(
         if team in ["ball", "referee", "unsure"]:
             track["allocated_jersey"] = "NA" if team == "referee" else "unsure"
             track["allocated_conf"] = 0.0
+            track["allocated_count"] = 0
             continue
 
         # Determine team key
@@ -637,15 +463,18 @@ def allocate_jersey_numbers_by_confidence(
         if team_key is None:
             track["allocated_jersey"] = "unsure"
             track["allocated_conf"] = 0.0
+            track["allocated_count"] = 0
             continue
 
         jersey_nums = track.get("jersey_num", "unsure")
         jersey_confs = track.get("jersey_conf", 0.0)
+        jersey_counts = track.get("count", 1)  # Get counts
 
         # Handle unsure cases
         if jersey_nums == "unsure" or not jersey_nums:
             track["allocated_jersey"] = "unsure"
             track["allocated_conf"] = 0.0
+            track["allocated_count"] = 0
             continue
 
         # Normalize to lists
@@ -653,22 +482,30 @@ def allocate_jersey_numbers_by_confidence(
             jersey_nums = [jersey_nums]
         if not isinstance(jersey_confs, list):
             jersey_confs = [jersey_confs]
+        if not isinstance(jersey_counts, list):
+            jersey_counts = [jersey_counts]
 
-        # Sort by confidence (descending)
-        jersey_conf_pairs = sorted(zip(jersey_nums, jersey_confs), key=lambda x: x[1], reverse=True)
+        # ✅ Sort by count (descending), then by confidence (descending)
+        jersey_data = sorted(
+            zip(jersey_nums, jersey_confs, jersey_counts),
+            key=lambda x: (x[2], x[1]),  # Sort by count first, then confidence
+            reverse=True
+        )
 
         # Find first valid jersey number
         allocated = False
-        for jersey_num, conf in jersey_conf_pairs:
+        for jersey_num, conf, count in jersey_data:
             if jersey_num in valid_jerseys[team_key]:
                 track["allocated_jersey"] = jersey_num
                 track["allocated_conf"] = conf
+                track["allocated_count"] = count  # Store count for reference
                 allocated = True
                 break
 
         if not allocated:
             track["allocated_jersey"] = "unsure"
             track["allocated_conf"] = 0.0
+            track["allocated_count"] = 0
 
     print("✅ Initial allocation complete. Resolving conflicts...")
 
@@ -729,10 +566,13 @@ def allocate_jersey_numbers_by_confidence(
         if len(same_jersey_tracks) <= 1:
             continue
 
-        # Sort by confidence
-        same_jersey_tracks.sort(key=lambda t: t.get("allocated_conf", 0.0), reverse=True)
+        # ✅ Sort by count (descending), then by confidence
+        same_jersey_tracks.sort(
+            key=lambda t: (t.get("allocated_count", 0), t.get("allocated_conf", 0.0)),
+            reverse=True
+        )
 
-        # Keep highest confidence track, reassign others
+        # Keep highest count track, reassign others
         winner = same_jersey_tracks[0]
 
         for loser_track in same_jersey_tracks[1:]:
@@ -745,19 +585,24 @@ def allocate_jersey_numbers_by_confidence(
 
             jersey_nums = loser_track.get("jersey_num", [])
             jersey_confs = loser_track.get("jersey_conf", [])
+            jersey_counts = loser_track.get("count", [])
 
             if not isinstance(jersey_nums, list):
                 jersey_nums = [jersey_nums]
             if not isinstance(jersey_confs, list):
                 jersey_confs = [jersey_confs]
+            if not isinstance(jersey_counts, list):
+                jersey_counts = [jersey_counts]
 
-            # Sort by confidence and find alternative
-            jersey_conf_pairs = sorted(
-                zip(jersey_nums, jersey_confs), key=lambda x: x[1], reverse=True
+            # Sort by count (descending), then by confidence (descending)
+            jersey_data = sorted(
+                zip(jersey_nums, jersey_confs, jersey_counts),
+                key=lambda x: (x[2], x[1]),
+                reverse=True
             )
 
             reallocated = False
-            for jersey_num, conf in jersey_conf_pairs:
+            for jersey_num, conf, count in jersey_data:
                 if jersey_num == loser_track.get("allocated_jersey"):
                     continue  # Skip the conflicting one
 
@@ -778,6 +623,7 @@ def allocate_jersey_numbers_by_confidence(
                     if not has_conflict:
                         loser_track["allocated_jersey"] = jersey_num
                         loser_track["allocated_conf"] = conf
+                        loser_track["allocated_count"] = count
                         reallocated = True
                         resolved_count += 1
                         break
@@ -785,6 +631,7 @@ def allocate_jersey_numbers_by_confidence(
             if not reallocated:
                 loser_track["allocated_jersey"] = "unsure"
                 loser_track["allocated_conf"] = 0.0
+                loser_track["allocated_count"] = 0
                 resolved_count += 1
 
     print(f"✅ Resolved {resolved_count} conflicts")
@@ -826,6 +673,490 @@ def allocate_jersey_numbers_by_confidence(
 
     for jersey, count in sorted(allocated_counts.items(), key=sort_key):
         print(f"   Jersey {jersey}: {count} tracks")
+
+
+def calculate_track_similarity(
+    t1: Dict,
+    t2: Dict,
+    spatial_threshold: float = 30.0,
+    direction_threshold: float = 60.0,
+    min_overlap_ratio: float = 0.3,
+) -> Tuple[Union[float, None], Dict]:
+    """
+    Calculate similarity score between two tracks for merging.
+    
+    Returns:
+        Tuple of (similarity_score, metadata) or (None, metadata) if not suitable
+        Lower score = more similar
+    """
+    from tools.player_motion_classification import calculate_angle
+    
+    # Check temporal overlap
+    frames1 = set(t1.get("frames", []))
+    frames2 = set(t2.get("frames", []))
+    overlap = frames1 & frames2
+    
+    overlap_ratio = len(overlap) / min(len(frames1), len(frames2)) if frames1 and frames2 else 0
+    
+    metadata = {
+        "overlap_count": len(overlap),
+        "overlap_ratio": overlap_ratio,
+    }
+    
+    if overlap_ratio < min_overlap_ratio:
+        metadata["reason"] = f"overlap_ratio {overlap_ratio:.2%} < {min_overlap_ratio:.2%}"
+        return None, metadata
+    
+    # Calculate median distance in overlapping frames
+    distances = []
+    directions_similar = 0
+    total_directions = 0
+    
+    overlapping_frames = sorted(overlap)[:150]  # Sample max 150 frames
+    
+    for i, frame in enumerate(overlapping_frames):
+        try:
+            idx1 = t1["frames"].index(frame)
+            idx2 = t2["frames"].index(frame)
+            pos1 = np.array(t1["projected"][idx1])
+            pos2 = np.array(t2["projected"][idx2])
+            
+            dist = np.linalg.norm(pos1 - pos2)
+            distances.append(dist)
+            
+            # Check direction similarity (using next frame)
+            if i < len(overlapping_frames) - 1:
+                next_frame = overlapping_frames[i + 1]
+                if next_frame in t1["frames"] and next_frame in t2["frames"]:
+                    next_idx1 = t1["frames"].index(next_frame)
+                    next_idx2 = t2["frames"].index(next_frame)
+                    
+                    next_pos1 = np.array(t1["projected"][next_idx1])
+                    next_pos2 = np.array(t2["projected"][next_idx2])
+                    
+                    vec1 = next_pos1 - pos1
+                    vec2 = next_pos2 - pos2
+                    
+                    if np.linalg.norm(vec1) > 1e-3 and np.linalg.norm(vec2) > 1e-3:
+                        angle = calculate_angle(vec1, vec2)
+                        total_directions += 1
+                        if angle < direction_threshold:
+                            directions_similar += 1
+                        
+        except (ValueError, IndexError):
+            continue
+    
+    if not distances:
+        metadata["reason"] = "no_valid_comparisons"
+        return None, metadata
+    
+    median_distance = np.median(distances)
+    direction_consistency = directions_similar / total_directions if total_directions > 0 else 0
+    
+    metadata.update({
+        "median_distance": median_distance,
+        "mean_distance": np.mean(distances),
+        "std_distance": np.std(distances),
+        "direction_consistency": direction_consistency,
+        "directions_compared": total_directions,
+    })
+    
+    # Reject if too far apart
+    if median_distance > spatial_threshold:
+        metadata["reason"] = f"median_distance {median_distance:.1f} > {spatial_threshold}"
+        return None, metadata
+    
+    # Reject if directions don't match
+    if direction_consistency < 0.5:
+        metadata["reason"] = f"direction_consistency {direction_consistency:.2%} < 50%"
+        return None, metadata
+    
+    # Composite score (lower is better)
+    score = median_distance * 2.0 + (1.0 - direction_consistency) * 50.0
+    
+    return score, metadata
+
+
+def merge_two_tracks(t1: Dict, t2: Dict) -> Dict:
+    """
+    Merge two tracks into one by combining their data.
+    Uses weighted average for overlapping frames.
+    """
+    
+    # Combine all frames
+    all_frames = sorted(set(t1.get("frames", [])) | set(t2.get("frames", [])))
+    
+    merged_frames = []
+    merged_projected = []
+    merged_bbox_area = []
+    
+    for frame in all_frames:
+        # Check which tracks have this frame
+        in_t1 = frame in t1.get("frames", [])
+        in_t2 = frame in t2.get("frames", [])
+        
+        if in_t1 and in_t2:
+            # Both tracks have this frame - use weighted average
+            idx1 = t1["frames"].index(frame)
+            idx2 = t2["frames"].index(frame)
+            
+            pos1 = np.array(t1["projected"][idx1])
+            pos2 = np.array(t2["projected"][idx2])
+            
+            area1 = t1.get("bbox_area", [1])[idx1] if idx1 < len(t1.get("bbox_area", [])) else 1
+            area2 = t2.get("bbox_area", [1])[idx2] if idx2 < len(t2.get("bbox_area", [])) else 1
+            
+            # Weighted average by bbox area
+            total_area = area1 + area2
+            if total_area > 0:
+                merged_pos = (pos1 * area1 + pos2 * area2) / total_area
+                merged_area = (area1 + area2) / 2
+            else:
+                merged_pos = (pos1 + pos2) / 2
+                merged_area = 1
+                
+        elif in_t1:
+            idx1 = t1["frames"].index(frame)
+            merged_pos = np.array(t1["projected"][idx1])
+            merged_area = t1.get("bbox_area", [1])[idx1] if idx1 < len(t1.get("bbox_area", [])) else 1
+        else:  # in_t2
+            idx2 = t2["frames"].index(frame)
+            merged_pos = np.array(t2["projected"][idx2])
+            merged_area = t2.get("bbox_area", [1])[idx2] if idx2 < len(t2.get("bbox_area", [])) else 1
+        
+        merged_frames.append(frame)
+        merged_projected.append(merged_pos.tolist())
+        merged_bbox_area.append(merged_area)
+    
+    # Merge metadata using majority vote or averaging
+    team1 = t1.get("team", "unsure")
+    team2 = t2.get("team", "unsure")
+    merged_team = team1 if team1 == team2 else "unsure"
+    
+    conf1 = t1.get("team_conf", 0.5)
+    conf2 = t2.get("team_conf", 0.5)
+    merged_conf = (conf1 + conf2) / 2
+    
+    # ===== JERSEY NUMBER MERGING =====
+    # Normalize to lists
+    jersey1 = t1.get("jersey_num", "unsure")
+    jersey2 = t2.get("jersey_num", "unsure")
+    
+    if not isinstance(jersey1, list):
+        jersey1 = [jersey1] if jersey1 != "unsure" else []
+    if not isinstance(jersey2, list):
+        jersey2 = [jersey2] if jersey2 != "unsure" else []
+    
+    # Get confidences (normalize to lists)
+    conf1_list = t1.get("jersey_conf", 0.5)
+    conf2_list = t2.get("jersey_conf", 0.5)
+    
+    if not isinstance(conf1_list, list):
+        conf1_list = [conf1_list] * len(jersey1) if jersey1 else []
+    if not isinstance(conf2_list, list):
+        conf2_list = [conf2_list] * len(jersey2) if jersey2 else []
+    
+    # Get counts (normalize to lists)
+    count1_list = t1.get("count", 1)
+    count2_list = t2.get("count", 1)
+    
+    if not isinstance(count1_list, list):
+        count1_list = [count1_list] * len(jersey1) if jersey1 else []
+    if not isinstance(count2_list, list):
+        count2_list = [count2_list] * len(jersey2) if jersey2 else []
+    
+    # Combine all jersey data
+    all_jerseys = jersey1 + jersey2
+    all_confs = conf1_list + conf2_list
+    all_counts = count1_list + count2_list
+    
+    if not all_jerseys:
+        # No valid jersey numbers
+        merged_jersey = "unsure"
+        merged_jersey_conf = 0.5
+        merged_jersey_count = 0
+    else:
+        # Group by jersey number and sum counts
+        jersey_data = defaultdict(lambda: {"confs": [], "counts": []})
+        
+        for jersey, conf, count in zip(all_jerseys, all_confs, all_counts):
+            if jersey != "unsure":
+                jersey_data[jersey]["confs"].append(conf)
+                jersey_data[jersey]["counts"].append(count)
+        
+        if not jersey_data:
+            # Only "unsure" jerseys
+            merged_jersey = "unsure"
+            merged_jersey_conf = 0.5
+            merged_jersey_count = 0
+        else:
+            # Calculate metrics for each jersey
+            jersey_results = []
+            for jersey_num, data in jersey_data.items():
+                avg_conf = np.mean(data["confs"])
+                total_count = sum(data["counts"])
+                jersey_results.append((jersey_num, avg_conf, total_count))
+            
+            # Sort by total count (primary), then confidence (secondary)
+            jersey_results.sort(key=lambda x: (x[2], x[1]), reverse=True)
+            
+            # Separate into three lists
+            merged_jersey = [jersey for jersey, _, _ in jersey_results]
+            merged_jersey_conf = [conf for _, conf, _ in jersey_results]
+            merged_jersey_count = [count for _, _, count in jersey_results]
+            
+            # If only one jersey, convert back to scalar
+            if len(merged_jersey) == 1:
+                merged_jersey = merged_jersey[0]
+                merged_jersey_conf = merged_jersey_conf[0]
+                merged_jersey_count = merged_jersey_count[0]
+    
+    return {
+        "team": merged_team,
+        "jersey_num": merged_jersey,
+        "jersey_conf": merged_jersey_conf,
+        "count": merged_jersey_count,
+        "team_conf": merged_conf,
+        "frame_range": [min(merged_frames), max(merged_frames)],
+        "frames": merged_frames,
+        "projected": merged_projected,
+        "bbox_area": merged_bbox_area,
+        "is_merged": True,
+    }
+
+
+def merge_tracks_by_team_size_violations(
+    jsonl_path: str,
+    output_path: str,
+    field_size: Tuple[int, int],
+    max_team_size: int = 10,
+    max_goalkeeper: int = 1,
+    spatial_threshold: float = 30.0,
+    min_overlap_ratio: float = 0.3,
+    direction_threshold: float = 60.0,
+    verbose: bool = True,
+) -> Dict[str, int]:
+    """
+    Merge tracks based on team size violations by finding similar tracks
+    that appear together in violation windows.
+    
+    This function:
+    1. Detects frames where team sizes exceed limits (>10 players or >1 goalkeeper)
+    2. Identifies tracks that appear together during violations
+    3. Merges similar tracks based on spatial proximity and movement direction
+    4. Treats home/homegoalkeeper and away/awaygoalkeeper separately
+    
+    Args:
+        jsonl_path: Input JSONL path with tracks
+        output_path: Output path for merged tracks
+        field_size: Field dimensions (length, width) in 0.1m units
+        max_team_size: Maximum allowed team size (default: 10)
+        max_goalkeeper: Maximum allowed goalkeepers (default: 1)
+        spatial_threshold: Max distance to consider tracks as mergeable (units)
+        min_overlap_ratio: Min overlap ratio to consider merging
+        direction_threshold: Max angle difference for direction similarity (degrees)
+        verbose: Print progress
+        
+    Returns:
+        Dict with merge statistics
+    """
+    
+    if verbose:
+        print("=" * 60)
+        print("MERGING TRACKS BY TEAM SIZE VIOLATIONS")
+        print("=" * 60)
+    
+    # Step 1: Detect violations
+    violations_path = jsonl_path.replace(".jsonl", "_violations_temp.jsonl")
+    detect_team_size_violations_streaming(
+        jsonl_path=jsonl_path,
+        save_path=violations_path,
+        max_team_size=max_team_size,
+        allowed_goalkeepers=max_goalkeeper,
+        allowed_referees=1,
+    )
+    
+    # Step 2: Merge violation windows
+    merged_windows = merge_violation_windows_with_track_counts(
+        jsonl_path=violations_path,
+        min_gap=3,
+    )
+    
+    if verbose:
+        print(f"\n📊 Found violations for teams:")
+        for team, windows in merged_windows.items():
+            total_frames = sum(w["range"][1] - w["range"][0] + 1 for w in windows)
+            print(f"  {team}: {len(windows)} windows ({total_frames} frames)")
+    
+    # Step 3: Load all tracks
+    tracks = []
+    with open(jsonl_path, 'r') as f:
+        for line in f:
+            if line.strip():
+                tracks.append(json.loads(line))
+    
+    track_map = {t["track_id"]: t for t in tracks}
+    
+    # Step 4: Process each team's violations
+    merge_candidates = []  # List of (track1_id, track2_id, similarity_score, metadata)
+    
+    for team, windows in merged_windows.items():
+        if verbose:
+            print(f"\n🔍 Processing violations for {team}...")
+        
+        # Separate home/homegoalkeeper, away/awaygoalkeeper
+        if team.endswith("goalkeeper"):
+            base_team = team.replace("goalkeeper", "").strip()
+            max_allowed = max_goalkeeper
+        elif team == "referee":
+            continue  # Skip referee
+        else:
+            base_team = team
+            max_allowed = max_team_size
+        
+        for window in windows:
+            win_start, win_end = window["range"]
+            violating_track_ids = window["track_ids"]
+            excess_count = window["count"] - max_allowed
+            
+            if excess_count <= 0:
+                continue
+            
+            # Get tracks involved in this violation
+            violation_tracks = []
+            for tid in violating_track_ids:
+                if tid not in track_map:
+                    continue
+                t = track_map[tid]
+                
+                # Check if track's team matches exactly
+                track_team = t.get("team", "")
+                if track_team != team:
+                    continue
+                
+                # Check temporal overlap with violation window
+                track_frames = set(t.get("frames", []))
+                window_frames = set(range(win_start, win_end + 1))
+                overlap = track_frames & window_frames
+                
+                if not overlap:
+                    continue
+                
+                overlap_ratio = len(overlap) / len(track_frames)
+                if overlap_ratio < 0.1:  # Skip tracks with minimal overlap
+                    continue
+                
+                violation_tracks.append(t)
+            
+            if len(violation_tracks) < 2:
+                continue
+            
+            if verbose:
+                print(f"  Window {win_start}-{win_end}: {len(violation_tracks)} tracks, "
+                      f"excess: {excess_count}")
+            
+            # Step 5: Find merge candidates by comparing tracks pairwise
+            for i in range(len(violation_tracks)):
+                for j in range(i + 1, len(violation_tracks)):
+                    t1, t2 = violation_tracks[i], violation_tracks[j]
+                    
+                    # Calculate similarity
+                    similarity, metadata = calculate_track_similarity(
+                        t1, t2,
+                        spatial_threshold=spatial_threshold,
+                        direction_threshold=direction_threshold,
+                        min_overlap_ratio=min_overlap_ratio,
+                    )
+                    
+                    if similarity is not None:
+                        merge_candidates.append((
+                            t1["track_id"],
+                            t2["track_id"],
+                            similarity,
+                            metadata
+                        ))
+    
+    if verbose:
+        print(f"\n✅ Found {len(merge_candidates)} merge candidates")
+    
+    # Step 6: Sort candidates by similarity (lower is better)
+    merge_candidates.sort(key=lambda x: x[2])
+    
+    if verbose and merge_candidates:
+        print(f"\n🏆 Top 5 merge candidates:")
+        for tid1, tid2, score, meta in merge_candidates[:5]:
+            print(f"  {tid1} <-> {tid2}: score={score:.2f} "
+                  f"(dist={meta['median_distance']:.1f}, "
+                  f"overlap={meta['overlap_count']})")
+    
+    # Step 7: Greedy merging
+    merged_tracks = {}
+    merged_ids = set()
+    track_to_merged = {}  # original_id -> merged_id
+    
+    for tid1, tid2, score, metadata in merge_candidates:
+        # Skip if either track already merged
+        if tid1 in merged_ids or tid2 in merged_ids:
+            continue
+        
+        # Get tracks
+        t1 = track_map[tid1]
+        t2 = track_map[tid2]
+        
+        # Merge tracks
+        merged_track = merge_two_tracks(t1, t2)
+        merged_id = f"{len(merged_tracks) + 1}_merged"
+        merged_track["track_id"] = merged_id
+        merged_track["source_tracks"] = [tid1, tid2]
+        merged_track["merge_score"] = score
+        merged_track["merge_metadata"] = metadata
+        
+        merged_tracks[merged_id] = merged_track
+        merged_ids.update([tid1, tid2])
+        track_to_merged[tid1] = merged_id
+        track_to_merged[tid2] = merged_id
+        
+        if verbose:
+            print(f"  ✓ Merged {tid1} + {tid2} -> {merged_id}")
+    
+    # Step 8: Add unmerged tracks
+    final_tracks = list(merged_tracks.values())
+    for track in tracks:
+        tid = track["track_id"]
+        if tid not in merged_ids:
+            final_tracks.append(track)
+    
+    # Step 9: Save output
+    with open(output_path, 'w') as f:
+        for track in final_tracks:
+            f.write(json.dumps(track) + '\n')
+    
+    # Clean up temp file
+    if os.path.exists(violations_path):
+        os.remove(violations_path)
+    
+    stats = {
+        "total_input_tracks": len(tracks),
+        "merge_candidates_found": len(merge_candidates),
+        "tracks_merged": len(merged_ids),
+        "merged_groups": len(merged_tracks),
+        "final_track_count": len(final_tracks),
+        "reduction": len(tracks) - len(final_tracks),
+    }
+    
+    if verbose:
+        print("\n" + "=" * 60)
+        print("MERGE STATISTICS")
+        print("=" * 60)
+        print(f"Input tracks: {stats['total_input_tracks']}")
+        print(f"Merge candidates: {stats['merge_candidates_found']}")
+        print(f"Tracks merged: {stats['tracks_merged']}")
+        print(f"Merged groups created: {stats['merged_groups']}")
+        print(f"Final track count: {stats['final_track_count']}")
+        print(f"Reduction: {stats['reduction']} tracks")
+        print("=" * 60)
+    
+    return stats
 
 
 def prepare_background_and_tracks(
@@ -886,6 +1217,22 @@ def prepare_background_and_tracks(
     end_relabel = time.time()
     print(f"✅ Relabeled {relabel_count} tracks in {end_relabel - end_merged:.2f} seconds")
 
+    # # Merge tracks based on team size violations
+    # start_merge_violations = time.time()
+    # merge_stats = merge_tracks_by_team_size_violations(
+    #     jsonl_path=json_path,
+    #     output_path=json_path.replace(".jsonl", "_merged_violations.jsonl"),
+    #     field_size=field_size,
+    #     max_team_size=10,
+    #     max_goalkeeper=1,
+    #     spatial_threshold=30.0,
+    #     min_overlap_ratio=0.3,
+    #     direction_threshold=60.0,
+    #     verbose=True,
+    # )
+    # end_merge_violations = time.time()
+    # print(f"✅ Merged tracks by violations in {end_merge_violations - start_merge_violations:.2f} seconds")
+
     process_jsonl_detect_replace(
         input_path=json_path.replace(".jsonl", "_relabeled.jsonl"),
         output_path=json_path.replace(".jsonl", "_smoothed.jsonl"),
@@ -900,18 +1247,13 @@ def prepare_background_and_tracks(
 
     allocate_jersey_numbers_by_confidence(
         jsonl_path=json_path.replace(".jsonl", "_smoothed_again.jsonl"),
-        output_path=json_path.replace(".jsonl", "_final_1215.jsonl"),
+        output_path=json_path.replace(".jsonl", "_final.jsonl"),
         home_jersey_numbers=home_jersey_numbers,
         away_jersey_numbers=away_jersey_numbers,
     )
     end_allocation = time.time()
     print(f"✅ Allocated jersey numbers in {end_allocation - end_relabel:.2f} seconds")
-    # resolve_duplicate_jersey_numbers(
-    #     jsonl_path=json_path.replace('.jsonl', '_smoothed_again.jsonl'),
-    #     output_path=json_path.replace('.jsonl', '_final.jsonl'),
-    #     home_jersey_numbers=home_jersey_numbers,
-    #     away_jersey_numbers=away_jersey_numbers,
-    # )
+
     return bg_img
 
 
@@ -930,15 +1272,10 @@ def process_merged_tracks(
     max_merge_distance,
     window_size,
     threshold,
-    output_name,
     fps=29.97,
     detector_firstpass_kwargs=None,
     detector_secondpass_kwargs=None,
 ):
-    if output_name is None:
-        output_name = os.path.splitext(os.path.basename(json_path))[0]
-
-    # output_path_video = f"{output_name}.mp4"
 
     start = time.time()
     # Shared logic
@@ -1040,12 +1377,6 @@ def parse_args():
         default=0.9,
         help="Threshold for velocity consistency",
     )
-    parser.add_argument(
-        "--output-name",
-        type=str,
-        required=True,
-        help="Base name of the output file (without extension)",
-    )
     return parser.parse_args()
 
 
@@ -1099,7 +1430,6 @@ def main():
         max_merge_distance=args.max_merge_distance,
         window_size=args.window_size,
         threshold=args.threshold,
-        output_name=args.output_name,
         detector_firstpass_kwargs=DETECTOR_FIRSTPASS,
         detector_secondpass_kwargs=DETECTOR_SECONDPASS,
     )
@@ -1112,9 +1442,8 @@ if __name__ == "__main__":
     main()
 
 # example usage:
-# python3 post-processing.py \
+# python3 player_track_identification.py \
 #  --json-path "./runs/detect/test_4k_player_640/team_tracking.jsonl" \
 #  --image-path "./data/images/mongkok_football_field.png" \
 #  --home-jersey-numbers 1 2 3 4 7 10 11 16 20 27 30 13 23 25 8 14 17 18 21 24 31 33 34 \
-#  --away-jersey-numbers 26 2 6 7 9 16 20 30 36 77 99 1 17 22 23 24 28 33 42 43 44 72 88 \
-#  --output-name './runs/detect/test_4k_player_640/team_tracking_output'
+#  --away-jersey-numbers 26 2 6 7 9 16 20 30 36 77 99 1 17 22 23 24 28 33 42 43 44 72 88

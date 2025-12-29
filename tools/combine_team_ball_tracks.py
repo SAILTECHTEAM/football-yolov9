@@ -1,4 +1,5 @@
-import json
+import os
+import argparse
 
 # Combine JSONL files of player and ball tracking
 def combine_jsonl_files_streaming(player_jsonl_path, ball_jsonl_path, output_path):
@@ -8,7 +9,8 @@ def combine_jsonl_files_streaming(player_jsonl_path, ball_jsonl_path, output_pat
     """
     count1 = 0
     count2 = 0
-    
+    # Create the directory for output if it doesn't exist
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w') as out_file:
         # Copy contents from player_jsonl
         with open(player_jsonl_path, 'r') as f1:
@@ -30,7 +32,6 @@ def combine_jsonl_files_streaming(player_jsonl_path, ball_jsonl_path, output_pat
     print(f"- {output_path}: {count1 + count2} records total")
 
 if __name__ == "__main__":
-    import argparse
 
     parser = argparse.ArgumentParser(description="Combine two JSONL files into one.")
     parser.add_argument("--player-jsonl", type=str, required=True, help="Path to the first JSONL file (e.g., player tracks).")

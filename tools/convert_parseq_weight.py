@@ -5,8 +5,10 @@ from collections import OrderedDict
 def strip_module_prefix(k: str) -> str:
     return k[7:] if k.startswith("module.") else k
 
+
 def add_model_prefix(k: str) -> str:
     return k if k.startswith("model.") else f"model.{k}"
+
 
 def convert_checkpoint(old_ckpt: str, new_ckpt: str):
     ckpt = torch.load(old_ckpt, map_location="cpu", weights_only=False)
@@ -29,11 +31,13 @@ def convert_checkpoint(old_ckpt: str, new_ckpt: str):
     ckpt["state_dict"] = fixed
     torch.save(ckpt, new_ckpt)
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert ParSeq checkpoint to have 'model.' prefix in state_dict keys")
     parser.add_argument("old_ckpt", type=str, help="Path to the old checkpoint file")
     parser.add_argument("new_ckpt", type=str, help="Path to save the converted checkpoint file")
     return parser.parse_args()
+
 
 if __name__ == "__main__":
     args = parse_args()

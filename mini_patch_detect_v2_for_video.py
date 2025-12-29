@@ -3,8 +3,6 @@ import os
 import string
 import sys
 from pathlib import Path
-from torchvision.ops import nms
-from types import SimpleNamespace
 import numpy as np
 import supervision as sv
 import torchvision.transforms as T
@@ -22,30 +20,15 @@ if str(ROOT) not in sys.path:
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 from models.common import DetectMultiBackend
-from utils.dataloaders import (
-    IMG_FORMATS,
-    VID_FORMATS,
-    LoadImages,
-    LoadScreenshots,
-    LoadStreams,
-)
+
 from utils.general import (
-    LOGGER,
     Profile,
-    check_file,
     check_img_size,
-    check_imshow,
-    check_requirements,
-    colorstr,
     cv2,
     increment_path,
     non_max_suppression,
     print_args,
-    scale_boxes,
-    strip_optimizer,
-    xyxy2xywh,
 )
-from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, smart_inference_mode
 from collections import defaultdict
 from numba import njit
@@ -55,21 +38,12 @@ from tools.extract_homography_matrix import (
 )
 from tools.identify_player_team import (
     extract_color_histogram_with_specific_background_color,
-    compare_histograms,
     match_histograms_to_teams,
     load_team_histograms_from_folder,
 )
 
 from strhub.data.module import SceneTextDataModule
 from strhub.models.utils import load_from_checkpoint
-
-
-def is_bbox_anomalous(curr_bbox, prev_bbox, height_thresh_ratio=0.5):
-    curr_h = curr_bbox[3] - curr_bbox[1]
-    prev_h = prev_bbox[3] - prev_bbox[1]
-    if prev_h <= 0:
-        return False
-    return curr_h < prev_h * height_thresh_ratio
 
 
 def crop_clothing_region(
@@ -170,161 +144,6 @@ def remove_boxes_with_numba(
     det_np = detections.cpu().numpy()
     keep_mask = _remove_enclosed_numba(det_np, area_ratio_thresh, containment_thresh)
     return detections[keep_mask]
-
-
-def remove_partially_enclosed_boxes_optimized(
-    detections, area_ratio_thresh=0.6, containment_thresh=0.9
-):
-    """
-    Optimized (but logically equivalent) version of remove_partially_enclosed_boxes_same_class.
-    Avoids repeated computation and skips unnecessary comparisons.
-    """
-    if len(detections) < 2:
-        return detections
-
-    keep = []
-    suppressed = set()
-
-    boxes = detections[:, :4]
-    confs = detections[:, 4]
-    classes = detections[:, 5].int()
-    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-
-    for i in range(len(detections)):
-        if i in suppressed:
-            continue
-        box_i = boxes[i]
-        cls_i = classes[i]
-        area_i = areas[i]
-
-        for j in range(i + 1, len(detections)):  # Only check forward to avoid duplicate pairs
-            if j in suppressed:
-                continue
-            if classes[j] != cls_i:
-                continue
-
-            box_j = boxes[j]
-            area_j = areas[j]
-
-            # Determine which is small and which is large
-            if area_i < area_j:
-                small_idx, large_idx = i, j
-                small_box, large_box = box_i, box_j
-                small_area, large_area = area_i, area_j
-            else:
-                small_idx, large_idx = j, i
-                small_box, large_box = box_j, box_i
-                small_area, large_area = area_j, area_i
-
-            # Compute intersection
-            xA = max(small_box[0], large_box[0])
-            yA = max(small_box[1], large_box[1])
-            xB = min(small_box[2], large_box[2])
-            yB = min(small_box[3], large_box[3])
-            inter_w = max(0, xB - xA)
-            inter_h = max(0, yB - yA)
-            inter_area = inter_w * inter_h
-
-            containment = inter_area / (small_area + 1e-6)
-            area_ratio = small_area / (large_area + 1e-6)
-
-            if containment >= containment_thresh and area_ratio <= area_ratio_thresh:
-                suppressed.add(small_idx)
-
-        if i not in suppressed:
-            keep.append(i)
-
-    return detections[keep]
-
-
-def remove_partially_enclosed_boxes_same_class(
-    detections, area_ratio_thresh=0.6, containment_thresh=0.9
-):
-    """
-    Remove boxes that are mostly enclosed by a significantly larger box of the same class.
-
-    Args:
-        detections: Tensor[N, 6] — [x1, y1, x2, y2, conf, cls]
-        area_ratio_thresh: suppress if small_area / large_area < this
-        containment_thresh: suppress if (intersection / small_area) > this
-
-    Returns:
-        Tensor[N', 6] — filtered detections
-    """
-    if len(detections) < 2:
-        return detections
-
-    keep = []
-    suppressed = set()
-
-    for i in range(len(detections)):
-        if i in suppressed:
-            continue
-
-        box_i = detections[i, :4]
-        cls_i = int(detections[i, 5])
-        area_i = (box_i[2] - box_i[0]) * (box_i[3] - box_i[1])
-
-        for j in range(len(detections)):
-            if i == j or j in suppressed:
-                continue
-
-            box_j = detections[j, :4]
-            cls_j = int(detections[j, 5])
-            area_j = (box_j[2] - box_j[0]) * (box_j[3] - box_j[1])
-
-            if cls_i != cls_j:
-                continue
-
-            # Determine which is small and which is large
-            if area_i < area_j:
-                small_idx, large_idx = i, j
-                small_box, large_box = box_i, box_j
-                small_area, large_area = area_i, area_j
-            else:
-                small_idx, large_idx = j, i
-                small_box, large_box = box_j, box_i
-                small_area, large_area = area_j, area_i
-
-            # Calculate intersection
-            xA = max(small_box[0], large_box[0])
-            yA = max(small_box[1], large_box[1])
-            xB = min(small_box[2], large_box[2])
-            yB = min(small_box[3], large_box[3])
-            inter_w = max(0, xB - xA)
-            inter_h = max(0, yB - yA)
-            inter_area = inter_w * inter_h
-
-            containment = inter_area / (small_area + 1e-6)
-            area_ratio = small_area / (large_area + 1e-6)
-
-            if containment >= containment_thresh and area_ratio <= area_ratio_thresh:
-                suppressed.add(small_idx)
-
-        if i not in suppressed:
-            keep.append(i)
-
-    return detections[keep]
-
-
-# Not used as this is done in sv.InferenceSlicer()
-def preprocess_images(images, device, fp16=False):
-    batch = []
-    for img in images:
-        if img is None or img.shape != (640, 640, 3):
-            print("⚠️ Invalid image detected:", img.shape if img is not None else None)
-            continue
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = torch.from_numpy(img).permute(2, 0, 1).float()  # [H, W, C] → [C, H, W]
-        img /= 255.0  # normalize to 0–1
-        batch.append(img)
-
-    if not batch:
-        print("❌ No valid patches to process!")
-        return None
-
-    batch = torch.stack(batch).to(device)
-    return batch.half() if fp16 else batch
 
 
 def draw_detections(image, detections, class_names, color=(0, 255, 0)):
@@ -536,7 +355,7 @@ def run(
 
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    # total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     output_path = str(
         Path(save_dir) / ("after_globalNMS_overlap_remove_annotated_" + Path(source).name)
     )
@@ -585,7 +404,7 @@ def run(
 
     video_frame_idx = 0  # original frame index (matches video)
     processed_frame_idx = 0  # game-time processed frame index
-    bs = 1  # batch_size
+    bs = 1  # batch_size, only 1 supported for slicing inference
 
     # Create slicer callback dynamically to access the model, for sv.InferenceSlicer()
     def slicer_callback(image_slice: np.ndarray):
@@ -751,7 +570,7 @@ def run(
             # Store all crop tensors and track info for matching
             crop_hists = []
             crop_track_ids = []
-            frame_crop_features = []
+
             jersey_numbers = []
             jersey_confs = []
 

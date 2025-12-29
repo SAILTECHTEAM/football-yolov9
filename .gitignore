@@ -3,7 +3,6 @@
 *.pyc
 *.pt
 *.mp4
-runs/*
 *.MOV
 *.npy
 *.png
@@ -11,7 +10,10 @@ runs/*
 *.jsonl
 *.docx
 *.npz
-weight/*
 *.ckpt
 *.dll
+__pycache__/
 data/video/*
+debug/*
+runs/*
+weights/*

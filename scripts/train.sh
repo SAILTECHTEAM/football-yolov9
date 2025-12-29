@@ -23,7 +23,7 @@ python train_dual.py \
   --name yolov9-s-ball-detection-1280 \
   --hyp hyp.scratch-high.yaml \
   --min-items 0 \
-  --epochs 500 \
+  --epochs 50 \
   --close-mosaic 15
 
 # # Inference with slicer

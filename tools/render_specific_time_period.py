@@ -28,7 +28,8 @@ def render_period_with_correct_timing(
         jsonl_path=jsonl_path,
         bg_img=bg_img,
         field_size=field_size,
-        output_dir=output_dir
+        output_dir=output_dir,
+        flip_vertically=True,
     )
     
     print("✅ Rendering complete!")
@@ -52,13 +53,13 @@ if __name__ == "__main__":
     # )
 
     render_period_with_correct_timing(
-        start_frame=0,
-        end_frame=1080,
-        jsonl_path="../runs/detect/test_4k_converted/team_ball_tracking_final.jsonl",
+        start_frame=5000,
+        end_frame=6000,
+        jsonl_path="../runs/detect/1224_testing/team_tracking_3in1_trimmed_removed_sharp_no_spatial_max10score_fused_final.jsonl",
         bg_img_path="../data/images/mongkok_football_field.png",
-        video_paths=['../data/video/period_57873_58952_cam0.mp4'],
-        game_time=[(0, 0, 0, 36)],  # (game_start, half_end, second_start, game_end) in seconds
-        output_dir='../runs/detect/test_4k_converted/period_0_1080/',
+        video_paths=['../data/video/whole_match/C0478.MP4', '../data/video/whole_match/C0475.MP4', '../data/video/whole_match/C0034.MP4','../data/video/whole_match/C0477.MP4'],
+        game_time=[(317, 3085, 3982, 6809), (450, 3218, 4115, 6942), (795, 3563, 4460, 7287), (872, 3640, 4537, 7364)],  # (game_start, half_end, second_start, game_end) in seconds
+        output_dir='../runs/detect/1224_testing/period_5000_6000_trimmed_removed_sharp_no_spatial_max10score/',
         field_size=(1060, 660),
     )
     

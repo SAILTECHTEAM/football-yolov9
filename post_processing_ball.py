@@ -1,34 +1,25 @@
-import csv
+import argparse
+import cv2
 import json
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from matplotlib import cm
-from collections import defaultdict, deque
-from scipy.signal import savgol_filter
-import cv2
 import os
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import time
-import ijson.backends.python as ijson_python
-from typing import List, Dict, Any, Tuple, Iterator, Union, Optional
-from heapq import nsmallest
-from tools.remove_track_sharp import process_jsonl_detect_replace
 
-import argparse
-
+from collections import defaultdict
+from typing import List, Dict, Tuple, Optional
 from scipy import interpolate
 from scipy.signal import find_peaks
-
+from tqdm import tqdm
+from filterpy.kalman import KalmanFilter
+from filterpy.common import Q_discrete_white_noise
+from scipy.linalg import expm
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.neighbors import kneighbors_graph, KDTree
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import RANSACRegressor
 
-from scipy.linalg import expm
-from filterpy.kalman import KalmanFilter
-from filterpy.common import Q_discrete_white_noise
-from tqdm import tqdm
+from tools.remove_track_sharp import process_jsonl_detect_replace
 
 
 # --- Ball tracking specific functions --#
@@ -177,175 +168,6 @@ def convert_ball_tracking_numpy_to_json(numpy_arr, output_file):
 
     # print(f"Converted ball positions from NumPy array to JSONL format")
     # print(f"Saved to {output_file}")
-
-
-def filter_multiple_detections(ball_xy, max_speed=150, static_threshold=5, window_size=5, fps=30):
-    """
-    Filter out false ball detections when multiple candidates exist in the same frame.
-
-    Parameters:
-    -----------
-    ball_xy : np.ndarray
-        Array with shape (n, 3) where each row is [frame_idx, x, y]
-    max_speed : float
-        Maximum plausible speed of the ball (pixels/frame)
-    static_threshold : float
-        Minimum movement required to not be considered static
-    window_size : int
-        Size of window to analyze for trajectory consistency
-    fps : int
-        Frames per second of the video (for speed calculations)
-
-    Returns:
-    --------
-    np.ndarray
-        Filtered ball_xy with only one detection per frame
-    """
-    # Group detections by frame
-    frame_to_detections = defaultdict(list)
-    for i in range(len(ball_xy)):
-        frame_id = int(ball_xy[i, 0])
-        frame_to_detections[frame_id].append((i, ball_xy[i, 1:]))
-
-    # Initialize Kalman filter for trajectory prediction
-    kf = KalmanFilter(dim_x=4, dim_z=2)  # State: [x, y, vx, vy], Measurement: [x, y]
-    dt = 1 / fps  # Time step based on fps
-
-    # State transition matrix (constant velocity model)
-    kf.F = np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]])
-
-    # Measurement matrix (we only observe position, not velocity)
-    kf.H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]])
-
-    # Initial state uncertainty
-    kf.P *= 100
-
-    # Measurement noise
-    kf.R = np.diag([50, 50])
-
-    # Process noise
-    kf.Q = np.eye(4) * 10
-
-    # Track frame-to-frame movement for each detection path
-    movements = defaultdict(list)
-
-    # Create a mask for points to keep
-    keep_indices = []
-    last_position = None
-
-    # Process frames in order
-    sorted_frames = sorted(frame_to_detections.keys())
-
-    # Initialize with the first frame
-    if sorted_frames:
-        first_frame = sorted_frames[0]
-        # If only one detection in first frame, use it
-        if len(frame_to_detections[first_frame]) == 1:
-            idx, pos = frame_to_detections[first_frame][0]
-            keep_indices.append(idx)
-            last_position = pos
-            # Initialize Kalman filter
-            kf.x = np.array([[pos[0]], [pos[1]], [0], [0]])
-        # If multiple detections, use the one closest to the center
-        else:
-            center = np.array(
-                [530, 330]
-            )  # Approximate field center based on size of field [1060, 660]
-            dists = [np.linalg.norm(pos - center) for _, pos in frame_to_detections[first_frame]]
-            best_idx = np.argmin(dists)
-            idx, pos = frame_to_detections[first_frame][best_idx]
-            keep_indices.append(idx)
-            last_position = pos
-            # Initialize Kalman filter
-            kf.x = np.array([[pos[0]], [pos[1]], [0], [0]])
-
-    # Process remaining frames
-    for i in range(1, len(sorted_frames)):
-        current_frame = sorted_frames[i]
-        last_frame = sorted_frames[i - 1]
-
-        dt = (current_frame - last_frame) / fps
-        # Update F matrix with actual dt
-        kf.F = np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]])
-
-        # In case of frame gaps, increase process noise
-        if dt > 1 / fps:
-            # Update process noise based on frame gap
-            kf.Q = np.eye(4) * 10 * min(1 + dt, 5)  # Cap the growth for very large gaps
-        else:
-            kf.Q = np.eye(4) * 10
-
-        detections = frame_to_detections[current_frame]
-
-        # If only one detection in this frame, easy case
-        if len(detections) == 1:
-            idx, pos = detections[0]
-
-            # Check if this is a plausible continuation
-            if last_position is not None:
-                distance = np.linalg.norm(pos - last_position)
-                if distance > max_speed:
-                    # Skip implausibly fast movements
-                    print(
-                        f"Skipping detection at frame {current_frame} due to high speed: {distance:.1f} pixels"
-                    )
-                    continue
-
-            keep_indices.append(idx)
-            last_position = pos
-
-            # Update Kalman filter
-            kf.predict()
-            kf.update(pos)
-
-        # If multiple detections, choose the most likely one
-        else:
-            # Predict next position using Kalman filter
-            kf.predict()
-            predicted_pos = kf.x[:2].flatten()
-
-            # Score each detection based on multiple criteria
-            scores = []
-            for idx, pos in detections:
-                # 1. Distance from predicted position
-                pred_distance = np.linalg.norm(pos - predicted_pos)
-
-                # 2. Check if this is a static detection point
-                static_score = 0
-                for prev_frame in range(max(0, current_frame - window_size), current_frame):
-                    if prev_frame in frame_to_detections:
-                        for _, prev_pos in frame_to_detections[prev_frame]:
-                            if np.linalg.norm(pos - prev_pos) < static_threshold:
-                                static_score += 1
-
-                # 3. Distance from previous position
-                if last_position is not None:
-                    prev_distance = np.linalg.norm(pos - last_position)
-                    # Heavily penalize positions too far from previous
-                    if prev_distance > max_speed:
-                        prev_distance_score = 1000  # Large penalty
-                    else:
-                        prev_distance_score = prev_distance
-                else:
-                    prev_distance_score = 0
-
-                # Combined score (lower is better)
-                score = pred_distance + (static_score * 50) + prev_distance_score
-                scores.append((idx, score))
-
-            # Choose detection with lowest score
-            scores.sort(key=lambda x: x[1])
-            best_idx, _ = scores[0]
-            best_pos = ball_xy[best_idx, 1:]
-
-            keep_indices.append(best_idx)
-            last_position = best_pos
-
-            # Update Kalman filter with chosen position
-            kf.update(best_pos)
-
-    # Return the filtered array
-    return ball_xy[keep_indices]
 
 
 def remove_detections_near_high_density_region(
@@ -705,7 +527,7 @@ def separate_ball_tracks(ball_xy, max_separate_distance=70, min_track_length=5):
 
 
 # Helper functions for track connection
-def track_to_dataframe(track: Dict) -> pd.DataFrame:
+def _track_to_dataframe(track: Dict) -> pd.DataFrame:
     """Convert a track to a pandas DataFrame with frame and position."""
     frames = track[:, 0].astype(int)
     positions = track[:, 1:3]
@@ -721,7 +543,7 @@ def track_to_dataframe(track: Dict) -> pd.DataFrame:
 
 
 # Helper functions for track connection
-def calculate_velocity(df: pd.DataFrame) -> pd.DataFrame:
+def _calculate_velocity(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate velocity (both magnitude and direction) between consecutive frames."""
     # Sort by frame to ensure correct velocity calculation
     df = df.sort_values("frame")
@@ -745,7 +567,7 @@ def calculate_velocity(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # Helper functions for track connection
-def is_ball_tracks_connectable(
+def _is_ball_tracks_connectable(
     track1: pd.DataFrame,
     track2: pd.DataFrame,
     max_frame_gap: int = 120,
@@ -824,7 +646,7 @@ def merge_ball_tracks(track1: pd.DataFrame, track2: pd.DataFrame) -> pd.DataFram
     merged_track = merged_track.sort_values("frame").reset_index(drop=True)
 
     # Recalculate velocities for the merged track
-    merged_track = calculate_velocity(merged_track)
+    merged_track = _calculate_velocity(merged_track)
 
     return merged_track
 
@@ -852,8 +674,8 @@ def connect_ball_tracks(
     # Convert tracks to DataFrames and calculate velocities
     track_dfs = []
     for track in tracks:
-        df = track_to_dataframe(track)
-        df = calculate_velocity(df)
+        df = _track_to_dataframe(track)
+        df = _calculate_velocity(df)
         track_dfs.append(df)
 
     # Sort tracks by their starting frame
@@ -869,7 +691,7 @@ def connect_ball_tracks(
 
         # Try to connect with any of the existing merged tracks
         for j in range(len(merged_tracks)):
-            if is_ball_tracks_connectable(
+            if _is_ball_tracks_connectable(
                 merged_tracks[j],
                 current_track,
                 max_frame_gap,
@@ -1186,7 +1008,7 @@ def merge_tracks_with_larger_gap(
             f.write(json.dumps(track_dict) + "\n")
 
 
-def remove_ball_false_detection(json_path, save_path, field_size=[1060, 660]):
+def remove_ball_false_detection(json_path, save_path):
     """
     Remove false ball detections using Agglomerative Clustering.
 
@@ -1242,93 +1064,6 @@ def remove_ball_false_detection(json_path, save_path, field_size=[1060, 660]):
 
     convert_ball_tracking_numpy_to_json(ball_xy_val, save_path)
     print(f"Done removing false detections.")
-
-
-def remove_static_clusters(
-    ball_xy, time_window=30, spatial_threshold=10, min_points=5, max_displacement=20
-):
-    """
-    Remove static clusters from ball tracking data.
-
-    Parameters:
-    -----------
-    filtered_ball_xy : np.ndarray
-        Array with shape (n, 3) where each row is [frame_idx, x, y]
-    time_window : int
-        Time window (in frames) to consider for static cluster detection
-    spatial_threshold : float
-        Maximum radius for points to be considered in the same spatial cluster
-    min_points : int
-        Minimum number of points required to form a static cluster
-    max_displacement : float
-        Maximum allowed displacement within a cluster to be considered "static"
-
-    Returns:
-    --------
-    np.ndarray
-        Filtered filtered_ball_xy array with static clusters removed
-    """
-    import numpy as np
-    from sklearn.cluster import DBSCAN
-
-    # Create a copy to avoid modifying the original
-    filtered_ball_xy = ball_xy.copy()
-
-    # Create a mask for points to keep
-    keep_mask = np.ones(len(filtered_ball_xy), dtype=bool)
-
-    # Get unique frame numbers
-    frame_nums = np.unique(filtered_ball_xy[:, 0])
-
-    # Process each time window
-    for start_frame in range(0, int(frame_nums[-1]), time_window // 2):  # Overlapping windows
-        end_frame = start_frame + time_window
-
-        # Get points in this time window
-        window_mask = (filtered_ball_xy[:, 0] >= start_frame) & (filtered_ball_xy[:, 0] < end_frame)
-        window_points = filtered_ball_xy[window_mask]
-
-        if len(window_points) < min_points:
-            continue
-
-        # Cluster based on spatial coordinates only
-        spatial_clustering = DBSCAN(eps=spatial_threshold, min_samples=min_points).fit(
-            window_points[:, 1:3]
-        )
-
-        # For each spatial cluster, check if it's static
-        for cluster_id in np.unique(spatial_clustering.labels_):
-            if cluster_id == -1:  # Skip noise points
-                continue
-
-            # Get points in this spatial cluster
-            cluster_mask = spatial_clustering.labels_ == cluster_id
-            cluster_points = window_points[cluster_mask]
-
-            # Check if this cluster is static (small displacement over time)
-            if len(cluster_points) >= min_points:
-                # Calculate the maximum displacement within the cluster
-                x_range = np.max(cluster_points[:, 1]) - np.min(cluster_points[:, 1])
-                y_range = np.max(cluster_points[:, 2]) - np.min(cluster_points[:, 2])
-                displacement = np.sqrt(x_range**2 + y_range**2)
-
-                # Calculate frame span
-                frame_span = np.max(cluster_points[:, 0]) - np.min(cluster_points[:, 0])
-
-                # If displacement is small and cluster spans significant time, it's likely static
-                if displacement < max_displacement and frame_span > min_points:
-                    # Find these points in the original array
-                    for point in cluster_points:
-                        # Find matching points in the original array
-                        matches = np.where(
-                            (filtered_ball_xy[:, 0] == point[0])
-                            & (filtered_ball_xy[:, 1] == point[1])
-                            & (filtered_ball_xy[:, 2] == point[2])
-                        )[0]
-                        keep_mask[matches] = False
-
-    # Return the filtered data
-    return filtered_ball_xy[keep_mask]
 
 
 def smoothen_fused_ball_tracking(json_path, save_path):
@@ -1411,7 +1146,7 @@ def smoothen_fused_ball_tracking(json_path, save_path):
 
             # ===== STEP 2: RANSAC segmentation =====
             # print("    🔍 Running RANSAC segmentation...")
-            all_ins, ins = process_trajectory_in_chunks(
+            all_ins, ins = extract_linear_segments(
                 smoothed_positions,
                 frames,
                 chunk_size=200,
@@ -1429,7 +1164,7 @@ def smoothen_fused_ball_tracking(json_path, save_path):
             # ===== STEP 3: Find peaks =====
             # print("    🔝 Finding acceleration peaks...")
             fs = 29.97  # frame rate
-            peaks, _ = find_peaks(acc_magnitude, distance=int(0.8 * fs), prominence=1)
+            peaks, _ = find_peaks(acc_magnitude, distance=int(0.8 * fs), prominence=2)
             peaks_frames = frames[peaks]
 
             peaks_in = []
@@ -1691,7 +1426,7 @@ class BallKalmanSmoother:
 
             # Calculate outlier thresholds
             deltas = np.abs(smoothed_positions - cleaned_measurements)
-            thresholds = 5 * np.median(deltas, axis=0)
+            thresholds = 3 * np.median(deltas, axis=0)
 
             # Check convergence
             if iteration > 0:
@@ -1826,11 +1561,11 @@ def apply_kalman_filtering_to_tracks(json_path, save_path):
     print(f"\n✅ Saved {len(all_processed_tracks)} processed tracks to {save_path}")
 
 
-def process_trajectory_in_chunks(
+def extract_linear_segments(
     traj,
     frames,
-    chunk_size=2000,
-    overlap=200,
+    chunk_size=200,
+    overlap=50,
     segment_threshold=8,
 ):
     """
@@ -1872,7 +1607,7 @@ def process_trajectory_in_chunks(
             continue
 
         # Process this chunk using your existing algorithm
-        chunk_segments = process_single_chunk(chunk_traj, chunk_frames, segment_threshold)
+        chunk_segments = _detect_lines_iteractively(chunk_traj, chunk_frames, segment_threshold)
 
         if len(chunk_segments) > 0:
             # Map segment frames back to original frame indices if needed
@@ -1887,10 +1622,9 @@ def process_trajectory_in_chunks(
         return np.array([]), []
 
 
-def process_single_chunk(traj_chunk, frames_chunk, segment_threshold=8):
+def _detect_lines_iteractively(traj_chunk, frames_chunk, segment_threshold=8):
     """
     Process a single chunk to find line segments.
-    This is your existing algorithm, adapted to work on a chunk.
     """
     chunk_segments = []
 
@@ -1914,7 +1648,7 @@ def process_single_chunk(traj_chunk, frames_chunk, segment_threshold=8):
 
         # Cluster inliers to find continuous segments
         clustering1 = AgglomerativeClustering(
-            n_clusters=None, linkage="single", distance_threshold=15
+            n_clusters=None, linkage="single", distance_threshold=30
         )
         clustering1.fit(frames_in_reg_1.reshape(-1, 1))
         labs1, n_in_labs1 = np.unique(clustering1.labels_, return_counts=True)
@@ -1930,7 +1664,7 @@ def process_single_chunk(traj_chunk, frames_chunk, segment_threshold=8):
 
         # Cluster these inliers
         clustering2 = AgglomerativeClustering(
-            n_clusters=None, linkage="single", distance_threshold=15
+            n_clusters=None, linkage="single", distance_threshold=30
         )
         clustering2.fit(frames_in_reg_2.reshape(-1, 1))
         labs2, n_in_labs2 = np.unique(clustering2.labels_, return_counts=True)
@@ -1957,9 +1691,9 @@ def process_single_chunk(traj_chunk, frames_chunk, segment_threshold=8):
         chunk_segments.append(new_seg)
 
         # Remove detected segment from the data
-        indexes = np.searchsorted(reg_frames, new_seg)
-        reg_frames = np.delete(reg_frames, indexes)
-        traj_reg = np.delete(traj_reg, indexes, axis=0)
+        mask = np.isin(reg_frames, new_seg, invert=True)
+        reg_frames = reg_frames[mask]
+        traj_reg = traj_reg[mask]
         i += 1
 
     return chunk_segments
@@ -2023,17 +1757,17 @@ def prepare_background_and_tracks(
         json_path.replace(".jsonl", "_fused.jsonl"),
     )
 
-    merge_tracks_with_larger_gap(
-        json_path.replace(".jsonl", "_fused.jsonl"),
-        json_path.replace(".jsonl", "_remerged.jsonl"),
-        max_frame_gap=500,
-        max_connect_distance=150.0,
-        max_velocity_change=60.0,
-        max_direction_change=np.pi / 1.5,
-    )
+    # merge_tracks_with_larger_gap(
+    #     json_path.replace(".jsonl", "_fused.jsonl"),
+    #     json_path.replace(".jsonl", "_remerged.jsonl"),
+    #     max_frame_gap=500,
+    #     max_connect_distance=150.0,
+    #     max_velocity_change=60.0,
+    #     max_direction_change=np.pi / 1.5,
+    # )
 
     apply_kalman_filtering_to_tracks(
-        json_path.replace(".jsonl", "_remerged.jsonl"),
+        json_path.replace(".jsonl", "_fused.jsonl"),
         json_path.replace(".jsonl", "_smoothed.jsonl"),
     )
 
@@ -2061,14 +1795,9 @@ def process_merged_tracks(
     max_merge_distance,
     window_size,
     threshold,
-    output_name,
     fps=29.97,
     detector_kwargs=None,
 ):
-    if output_name is None:
-        output_name = os.path.splitext(os.path.basename(json_path))[0]
-
-    # output_path_video = f"{output_name}.mp4"
 
     if detector_kwargs is None:
         detector_kwargs = dict(
@@ -2110,10 +1839,11 @@ def process_merged_tracks(
 def parse_args():
     parser = argparse.ArgumentParser(description="Process merged tracks from tracking JSONL")
     parser.add_argument(
-        "--json-path",
+        "--json-paths",
         type=str,
+        nargs="+",
         required=True,
-        help="Path to the merged tracking JSONL file",
+        help="Paths to the merged tracking JSONL files",
     )
     parser.add_argument("--image-path", type=str, required=True, help="Path to the field image")
     parser.add_argument(
@@ -2169,12 +1899,6 @@ def parse_args():
         default=0.9,
         help="Threshold for velocity consistency",
     )
-    parser.add_argument(
-        "--output-name",
-        type=str,
-        required=False,
-        help="Base name of the output file (without extension)",
-    )
     return parser.parse_args()
 
 
@@ -2197,22 +1921,23 @@ def main():
         max_gap_size=5,
     )
 
-    process_merged_tracks(
-        json_path=args.json_path,
-        image_path=args.image_path,
-        field_size=tuple(args.field_size),
-        min_track_length=args.min_track_length,
-        smoothing_window=args.smoothing_window,
-        polyorder=args.polyorder,
-        max_step=args.max_step,
-        max_merge_gap=args.max_merge_gap,
-        max_merge_overlap_frames=args.max_merge_overlap_frames,
-        max_merge_distance=args.max_merge_distance,
-        window_size=args.window_size,
-        threshold=args.threshold,
-        output_name=args.output_name,
-        detector_kwargs=BALL_DETECTOR,
-    )
+    for json_path in args.json_paths:
+        print(f"\n🔄 Processing file: {json_path}")
+        process_merged_tracks(
+            json_path=json_path,
+            image_path=args.image_path,
+            field_size=tuple(args.field_size),
+            min_track_length=args.min_track_length,
+            smoothing_window=args.smoothing_window,
+            polyorder=args.polyorder,
+            max_step=args.max_step,
+            max_merge_gap=args.max_merge_gap,
+            max_merge_overlap_frames=args.max_merge_overlap_frames,
+            max_merge_distance=args.max_merge_distance,
+            window_size=args.window_size,
+            threshold=args.threshold,
+            detector_kwargs=BALL_DETECTOR,
+        )
 
     end = time.time()
     print(f"Execution time: {end - start:.2f} seconds")
@@ -2222,4 +1947,4 @@ if __name__ == "__main__":
     main()
 
 # example usage:
-# python3 post-processing-ball.py --json-path "./runs/detect/test_4k-2h-crop/team_tracking.jsonl" --image-path "./data/images/mongkok_football_field.png" --output-name './runs/detect/test_4k-2h-crop/team_tracking_output'
+# python3 post-processing-ball.py --json-path "./runs/detect/test_4k-2h-crop/team_tracking.jsonl" --image-path "./data/images/mongkok_football_field.png"

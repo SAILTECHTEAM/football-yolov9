@@ -1,9 +1,11 @@
+import argparse
 import json
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from collections import defaultdict
 from scipy.spatial.distance import cdist
+from scipy.signal import correlate, medfilt
 
 from post_processing_ball import smoothen_fused_ball_tracking
 
@@ -277,7 +279,7 @@ def detect_outliers_at_frame(
         Boolean list indicating which positions are NOT outliers
     """
     if len(positions) <= 1:
-        return [True] * len(positions)
+        return [False] * len(positions)
 
     n = len(positions)
     positions_array = np.array(positions)
@@ -297,7 +299,7 @@ def detect_outliers_at_frame(
 
     # If too few inliers, keep all (no consensus)
     if sum(is_inlier) < min_inliers:
-        return [True] * len(positions)
+        return [False] * len(positions)
 
     return is_inlier
 
@@ -424,7 +426,6 @@ def estimate_coordinate_offset(
 
     # Only apply offset if it's significant and consistent
     offset_magnitude = np.linalg.norm(median_pos_diff)
-    print(offset_magnitude)
     if offset_magnitude < 5.0:  # Less than 5.0, ignore
         print("Offset magnitude too small, ignoring offset.")
         return np.array([0.0, 0.0]), 0.0
@@ -617,9 +618,6 @@ def estimate_frame_offset_pairwise(
         )
         return 0, 0.0
 
-    # Use FFT-based cross-correlation for efficiency
-    from scipy.signal import correlate
-
     # Create continuous signals over full range
     full_min = min(min_frame1, min_frame2) - max_search_offset
     full_max = max(max_frame1, max_frame2) + max_search_offset
@@ -800,7 +798,7 @@ def print_track_info(all_tracks_by_camera: List[List[Dict]], verbose: bool = Fal
 
 
 def fuse_ball_tracks(
-    jsonl_paths: List[str],
+    ball_jsonl_paths: List[str],
     output_path: str,
     max_gap_frames: int = 30,
     max_distance_threshold: float = 200.0,
@@ -815,7 +813,7 @@ def fuse_ball_tracks(
     Fuse ball tracks from multiple camera angles into a single continuous track.
 
     Args:
-        jsonl_paths: List of paths to JSONL files (one per camera)
+        ball_jsonl_paths: List of paths to JSONL files (one per camera)
         output_path: Path to save fused ball tracks
         max_gap_frames: Maximum gap in frames before starting a new track
         max_distance_threshold: Maximum distance for outlier detection (in 0.1m units)
@@ -827,11 +825,11 @@ def fuse_ball_tracks(
         verbose: Print progress information
     """
     if verbose:
-        print(f"🎾 Loading ball tracks from {len(jsonl_paths)} cameras...")
+        print(f"🎾 Loading ball tracks from {len(ball_jsonl_paths)} cameras...")
 
     # Load all ball tracks
     all_tracks_by_camera = []
-    for path in jsonl_paths:
+    for path in ball_jsonl_paths:
         tracks = load_ball_tracks_from_jsonl(path)
         all_tracks_by_camera.append(tracks)
         if verbose:
@@ -1160,7 +1158,6 @@ def smooth_tracks_median_filter(
     Apply median filter to smooth tracks without Kalman.
     Robust to outliers.
     """
-    from scipy.signal import medfilt
 
     smoothed_tracks = []
 
@@ -1195,12 +1192,10 @@ def smooth_tracks_median_filter(
 
 
 def main():
-    """Example usage"""
-    import argparse
 
     parser = argparse.ArgumentParser(description="Fuse ball tracks from multiple cameras")
     parser.add_argument(
-        "jsonl_paths", nargs="+", help="Paths to input JSONL files (one per camera)"
+        "--ball-jsonl-paths", nargs="+", help="Paths to input JSONL files (one per camera)"
     )
     parser.add_argument("--output", "-o", required=True, help="Path to output fused JSONL file")
     parser.add_argument(
@@ -1247,11 +1242,11 @@ def main():
 
     args = parser.parse_args()
 
-    if len(args.jsonl_paths) < 2:
+    if len(args.ball_jsonl_paths) < 2:
         print("⚠️ Warning: Fusion works best with 2+ camera angles")
 
     fuse_ball_tracks(
-        jsonl_paths=args.jsonl_paths,
+        ball_jsonl_paths=args.ball_jsonl_paths,
         output_path=args.output,
         max_gap_frames=args.max_gap,
         max_distance_threshold=args.max_distance,

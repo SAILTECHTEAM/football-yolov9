@@ -3,6 +3,7 @@ import argparse
 import numpy as np
 import cv2
 import ast
+import os
 
 
 def compute_homography(src_points, dst_points, method=cv2.RANSAC, ransac_thresh=5.0):
@@ -70,5 +71,6 @@ if __name__ == "__main__":
     H, mask = compute_homography(src_pts, dst_pts, method=cv2.RANSAC, ransac_thresh=args.ransac_thresh)
 
     print("Homography Matrix:\n", H)
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
     np.save(args.out, H)
     print(f"Saved matrix to {args.out}")

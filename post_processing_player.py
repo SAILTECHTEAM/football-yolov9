@@ -1,20 +1,16 @@
+import argparse
 import json
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib import cm
 from collections import defaultdict, deque
 from scipy.signal import savgol_filter
-from scipy.interpolate import UnivariateSpline
 import cv2
 import os
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-import time
-import ijson.backends.python as ijson_python
-from typing import Counter, List, Dict, Any, Tuple, Iterator, Union
-from heapq import nsmallest
-from tools.remove_track_sharp import process_jsonl_detect_replace
-import argparse
 
+import time
+from typing import Counter, List, Dict, Any, Tuple
+from heapq import nsmallest
+
+from tools.remove_track_sharp import process_jsonl_detect_replace
 
 def calculate_bbox_area(bboxes: List[List[float]]) -> List[float]:
     """
@@ -169,7 +165,10 @@ def interpolate_full_track(
     xs_interp = np.interp(all_frames, frames, points[:, 0])
     ys_interp = np.interp(all_frames, frames, points[:, 1])
     full_points = np.stack([xs_interp, ys_interp], axis=1)
-    areas_interp = np.interp(all_frames, frames, areas)
+    if areas is None or len(areas) == 0:
+        areas_interp = np.zeros_like(all_frames, dtype=float)
+    else:
+        areas_interp = np.interp(all_frames, frames, areas)
 
     return all_frames, full_points, areas_interp
 
@@ -260,23 +259,27 @@ def hybrid_merge_stream_fixed(
                 seg_jersey = seg.get("jersey_num", "unsure")
                 m_conf = m.get("jersey_conf", 0.0)
                 seg_conf = seg.get("jersey_conf", 0.0)
+                m_count = m.get("count", 0)
+                seg_count = seg.get("count", 0)
 
-                print(f"Merging jersey_num for track {tid}: {m_jersey} + {seg_jersey}")
+                # print(f"Merging jersey_num for track {tid}: {m_jersey} + {seg_jersey}")
 
                 # CASE 1: Referee team - always keep as "NA"
                 if team == "referee":
                     m["jersey_num"] = "NA"
                     m["jersey_conf"] = 0.0
+                    m["count"] = 0
 
                 # CASE 2: Either side is "unsure" - use the other side
                 elif m_jersey == "unsure" and seg_jersey != "unsure":
                     m["jersey_num"] = seg_jersey
                     m["jersey_conf"] = seg_conf
-                    print(f"  → Using seg jersey: {seg_jersey}")
+                    m["count"] = seg_count
+                    # print(f"  → Using seg jersey: {seg_jersey}")
 
                 elif seg_jersey == "unsure" and m_jersey != "unsure":
                     # Keep m's values (no change needed)
-                    print(f"  → Keeping m jersey: {m_jersey}")
+                    # print(f"  → Keeping m jersey: {m_jersey}")
                     pass
 
                 # CASE 3: Both have data - merge intelligently
@@ -288,42 +291,54 @@ def hybrid_merge_stream_fixed(
                     m_confs = m_conf if isinstance(m_conf, list) else [m_conf]
                     seg_confs = seg_conf if isinstance(seg_conf, list) else [seg_conf]
 
-                    # Create mapping: jersey_num -> list of confidences
-                    jersey_conf_map = defaultdict(list)
+                    m_counts = m_count if isinstance(m_count, list) else [m_count]
+                    seg_counts = seg_count if isinstance(seg_count, list) else [seg_count]
+                    # Create mapping: jersey_num -> {"confs": [...], "counts": [...]}
+                    jersey_data_map = defaultdict(lambda: {"confs": [], "counts": []})
                     
-                    for num, conf in zip(m_nums, m_confs):
-                        jersey_conf_map[num].append(conf)
+                    for num, conf, count in zip(m_nums, m_confs, m_counts):
+                        jersey_data_map[num]["confs"].append(conf)
+                        jersey_data_map[num]["counts"].append(count)
                     
-                    for num, conf in zip(seg_nums, seg_confs):
-                        jersey_conf_map[num].append(conf)
+                    for num, conf, count in zip(seg_nums, seg_confs, seg_counts):
+                        jersey_data_map[num]["confs"].append(conf)
+                        jersey_data_map[num]["counts"].append(count)
 
-                    # Average confidences for each jersey number
+                    # Average confidences and sum counts for each jersey number
                     merged_jerseys = []
                     merged_confs = []
+                    merged_counts = []
                     
-                    for jersey_num in sorted(jersey_conf_map.keys()):
-                        conf_list = jersey_conf_map[jersey_num]
+                    for jersey_num in sorted(jersey_data_map.keys()):
+                        conf_list = jersey_data_map[jersey_num]["confs"]
+                        count_list = jersey_data_map[jersey_num]["counts"]
+                        
                         avg_conf = sum(conf_list) / len(conf_list)
+                        total_count = sum(count_list)
+                        
                         merged_jerseys.append(jersey_num)
                         merged_confs.append(avg_conf)
+                        merged_counts.append(total_count)
 
-                    # Sort by confidence (descending)
-                    sorted_pairs = sorted(
-                        zip(merged_jerseys, merged_confs), 
-                        key=lambda x: x[1], 
+                    # Sort by count (descending), then by confidence (descending)
+                    sorted_triplets = sorted(
+                        zip(merged_jerseys, merged_confs, merged_counts), 
+                        key=lambda x: (x[2], x[1]),  # Sort by count first, then confidence
                         reverse=True
                     )
                     
-                    m["jersey_num"] = [num for num, _ in sorted_pairs]
-                    m["jersey_conf"] = [conf for _, conf in sorted_pairs]
+                    m["jersey_num"] = [num for num, _, _ in sorted_triplets]
+                    m["jersey_conf"] = [conf for _, conf, _ in sorted_triplets]
+                    m["count"] = [count for _, _, count in sorted_triplets]
                     
-                    print(f"  → Merged result: {m['jersey_num']} with confs {m['jersey_conf']}")
+                    # print(f"  → Merged result: {m['jersey_num']} with confs {m['jersey_conf']}")
 
                 # CASE 4: Both are "unsure"
                 else:
                     m["jersey_num"] = "unsure"
                     m["jersey_conf"] = 0.0
-                    print(f"  → Both unsure, keeping unsure")
+                    m["count"] = 0
+                    # print(f"  → Both unsure, keeping unsure")
 
                 # Update team confidence
                 m["team_conf_total"] += seg.get("team_conf", 0.0) * len(seg["frames"])
@@ -338,6 +353,7 @@ def hybrid_merge_stream_fixed(
                     "points": seg["points"],
                     "jersey_num": seg.get("jersey_num", []),
                     "jersey_conf": seg.get("jersey_conf", []),
+                    "count": seg.get("count", 0),
                     "bbox_area": seg.get("bbox_area", []),
                     "team_conf_total": seg.get("team_conf", 0.0) * len(seg["frames"]),
                     "team_conf_len": len(seg["frames"]),
@@ -366,6 +382,7 @@ def hybrid_merge_stream_fixed(
                     "team": m["team"],
                     "jersey_num": m["jersey_num"],
                     "jersey_conf": m["jersey_conf"],
+                    "count": m.get("count", 0),
                     "frame_range": [int(frames[0]), int(frames[-1])],
                     "frames": frames.tolist(),
                     "projected": points.tolist(),
@@ -400,6 +417,7 @@ def hybrid_merge_stream_fixed(
             "team": m["team"],
             "jersey_num": m["jersey_num"],
             "jersey_conf": m["jersey_conf"],
+            "count": m.get("count", 0),
             "frame_range": [int(frames[0]), int(frames[-1])],
             "frames": frames.tolist(),
             "projected": points.tolist(),
@@ -410,6 +428,284 @@ def hybrid_merge_stream_fixed(
 
     final_output.close()
     print(f"✅ Merged and saved to: {output_path}")
+
+
+def detect_endpoint_anomalies(positions, frames, 
+                              window_size=15,
+                              speed_threshold_factor=3.0,
+                              acceleration_threshold_factor=3.0,
+                              direction_change_threshold=60,
+                              check_start=True,
+                              check_end=True):
+    """
+    Detect anomalous movements at the start or end of a track.
+    """
+    positions = np.array(positions)
+    frames = np.array(frames)
+    n = len(positions)
+    
+    if n < window_size * 2:
+        return 0, n - 1
+    
+    # Compute velocities and speeds
+    dt = np.diff(frames)
+    dt[dt == 0] = 1
+    
+    velocities = np.diff(positions, axis=0) / dt[:, np.newaxis]
+    speeds = np.linalg.norm(velocities, axis=1)
+    
+    # Check for valid speeds    
+    if len(speeds) == 0:
+        return 0, n - 1
+    
+    # Compute accelerations
+    accelerations = np.diff(velocities, axis=0) / dt[:-1, np.newaxis]
+    acc_magnitudes = np.linalg.norm(accelerations, axis=1)
+    
+    # Compute global statistics (excluding endpoints)
+    mid_start = window_size
+    mid_end = n - window_size
+    
+    if mid_end <= mid_start:
+        mid_speeds = speeds
+        mid_accs = acc_magnitudes
+    else:
+        mid_speeds = speeds[mid_start:mid_end]
+        mid_accs = acc_magnitudes[mid_start:mid_end-1]
+
+    # ⭐ FIX: Check for empty mid_speeds and mid_accs before computing statistics
+    if len(mid_speeds) == 0:
+        # Use full speeds if mid section is empty
+        mid_speeds = speeds
+    if len(mid_accs) == 0:
+        # Use full accelerations if mid section is empty
+        mid_accs = acc_magnitudes
+    
+    # ⭐ FIX: Final check - if still empty, return no trimming
+    if len(mid_speeds) == 0:
+        return 0, n - 1
+    
+    mean_speed = np.mean(mid_speeds)
+    std_speed = np.std(mid_speeds)
+
+    # ⭐ FIX: Handle case where std_speed is 0 or NaN
+    if np.isnan(std_speed) or std_speed == 0:
+        std_speed = 1.0  # Default value to avoid division issues
+    
+    if len(mid_accs) > 0:
+        mean_acc = np.mean(mid_accs)
+        std_acc = np.std(mid_accs)
+        if np.isnan(std_acc) or std_acc == 0:
+            std_acc = 1.0
+    else:
+        mean_acc = 0.0
+        std_acc = 1.0
+    
+    speed_threshold = mean_speed + speed_threshold_factor * std_speed
+    acc_threshold = mean_acc + acceleration_threshold_factor * std_acc
+    
+    # Check start
+    start_trim_idx = 0
+    if check_start:
+        for i in range(min(window_size, len(speeds))):
+            if speeds[i] > speed_threshold:
+                start_trim_idx = i + 1
+                continue
+            
+            if i < len(acc_magnitudes) and acc_magnitudes[i] > acc_threshold:
+                start_trim_idx = i + 1
+                continue
+            
+            if i + 5 < len(velocities):
+                current_dir = velocities[i]
+                future_dir = velocities[i + 5]
+                
+                norm_current = np.linalg.norm(current_dir)
+                norm_future = np.linalg.norm(future_dir)
+                
+                # ⭐ FIX: Check for zero vectors
+                if norm_current > 1e-6 and norm_future > 1e-6:
+                    cos_angle = np.dot(current_dir, future_dir) / (norm_current * norm_future)
+                    cos_angle = np.clip(cos_angle, -1, 1)
+                    angle_deg = np.degrees(np.arccos(cos_angle))
+                    
+                    if angle_deg > direction_change_threshold:
+                        start_trim_idx = i + 1
+                        continue
+            
+            break
+    
+    # Check end
+    end_trim_idx = n - 1
+    if check_end:
+        for i in range(min(window_size, len(speeds))):
+            idx = len(speeds) - 1 - i
+            
+            if speeds[idx] > speed_threshold:
+                end_trim_idx = idx
+                continue
+            
+            if idx - 1 >= 0 and idx - 1 < len(acc_magnitudes):
+                if acc_magnitudes[idx - 1] > acc_threshold:
+                    end_trim_idx = idx
+                    continue
+            
+            if idx - 5 >= 0:
+                current_dir = velocities[idx]
+                past_dir = velocities[idx - 5]
+                
+                norm_current = np.linalg.norm(current_dir)
+                norm_past = np.linalg.norm(past_dir)
+                
+                # ⭐ FIX: Check for zero vectors
+                if norm_current > 1e-6 and norm_past > 1e-6:
+                    cos_angle = np.dot(current_dir, past_dir) / (norm_current * norm_past)
+                    cos_angle = np.clip(cos_angle, -1, 1)
+                    angle_deg = np.degrees(np.arccos(cos_angle))
+                    
+                    if angle_deg > direction_change_threshold:
+                        end_trim_idx = idx
+                        continue
+            
+            break
+    
+    return start_trim_idx, end_trim_idx
+
+
+def trim_track_endpoints_streaming(
+    jsonl_path: str,
+    output_jsonl_path: str,
+    window_size: int = 61,
+    speed_threshold_factor: float = 2.5,
+    acceleration_threshold_factor: float = 2.5,
+    direction_change_threshold: float = 60,
+    check_start: bool = True,
+    check_end: bool = True,
+    min_track_length: int = 30,
+):
+    """
+    Stream-process tracks and trim endpoint anomalies.
+    
+    Args:
+        jsonl_path: Input track JSONL path
+        output_jsonl_path: Output path for trimmed tracks
+        window_size: Number of frames to check at each endpoint (default: 61 frames ≈ 2 seconds)
+        speed_threshold_factor: Std multiplier for speed anomaly (lower = stricter)
+        acceleration_threshold_factor: Std multiplier for acceleration anomaly
+        direction_change_threshold: Degrees threshold for direction change
+        check_start: Check start of track
+        check_end: Check end of track
+        min_track_length: Minimum track length after trimming to keep
+    """
+    trimmed_count = 0
+    removed_count = 0
+    total_count = 0
+    skipped_count = 0  # ⭐ NEW: Track skipped tracks
+    
+    with open(jsonl_path, "r") as fin, open(output_jsonl_path, "w") as fout:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            
+            try:
+                track = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            
+            # Skip ball and referee tracks (they have different motion patterns)
+            team = track.get("team", "")
+            if team in ["ball", "referee"]:
+                fout.write(json.dumps(track) + "\n")
+                continue
+            
+            total_count += 1
+            
+            frames = np.array(track.get("frames", []))
+            positions = np.array(track.get("projected", []))
+
+            # ⭐ FIX: Validate data before converting to numpy
+            if frames.size == 0 or positions.size == 0:
+                skipped_count += 1
+                fout.write(json.dumps(track) + "\n")
+                continue
+            
+            if len(frames) != len(positions):
+                skipped_count += 1
+                fout.write(json.dumps(track) + "\n")
+                continue
+            
+            # ⭐ FIX: Convert and validate
+            try:
+                frames_array = np.array(frames)
+                positions_array = np.array(positions)
+            except (ValueError, TypeError):
+                skipped_count += 1
+                fout.write(json.dumps(track) + "\n")
+                continue
+            
+            # ⭐ FIX: Check for valid positions (not all zeros or invalid)
+            if positions_array.size == 0 or frames_array.size == 0:
+                skipped_count += 1
+                fout.write(json.dumps(track) + "\n")
+                continue
+            
+            # ⭐ FIX: Check minimum track length requirement
+            if len(frames_array) < window_size * 2 or len(frames_array) < min_track_length:
+                skipped_count += 1
+                fout.write(json.dumps(track) + "\n")
+                continue            
+            # Validate track has sufficient data
+            if len(frames) < window_size * 2:
+                fout.write(json.dumps(track) + "\n")
+                continue
+            
+            # Detect endpoint anomalies
+            try:
+                start_trim, end_trim = detect_endpoint_anomalies(
+                    positions_array, frames_array,
+                    window_size=window_size,
+                    speed_threshold_factor=speed_threshold_factor,
+                    acceleration_threshold_factor=acceleration_threshold_factor,
+                    direction_change_threshold=direction_change_threshold,
+                    check_start=check_start,
+                    check_end=check_end
+                )
+            except Exception as e:
+                # ⭐ FIX: Catch any unexpected errors and skip this track
+                print(f"⚠️  Error processing track {track.get('track_id', 'unknown')}: {e}")
+                skipped_count += 1
+                fout.write(json.dumps(track) + "\n")
+                continue
+            
+            # Check if trimming would remove entire track
+            if start_trim >= end_trim or (end_trim - start_trim + 1) < min_track_length:
+                removed_count += 1
+                continue  # Skip this track
+            
+            # Check if track was actually trimmed
+            if start_trim > 0 or end_trim < len(frames) - 1:
+                trimmed_count += 1
+                
+                # Trim all corresponding fields
+                trimmed_frames = frames[start_trim:end_trim + 1]
+                trimmed_positions = positions[start_trim:end_trim + 1]
+                
+                track["frames"] = trimmed_frames.tolist()
+                track["projected"] = trimmed_positions.tolist()
+                track["frame_range"] = [int(trimmed_frames[0]), int(trimmed_frames[-1])]
+                
+                # Trim bbox_area if present
+                if "bbox_area" in track and len(track["bbox_area"]) == len(frames):
+                    track["bbox_area"] = np.array(track["bbox_area"])[start_trim:end_trim + 1].tolist()
+            
+            fout.write(json.dumps(track) + "\n")
+    
+    print(f"✅ Trimmed endpoint anomalies:")
+    print(f"   Processed: {total_count} tracks")
+    print(f"   Modified: {trimmed_count} tracks ({trimmed_count/total_count*100:.1f}%)")
+    print(f"   Removed (too short): {removed_count} tracks ({removed_count/total_count*100:.1f}%)")
+
 
 
 def determine_track_jersey_number(
@@ -530,8 +826,6 @@ def determine_track_jersey_number(
             out_file.write(json.dumps(track_dict) + "\n")
 
     print(f"✅ Jersey numbers determined and saved to: {output_path}")
-
-
 
 
 def load_and_split_tracks(
@@ -885,7 +1179,7 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
 
     relabel_count = 0
     relabel_map = {}  # tid -> new label
-    
+
     # 👇 Deep copy and sort windows by count (descending)
     team_windows = {
         k: sorted([w.copy() for w in v], key=lambda x: x["count"], reverse=True)
@@ -1242,9 +1536,246 @@ def find_similar_jersey_numbers(jersey_num, available_jerseys):
     return similar_jerseys
 
 
-def prepare_background_and_tracks(
+def allocate_jersey_numbers_by_confidence(
+    jsonl_path: str,
+    output_path: str,
+    home_jersey_numbers: List[int],
+    away_jersey_numbers: List[int],
+):
+    """
+    Allocate jersey numbers to tracks based on confidence scores and handle conflicts.
+
+    Args:
+        jsonl_path: Path to the input JSONL file with track data
+        output_path: Path to save the output JSONL with allocated jersey numbers
+        home_jersey_numbers: List of valid jersey numbers for the home team
+        away_jersey_numbers: List of valid jersey numbers for the away team
+    """
+
+    # Create sets for O(1) lookup
+    valid_jerseys = {
+        "home": set(home_jersey_numbers),
+        "away": set(away_jersey_numbers),
+    }
+
+    # Read all tracks
+    tracks = []
+    with open(jsonl_path, "r") as f:
+        for line in f:
+            if line.strip():
+                tracks.append(json.loads(line))
+
+    print(f"📊 Processing {len(tracks)} tracks for jersey number allocation...")
+
+    # Step 1: Allocate jersey numbers based on confidence and validity
+    for track in tracks:
+        track_id = track.get("track_id", "")
+        team = track.get("team", "")
+
+        # Skip non-player tracks
+        if team in ["ball", "referee", "unsure"]:
+            track["allocated_jersey"] = "NA" if team == "referee" else "unsure"
+            track["allocated_conf"] = 0.0
+            continue
+
+        # Determine team key
+        team_key = "home" if "home" in team.lower() else "away" if "away" in team.lower() else None
+        if team_key is None:
+            track["allocated_jersey"] = "unsure"
+            track["allocated_conf"] = 0.0
+            continue
+
+        jersey_nums = track.get("jersey_num", "unsure")
+        jersey_confs = track.get("jersey_conf", 0.0)
+
+        # Handle unsure cases
+        if jersey_nums == "unsure" or not jersey_nums:
+            track["allocated_jersey"] = "unsure"
+            track["allocated_conf"] = 0.0
+            continue
+
+        # Normalize to lists
+        if not isinstance(jersey_nums, list):
+            jersey_nums = [jersey_nums]
+        if not isinstance(jersey_confs, list):
+            jersey_confs = [jersey_confs]
+
+        # Sort by confidence (descending)
+        jersey_conf_pairs = sorted(zip(jersey_nums, jersey_confs), key=lambda x: x[1], reverse=True)
+
+        # Find first valid jersey number
+        allocated = False
+        for jersey_num, conf in jersey_conf_pairs:
+            if jersey_num in valid_jerseys[team_key]:
+                track["allocated_jersey"] = jersey_num
+                track["allocated_conf"] = conf
+                allocated = True
+                break
+
+        if not allocated:
+            track["allocated_jersey"] = "unsure"
+            track["allocated_conf"] = 0.0
+
+    print("✅ Initial allocation complete. Resolving conflicts...")
+
+    # Step 2: Resolve conflicts where same jersey number is assigned to overlapping tracks
+    # Build frame-to-track mapping for efficient conflict detection
+    frame_team_jersey_tracks = defaultdict(lambda: defaultdict(list))
+
+    for track in tracks:
+        allocated_jersey = track.get("allocated_jersey")
+        team = track.get("team", "")
+
+        if allocated_jersey == "unsure" or allocated_jersey == "NA":
+            continue
+
+        frames = track.get("frames", [])
+        track_id = track.get("track_id", "")
+        allocated_conf = track.get("allocated_conf", 0.0)
+
+        for frame in frames:
+            frame_team_jersey_tracks[frame][(team, allocated_jersey)].append(
+                {"track_id": track_id, "conf": allocated_conf}
+            )
+
+    # Find conflicting tracks (same team + jersey in overlapping frames)
+    conflicts = defaultdict(set)  # track_id -> set of conflicting track_ids
+
+    for frame, team_jersey_dict in frame_team_jersey_tracks.items():
+        for (team, jersey), track_list in team_jersey_dict.items():
+            if len(track_list) > 1:
+                # Multiple tracks with same jersey in this frame
+                for track_info in track_list:
+                    other_tracks = [
+                        t["track_id"] for t in track_list if t["track_id"] != track_info["track_id"]
+                    ]
+                    conflicts[track_info["track_id"]].update(other_tracks)
+
+    print(f"⚠️  Found {len(conflicts)} tracks with conflicts")
+
+    # Step 3: Resolve conflicts - keep highest confidence, reassign others
+    track_map = {track["track_id"]: track for track in tracks}
+    resolved_count = 0
+
+    for track_id in conflicts:
+        track = track_map[track_id]
+        conflicting_ids = conflicts[track_id]
+
+        # Get all conflicting tracks including self
+        all_conflicting = [track] + [track_map[cid] for cid in conflicting_ids if cid in track_map]
+
+        # Filter to only those with same allocated jersey and team
+        same_jersey_tracks = [
+            t
+            for t in all_conflicting
+            if t.get("allocated_jersey") == track.get("allocated_jersey")
+            and t.get("team") == track.get("team")
+        ]
+
+        if len(same_jersey_tracks) <= 1:
+            continue
+
+        # Sort by confidence
+        same_jersey_tracks.sort(key=lambda t: t.get("allocated_conf", 0.0), reverse=True)
+
+        # Keep highest confidence track, reassign others
+        winner = same_jersey_tracks[0]
+
+        for loser_track in same_jersey_tracks[1:]:
+            if loser_track["track_id"] == winner["track_id"]:
+                continue
+
+            # Try to find alternative jersey number
+            team = loser_track.get("team", "")
+            team_key = "home" if "home" in team.lower() else "away"
+
+            jersey_nums = loser_track.get("jersey_num", [])
+            jersey_confs = loser_track.get("jersey_conf", [])
+
+            if not isinstance(jersey_nums, list):
+                jersey_nums = [jersey_nums]
+            if not isinstance(jersey_confs, list):
+                jersey_confs = [jersey_confs]
+
+            # Sort by confidence and find alternative
+            jersey_conf_pairs = sorted(
+                zip(jersey_nums, jersey_confs), key=lambda x: x[1], reverse=True
+            )
+
+            reallocated = False
+            for jersey_num, conf in jersey_conf_pairs:
+                if jersey_num == loser_track.get("allocated_jersey"):
+                    continue  # Skip the conflicting one
+
+                if jersey_num in valid_jerseys[team_key]:
+                    # Check if this alternative also conflicts
+                    frames = loser_track.get("frames", [])
+                    has_conflict = False
+
+                    for frame in frames:
+                        if (team, jersey_num) in frame_team_jersey_tracks[frame]:
+                            existing_tracks = frame_team_jersey_tracks[frame][(team, jersey_num)]
+                            if any(
+                                t["track_id"] != loser_track["track_id"] for t in existing_tracks
+                            ):
+                                has_conflict = True
+                                break
+
+                    if not has_conflict:
+                        loser_track["allocated_jersey"] = jersey_num
+                        loser_track["allocated_conf"] = conf
+                        reallocated = True
+                        resolved_count += 1
+                        break
+
+            if not reallocated:
+                loser_track["allocated_jersey"] = "unsure"
+                loser_track["allocated_conf"] = 0.0
+                resolved_count += 1
+
+    print(f"✅ Resolved {resolved_count} conflicts")
+
+    # Step 4: Write output
+    with open(output_path, "w") as out_f:
+        for track in tracks:
+            # Create output with allocated jersey as the main jersey_num
+            output_track = {
+                "track_id": track.get("track_id", ""),
+                "team": track.get("team", ""),
+                "team_conf": track.get("team_conf", 0.0),
+                "jersey_num": track.get("allocated_jersey", "unsure"),
+                "jersey_conf": track.get("allocated_conf", 0.0),
+                "frame_range": track.get("frame_range", []),
+                "frames": track.get("frames", []),
+                "projected": track.get("projected", []),
+                "bbox_area": track.get("bbox_area", []),
+            }
+            out_f.write(json.dumps(output_track) + "\n")
+
+    print(f"✅ Jersey number allocation complete. Saved to {output_path}")
+
+    # Print summary statistics
+    allocated_counts = defaultdict(int)
+    for track in tracks:
+        allocated_counts[track.get("allocated_jersey", "unsure")] += 1
+
+    print("\n📊 Allocation Summary:")
+    print(allocated_counts)
+
+    # Convert all keys to strings for sorting, with numeric jerseys sorted numerically
+    def sort_key(item):
+        key = item[0]
+        if isinstance(key, int):
+            return (0, key)  # Numeric jerseys first, sorted by value
+        else:
+            return (1, key)  # String categories second, sorted alphabetically
+
+    for jersey, count in sorted(allocated_counts.items(), key=sort_key):
+        print(f"   Jersey {jersey}: {count} tracks")
+
+
+def coarse_postprocessing(
     json_path,
-    image_path,
     home_jersey_numbers,
     away_jersey_numbers,
     field_size,
@@ -1257,14 +1788,14 @@ def prepare_background_and_tracks(
     max_merge_distance,
     window_size,
     threshold,
+    trim_endpoints: bool = True,
+    endpoint_window_size: int = 61,
+    endpoint_speed_factor: float = 2.5,
+    endpoint_acceleration_factor: float = 2.5,
+    endpoint_direction_threshold: float = 60,
     detector_firstpass_kwargs=None,
     detector_secondpass_kwargs=None,
 ):
-    # Load and resize background
-    bg_img = cv2.imread(image_path)
-    if bg_img is None:
-        raise FileNotFoundError(f"Failed to load image: {image_path}")
-    bg_img = cv2.resize(bg_img, field_size)
 
     start_load = time.time()
     # Merge and filter tracks
@@ -1307,8 +1838,29 @@ def prepare_background_and_tracks(
     end_merge = time.time()
     print(f"✅ Merged tracks in {end_merge - end_jersey:.2f} seconds")
 
-    remove_tracks_near_boundary_stream(
+    trim_track_endpoints_streaming(
         jsonl_path=json_path.replace(".jsonl", "_merged.jsonl"),
+        output_jsonl_path=json_path.replace(".jsonl", "_merged_trimmed.jsonl"),
+        window_size=endpoint_window_size,
+        speed_threshold_factor=endpoint_speed_factor,
+        acceleration_threshold_factor=endpoint_acceleration_factor,
+        direction_change_threshold=endpoint_direction_threshold,
+        check_start=True,
+        check_end=True,
+        min_track_length=min_track_length,
+    )
+    end_trim = time.time()
+    print(f"✅ Trimmed endpoint anomalies in {end_trim - end_merge:.2f} seconds")
+
+    process_jsonl_detect_replace(
+        input_path=json_path.replace(".jsonl", "_merged_trimmed.jsonl"),
+        output_path=json_path.replace(".jsonl", "_merged_trimmed_detected.jsonl"),
+        detector_kwargs=detector_secondpass_kwargs,
+    )
+
+
+    remove_tracks_near_boundary_stream(
+        jsonl_path=json_path.replace(".jsonl", "_merged_trimmed_detected.jsonl"),
         output_jsonl_path=json_path.replace(".jsonl", "_merged_filtered_near_boundary.jsonl"),
         field_size=field_size,
         margin_meter=30,
@@ -1324,61 +1876,10 @@ def prepare_background_and_tracks(
     end_static_ball = time.time()
     print(f"✅ Removed static ball tracks in {end_static_ball - end_boundary:.2f} seconds")
 
-    # We left these later after fusing all matching tracks
-
-    # detect_team_size_violations_streaming(
-    #     jsonl_path=json_path.replace('.jsonl', '_merged_filtered.jsonl'),
-    #     save_path=json_path.replace('.jsonl', '_team_size_violations.jsonl'),
-    #     max_team_size=10,
-    #     allowed_goalkeepers=1,
-    #     allowed_referees=1
-    # )
-    # end_violations = time.time()
-    # print(f"✅ Detected team size violations in {end_violations - end_static_ball:.2f} seconds")
-
-    # start_merged = time.time()
-    # merged_window = merge_violation_windows_with_track_counts(
-    #     jsonl_path=json_path.replace('.jsonl', '_team_size_violations.jsonl'),
-    #     min_gap=3
-    # )
-    # end_merged = time.time()
-
-    # for team, windows in merged_window.items():
-    #     print(f"🟢 Team {team} → {len(windows)} merged windows")
-    # print(f"✅ Merged windows in {end_merged - start_merged:.2f} seconds")
-
-    # relabel_count = relabel_tracks_by_confidence_and_decrement_windows_streaming(
-    #     track_jsonl_path=json_path.replace('.jsonl', '_merged_filtered.jsonl'),
-    #     team_windows=merged_window,
-    #     output_jsonl_path=json_path.replace('.jsonl', '_relabeled.jsonl'),
-    #     conf_threshold=0.007,
-    #     not_sure_label="unsure"
-    # )
-    # end_relabel = time.time()
-    # print(f"✅ Relabeled {relabel_count} tracks in {end_relabel - end_merged:.2f} seconds")
-
-    # process_jsonl_detect_replace(
-    #     input_path=json_path.replace(".jsonl", "_merged_filtered.jsonl"),
-    #     output_path=json_path.replace(".jsonl", "_smoothed.jsonl"),
-    #     detector_kwargs=detector_firstpass_kwargs,
-    # )
-
-    # process_jsonl_detect_replace(
-    #     input_path=json_path.replace('.jsonl', '_smoothed.jsonl'),
-    #     output_path=json_path.replace('.jsonl', '_smoothed_again.jsonl'),
-    #     detector_kwargs=detector_secondpass_kwargs
-    # )
-
-    # resolve_duplicate_jersey_numbers(
-    #     jsonl_path=json_path.replace('.jsonl', '_smoothed_again.jsonl'),
-    #     output_path=json_path.replace('.jsonl', '_final.jsonl'),
-    #     home_jersey_numbers=home_jersey_numbers,
-    #     away_jersey_numbers=away_jersey_numbers,
-    # )
-    return bg_img
+    return json_path.replace(".jsonl", "_merged_filtered.jsonl")
 
 
-def process_merged_tracks(
+def process_player_tracks(
     json_path,
     image_path,
     home_jersey_numbers,
@@ -1393,21 +1894,15 @@ def process_merged_tracks(
     max_merge_distance,
     window_size,
     threshold,
-    output_name,
     fps=29.97,
     detector_firstpass_kwargs=None,
     detector_secondpass_kwargs=None,
 ):
-    if output_name is None:
-        output_name = os.path.splitext(os.path.basename(json_path))[0]
-
-    # output_path_video = f"{output_name}.mp4"
 
     start = time.time()
     # Shared logic
-    bg_img = prepare_background_and_tracks(
+    bg_img = coarse_postprocessing(
         json_path,
-        image_path,
         home_jersey_numbers,
         away_jersey_numbers,
         field_size,
@@ -1423,6 +1918,8 @@ def process_merged_tracks(
         detector_firstpass_kwargs,
         detector_secondpass_kwargs,
     )
+
+    # fuse four JSONL files into one JSONL of player tracks
     end = time.time()
     print(f"✅ Processed tracks in {end - start:.2f} seconds")
 
@@ -1430,10 +1927,11 @@ def process_merged_tracks(
 def parse_args():
     parser = argparse.ArgumentParser(description="Process merged tracks from tracking JSONL")
     parser.add_argument(
-        "--json-path",
+        "--json-paths",
         type=str,
+        nargs="+",
         required=True,
-        help="Path to the merged tracking JSONL file",
+        help="Paths to the merged tracking JSONL files from different cameras",
     )
     parser.add_argument("--image-path", type=str, required=True, help="Path to the field image")
     parser.add_argument(
@@ -1504,11 +2002,29 @@ def parse_args():
         help="Threshold for velocity consistency",
     )
     parser.add_argument(
-        "--output-name",
-        type=str,
-        required=True,
-        help="Base name of the output file (without extension)",
+        "--endpoint-window-size",
+        type=int,
+        default=61,
+        help="Window size for endpoint checking (frames, default: 61 ≈ 2s @ 30fps)"
     )
+    parser.add_argument(
+        "--endpoint-speed-factor",
+        type=float,
+        default=2.5,
+        help="Speed threshold factor for endpoint anomalies (default: 2.5 std)"
+    )
+    parser.add_argument(
+        "--endpoint-acceleration-factor",
+        type=float,
+        default=2.5,
+        help="Acceleration threshold factor (default: 2.5 std)"
+    )
+    parser.add_argument(
+        "--endpoint-direction-threshold",
+        type=float,
+        default=60,
+        help="Direction change threshold in degrees (default: 60°)"
+    )   
     return parser.parse_args()
 
 
@@ -1531,6 +2047,7 @@ def main():
         min_monotonic_ratio=0.5,
         max_gap_size=30,
     )
+
     # second pass with tighter gates
     DETECTOR_SECONDPASS = dict(
         window_size=501,
@@ -1547,25 +2064,56 @@ def main():
         max_gap_size=30,
     )
 
-    process_merged_tracks(
-        json_path=args.json_path,
-        image_path=args.image_path,
-        home_jersey_numbers=args.home_jersey_numbers,
-        away_jersey_numbers=args.away_jersey_numbers,
-        field_size=tuple(args.field_size),
-        min_track_length=args.min_track_length,
-        smoothing_window=args.smoothing_window,
-        polyorder=args.polyorder,
-        max_step=args.max_step,
-        max_merge_gap=args.max_merge_gap,
-        max_merge_overlap_frames=args.max_merge_overlap_frames,
-        max_merge_distance=args.max_merge_distance,
-        window_size=args.window_size,
-        threshold=args.threshold,
-        output_name=args.output_name,
-        detector_firstpass_kwargs=DETECTOR_FIRSTPASS,
-        detector_secondpass_kwargs=DETECTOR_SECONDPASS,
-    )
+    if len(args.json_paths) == 1:
+        # single camera processing
+        process_player_tracks(
+            json_path=args.json_paths[0],
+            image_path=args.image_path,
+            home_jersey_numbers=args.home_jersey_numbers,
+            away_jersey_numbers=args.away_jersey_numbers,
+            field_size=tuple(args.field_size),
+            min_track_length=args.min_track_length,
+            smoothing_window=args.smoothing_window,
+            polyorder=args.polyorder,
+            max_step=args.max_step,
+            max_merge_gap=args.max_merge_gap,
+            max_merge_overlap_frames=args.max_merge_overlap_frames,
+            max_merge_distance=args.max_merge_distance,
+            window_size=args.window_size,
+            threshold=args.threshold,
+            detector_firstpass_kwargs=DETECTOR_FIRSTPASS,
+            detector_secondpass_kwargs=DETECTOR_SECONDPASS,
+        )
+        return
+    
+    start = time.time()
+
+    # # Stage 1: Process each camera
+    processed_files = []
+    for json_path in args.json_paths:
+        print(f"Processing camera JSONL: {json_path}")
+        output = coarse_postprocessing(
+            json_path=json_path,
+            home_jersey_numbers=args.home_jersey_numbers,
+            away_jersey_numbers=args.away_jersey_numbers,
+            field_size=tuple(args.field_size),
+            min_track_length=args.min_track_length,
+            smoothing_window=args.smoothing_window,
+            polyorder=args.polyorder,
+            max_step=args.max_step,
+            max_merge_gap=args.max_merge_gap,
+            max_merge_overlap_frames=args.max_merge_overlap_frames,
+            max_merge_distance=args.max_merge_distance,
+            window_size=args.window_size,
+            threshold=args.threshold,
+            endpoint_window_size=args.endpoint_window_size,
+            endpoint_speed_factor=args.endpoint_speed_factor,
+            endpoint_acceleration_factor=args.endpoint_acceleration_factor,
+            endpoint_direction_threshold=args.endpoint_direction_threshold,
+            detector_firstpass_kwargs=DETECTOR_FIRSTPASS,
+            detector_secondpass_kwargs=DETECTOR_SECONDPASS,
+        )
+        processed_files.append(output)
 
     end = time.time()
     print(f"Execution time: {end - start:.2f} seconds")
@@ -1575,9 +2123,8 @@ if __name__ == "__main__":
     main()
 
 # example usage:
-# python3 post-processing.py \
+# python3 post_processing_player.py \
 #  --json-path "./runs/detect/test_4k_player_640/team_tracking.jsonl" \
 #  --image-path "./data/images/mongkok_football_field.png" \
 #  --home-jersey-numbers 1 2 3 4 7 10 11 16 20 27 30 13 23 25 8 14 17 18 21 24 31 33 34 \
 #  --away-jersey-numbers 26 2 6 7 9 16 20 30 36 77 99 1 17 22 23 24 28 33 42 43 44 72 88 \
-#  --output-name './runs/detect/test_4k_player_640/team_tracking_output'

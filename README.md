@@ -8,7 +8,7 @@ docker exec -it yolov9_football bash
 ```
 
 ## Training
-We use the codes from [WongKinYu/yolov9](https://github.com/WongKinYiu/yolov9/tree/main) to train our ball detection model. For player detection model, we directly use the model weight trained on MS COCO provided by the above repo. Both model architecture are based on YOLOv9-S. See `scripts/train.sh` for more details. Ball dataset is downloaded from [Roboflow](https://universe.roboflow.com/roboflow-jvuqo/football-ball-detection-rejhg). We use yolov9-s pretrained weight for training ball detection model.
+We use the codes from [WongKinYu/yolov9](https://github.com/WongKinYiu/yolov9/tree/main) to train our detection model. See `scripts/train.sh` for more details. The dataset is downloaded from [Roboflow](https://universe.roboflow.com/roboflow-jvuqo/football-ball-detection-rejhg). We use yolov9-s pretrained weight for training.
 
 ```{shell}
 python train_dual.py \
@@ -18,11 +18,11 @@ python train_dual.py \
   --data datasets/football-ball-detection-2/data.yaml \
   --img 1280 \
   --cfg '' \
-  --weights "./weight/yolov9-s.pt" \
-  --name yolov9-s-ball-detection-1280 \
+  --weights "./weights/yolov9-s.pt" \
+  --name yolov9-s_player_ball_detection_1280 \
   --hyp hyp.scratch-high.yaml \ 
   --min-items 0  \
-  --epochs 500  \
+  --epochs 50  \
   --close-mosaic 15
 ```
 
@@ -33,9 +33,9 @@ Reparameterize the trained model weight for inference.
 ```{shell}
 python ./reparam-yolov9.py \
   --config ./models/detect/gelan-s.yaml \
-  --checkpoint "./weight/yolov9-s_ball_detection_1280_20250822.pt" \
+  --checkpoint "./weights/yolov9-s_player_ball_detection_1280.pt" \
   --classes 1 \
-  --output "./weight/yolov9-s-converted_ball_detection_1280_20250822.pt"
+  --output "./weights/yolov9-s-converted_player_ball_detection_1280.pt"
 ```
 
 ## Whole Match Pipeline
@@ -48,9 +48,9 @@ bash scripts/inference.sh
 
 ### 1️⃣ Inference
 The jersey model weight is downloaded from [here](https://drive.google.com/file/d/1uRln22tlhneVt3P6MePmVxBWSLMsL3bm/view), provided by [
-mkoshkina/jersey-number-pipeline](https://github.com/mkoshkina/jersey-number-pipeline). Put this weight under `./weight` folder. In case the checkpoint does not match the model state_dict, run this command:
+mkoshkina/jersey-number-pipeline](https://github.com/mkoshkina/jersey-number-pipeline). Put this weight under `./weights` folder. In case the checkpoint does not match the model state_dict, run this command:
 ```{shell}
-python3 ./old_function/convert_parseq_weight.py \
+python3 ./tools/convert_parseq_weight.py \
   "./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255.ckpt" \
   "./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255_new.ckpt"
 ```
@@ -79,16 +79,16 @@ histograms
 ```
 
 
-Run detection on the whole match clip, and output detection results in JSONL format. Currently 1 JSONL file for player detection results, and 1 JSONL file for ball detection results.
+Run detection on the whole match clip, and output detection results in JSONL format. The output would be two JSONL files, `team_tracking.jsonl` and `ball_tracking.jsonl` in the output folder.
 ```{shell}
-# Player detection
-python3 mini_patch_detect_v1_for_video.py \
+# Player and Ball Detection
+python3 mini_patch_detect_v2_for_video.py \
   --source './data/video/test_sample/C0478.MP4' \
   --game-time 317 3085 3982 6809 \
   --img 640 \
-  --device 0 \
-  --weights './weight/yolov9-s-converted.pt' \
-  --name test_4k_player_640 \
+  --device 0 1 \
+  --weights './weights/yolov9-s-converted_player_ball_detection_1280.pt' \
+  --name test_4k_640_cam0 \
   --classes 0 \
   --clothes-folder-path ./data/histograms/0525/ \
   --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 \
@@ -98,50 +98,110 @@ python3 mini_patch_detect_v1_for_video.py \
   --half
 ```
 
-IMPORTANT NOTE: use yolov9-s-converted.pt instead of yolov9-s.pt for more robust performance because after reparameterization the auxiliary components are removed.
+- Note: the input order of the homography-src-points and homography-dst-points matter, and wrong order can lead to wrong homographic projection.
+- For multiple camera processing, run the above command with changes on the `source, game-time, name, homography-src-points, homography-dst-points`.
 
-```{shell}
-# Ball detection
-python3 mini_patch_detect_ball_for_video.py \
-  --source './data/video/test_sample/C0478.MP4' \
-  --game-time 317 3085 3982 6809 \
-  --img 640 \
-  --device 0 \
-  --weights './weight/yolov9-s-converted_ball_detection_1280_20250822.pt' \
-  --name test_4k_ball_640 \
-  --classes 0 \
-  --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 \
-  --homography-dst-points 530 0 530 660 1060 660 1060 0 \
-  --nosave
+The folder storing the otuput jsonl data should look like this:
+
+```text
+./runs
+├── detect/
+│   ├── test_4k_640_cam0
+│   │   ├── team_tracking.jsonl
+│   │   └── ball_tracking.jsonl
+│   │
+│   ├── test_4k_640_cam1
+│   │   ├── team_tracking.jsonl
+│   │   └── ball_tracking.jsonl
+│   │
+│   ├── test_4k_640_cam2
+│   │   ├── team_tracking.jsonl
+│   │   └── ball_tracking.jsonl
+│   │
+│   ├── test_4k_640_cam3
+│   │   ├── team_tracking.jsonl
+│   │   └── ball_tracking.jsonl
 ```
-Note: the input order of the homography-src-points and homography-dst-points matter, and wrong order can lead to wrong homographic projection.
 
 ### 2️⃣ Postprocess of Tracks
-The raw detection results (JSONL files) are processed in `post-processing.py` and `post-processing-ball.py` sequentially. Both scripts would output several intermediate JSONL files. The final JSONL file to use is named `team_tracking_final.jsonl` and `ball_tracking_final.jsonl`.
+The raw detection results (JSONL files) are processed in `post_processing_player.py` and `post_processing_ball.py`. Both scripts would output several intermediate JSONL files. The final JSONL file to use is named `team_tracking_final.jsonl` and `ball_tracking_final.jsonl`.
 
+#### Ball tracks
+
+Step 1: Run this program for all ball tracks jsonl separately.
 ```{shell}
-python3 post-processing.py \
-  --json-path "./runs/detect/test_4k_player_640/team_tracking.jsonl" \
+python3 post_processing_ball.py \
+  --json-paths \
+    "./runs/detect/test_4k_640_cam0/ball_tracking.jsonl" \
+    "./runs/detect/test_4k_640_cam1/ball_tracking.jsonl" \
+    "./runs/detect/test_4k_640_cam2/ball_tracking.jsonl" \
+    "./runs/detect/test_4k_640_cam3/ball_tracking.jsonl" \
   --image-path "./data/images/mongkok_football_field.png" \
-  --home-jersey-numbers 1 2 3 4 7 10 11 16 20 27 30 13 23 25 8 14 17 18 21 24 31 33 34 \
-  --away-jersey-numbers 26 2 6 7 9 16 20 30 36 77 99 1 17 22 23 24 28 33 42 43 44 72 88 \
-  --output-name './runs/detect/test_4k_player_640/team_tracking_output'
 ```
 
+Step 2: Run this once to apply the fusion of ball tracks.
 ```{shell}
-python3 post-processing-ball.py \
-  --json-path "./runs/detect/test_4k_ball_640/ball_tracking.jsonl" \
-  --image-path "./data/images/mongkok_football_field.png" \
-  --output-name './runs/detect/test_4k_ball_640/ball_tracking_output'
+python fuse_ball_tracks.py \
+  --ball-jsonl-paths \
+    "./runs/detect/test_4k_640_cam0/ball_tracking_processed.jsonl" \
+    "./runs/detect/test_4k_640_cam1/ball_tracking_processed.jsonl" \
+    "./runs/detect/test_4k_640_cam2/ball_tracking_processed.jsonl" \
+    "./runs/detect/test_4k_640_cam3/ball_tracking_processed.jsonl" \
+  --output "./runs/detect/test_4k_640/ball_tracking_fused.jsonl"
 ```
-After that using all 4 jsonl files, construct more accurate players and ball tracks.
+
+Note: after creating the fused ball tracks, we apply some postprocessing in the same program and the final output ball tracks jsonl to be used is `ball_tracking_fused_final.jsonl`
+
+#### Player tracks
+Step 1: Run this program for all player tracks jsonl.
+```{shell}
+python3 post_processing_player.py \
+  --json-paths \
+    "./runs/detect/test_4k_640_cam0/team_tracking.jsonl" \
+    "./runs/detect/test_4k_640_cam1/team_tracking.jsonl" \
+    "./runs/detect/test_4k_640_cam2/team_tracking.jsonl" \
+    "./runs/detect/test_4k_640_cam3/team_tracking.jsonl" \
+  --image-path "./data/images/mongkok_football_field.png" \
+  --home-jersey-numbers 1 2 3 4 7 10 11 16 20 27 30 33 31 14 17 24  \
+  --away-jersey-numbers 26 2 6 7 9 16 20 30 36 77 99 22 33 17 28 42
+```
+
+Step 2: Run this once to apply the fusion of player tracks. The input file name of the player track jsonl should be `team_tracking_merged_filtered.jsonl`, while the input file name of the ball track jsonl should be `ball_tracking_processed.jsonl`.
+
+```{shell}
+python cluster_player_tracks.py \
+  --player-jsonl-paths \
+    "./runs/detect/test_4k_640_cam0/team_tracking_merged_filtered.jsonl" \
+    "./runs/detect/test_4k_640_cam1/team_tracking_merged_filtered.jsonl" \
+    "./runs/detect/test_4k_640_cam2/team_tracking_merged_filtered.jsonl" \
+    "./runs/detect/test_4k_640_cam3/team_tracking_merged_filtered.jsonl" \
+  --ball-jsonl-paths \
+    "./runs/detect/test_4k_640_cam0/ball_tracking_processed.jsonl" \
+    "./runs/detect/test_4k_640_cam1/ball_tracking_processed.jsonl" \
+    "./runs/detect/test_4k_640_cam2/ball_tracking_processed.jsonl" \
+    "./runs/detect/test_4k_640_cam3/ball_tracking_processed.jsonl" \
+  --auto-calibrate \
+  --use-dtw-filter \
+  --output "./runs/detect/test_4k_640/team_tracking_fused.jsonl" \
+```
+
+Step 3: Run this once to postporcess the fused player tracks.
+```{shell}
+python3 player_track_identification.py  \
+  --json-path "./runs/detect/test_4k_640/team_tracking_fused.jsonl"  \
+  --image-path "./data/images/mongkok_football_field.png"     \
+  --home-jersey-numbers 1 2 3 4 7 10 11 16 20 27 30 33 31 14 17 24  \
+  --away-jersey-numbers 26 2 6 7 9 16 20 30 36 77 99 22 33 17 28 42
+
+```
+This will give the `team_tracking_fused_final.jsonl`.
 
 After that run this command to combine both JSONL files into one. The final JSONL file to use is named `team_ball_tracking_final.jsonl`.
 ```{shell}
 python3 ./tools/combine_team_ball_tracks.py \
-  --player-jsonl "./runs/detect/test_4k_player_640/team_tracking_final.jsonl" \
-  --ball-jsonl "./runs/detect/test_4k_ball_640/ball_tracking_final.jsonl" \
-  --output-jsonl "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl"
+  --player-jsonl "./runs/detect/test_4k_640/team_tracking_fused_final.jsonl" \
+  --ball-jsonl "./runs/detect/test_4k_640/ball_tracking_fused_final.jsonl" \
+  --output-jsonl "./runs/detect/test_4k_640/team_ball_tracking_final.jsonl"
 ```
 
 ### 3️⃣ Analyse and Visualise Detection and Tracking Result
@@ -151,18 +211,26 @@ Compute the .npy file required for the homographic transformation:
 python3 ./tools/extract_homography_matrix.py \
   --src "172,1104 2101,895 3800,1021 3458,2057" \
   --dst "530,0 530,660 1060,660 1060,0" \
-  --out "./weight/homography_matrix_whole_match.npy"
+  --out "./weights/homography_cam0.npy"
 ```
 
 Prepare your jsonl file from previous step and run this command:
 ```{shell}
 python3 ./tools/render_classification_output.py \
-  --jsonl-path "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" \
-  --video-paths './data/video/test_sample/C0478.MP4' \
+  --jsonl-path "./runs/detect/test_4k_640/team_ball_tracking_final.jsonl" \
+  --video-paths \
+    './data/video/test_sample/cam0.mp4' \
+    './data/video/test_sample/cam1.mp4' \
+    './data/video/test_sample/cam2.mp4' \
+    './data/video/test_sample/cam3.mp4' \
   --bg-img-path ./data/images/mongkok_football_field.png \
-  --output-dir './runs/detect/test_4k_player_640/suspicious-output' \
-  --game-time 317 3085 3982 6809 \
-  --homography './weight/homography_matrix_whole_match.npy'
+  --output-dir './runs/detect/test_4k_640/suspicious-output' \
+  --game-time 317 3085 3982 6809 450 3218 4115 6942 798 3563 4460 7287 872 3640 4537 7364 \
+  --homography \
+    "./weights/homography_cam0.npy" \
+    "./weights/homography_cam1.npy" \
+    "./weights/homography_cam2.npy" \
+    "./weights/homography_cam3.npy"
 ```
 The output contains a radar view image, a radar view video of the suspicious player plotted on 2D field, and the footage of the specific time period of suspicious action. Each suspicious output is stored in a folder named after the track id of the player (e.g. 16a).
 
@@ -185,7 +253,7 @@ For the statistics of each player, run the following command:
 
 ```{shell}
 python3 ./tools/calculate_player_statistics.py 
-  --jsonl-path "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" \
+  --jsonl-path "./runs/detect/test_4k_640/team_ball_tracking_final.jsonl" \
   --frame-interval 30 \
   --fps 29.97 \
   --comparison-split 0.85
@@ -205,7 +273,7 @@ To generate position heatmap of a player, run the following command:
 
 ```{shell}
 python3 ./tools/generate_player_heatmap.py 
-  --jsonl-path "./runs/detect/test_4k_player_640/team_ball_tracking_final.jsonl" \
+  --jsonl-path "./runs/detect/test_4k_640/team_ball_tracking_final.jsonl" \
   --bg-img-path "./data/images/mongkok_football_field.png" \
   --jersey_number "16" \
   --team "home" # home, homegoalkeeper, away, awaygoalkeeper      
@@ -213,13 +281,15 @@ python3 ./tools/generate_player_heatmap.py
 Change the value of `jersey-number` and `team` for selecting the specific player. This outputs a png file named after the jersey number and team, e.g. `home_16_heatmap.png`, on the same directory of the jsonl file.
 
 ### Summary
-- Input Clips → mini_patch_detect_v1_for_video.py → player detections and tracks (JSONL)
-- Player detections and tracks → post-processing.py → refined player detections and tracks (JSONL)
+- Input Clips → mini_patch_detect_v2_for_video.py → player detections and tracks (JSONL) + ball detections and tracks (JSONL) 
 
-- Input Clips → mini_patch_detect_ball_for_video.py → ball detections (JSONL)
-- Ball detections → post-processing.py → refined ball detections and tracks (JSONL)
+- Ball detections and tracks → post_processing_ball.py → refined ball detections and tracks (JSONL)
+- 4 ball JSONL → fuse_ball_tracks.py → final ball JSONL
 
-- Player JSONL + Ball JSONL → combine_team_ball_tracks.py → whole match tracks (JSONL)
+- Player detections and tracks → post_processing_player.py → refined player detections and tracks (JSONL)
+- 4 player JSONL + 4 ball JSONL → cluster_player_tracks.py → 1 player JSONL → player_track_identification.py → final player JSONL
+
+- Final player JSONL + Final ball JSONL → combine_team_ball_tracks.py → whole match tracks (JSONL)
 
 - Whole match JSONL → render_classification_output.py → folder of suspicious-output
 
