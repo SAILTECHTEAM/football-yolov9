@@ -3,8 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: yolov9-football:latest
-    container_name: yolov9_football
+    image: yolov9-football-cpu:latest
+    container_name: yolov9_football_cpu
     runtime: nvidia  # Use NVIDIA runtime
     volumes:
       - ~/Documents/football-yolov9:/yolov9-main

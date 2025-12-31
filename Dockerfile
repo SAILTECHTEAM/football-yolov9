@@ -86,6 +86,7 @@ RUN cd /usr/src/opencv-${OPENCV_VERSION} && mkdir build && cd build && \
 WORKDIR /usr/src
 RUN rm -rf opencv-${OPENCV_VERSION} opencv_contrib-${OPENCV_VERSION}    
 
+WORKDIR /yolov9-main
 # Set default command to launch interactive bash shell
 CMD ["/bin/bash"]
 

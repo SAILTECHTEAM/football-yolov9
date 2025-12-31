@@ -485,8 +485,8 @@ def run(
     slicer = sv.InferenceSlicer(
         callback=slicer_callback,
         slice_wh=slice_size,
-        overlap_ratio_wh=None,
         overlap_wh=overlap_wh,
+        thread_workers=4,
     )
     # Warmup for more stable inference
     model.warmup(imgsz=(1 if pt or model.triton else bs, 3, *imgsz))  # warmup
@@ -905,7 +905,7 @@ def parse_opt():
         "--slice-size",
         nargs="+",
         type=int,
-        default=[640, 640],
+        default=(640, 640),
         help="slice width and height",
     )
     parser.add_argument(

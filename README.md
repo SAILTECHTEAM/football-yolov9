@@ -94,7 +94,7 @@ python3 mini_patch_detect_v2_for_video.py \
   --homography-src-points 172 1104 2101 895 3800 1021 3458 2057 \
   --homography-dst-points 530 0 530 660 1060 660 1060 0 \
   --jersey-weights ./weights/parseq_epoch=24-step=2575-val_accuracy=95.6044-val_NED=96.3255.ckpt \
-  --nosave
+  --nosave \
   --half
 ```
 
