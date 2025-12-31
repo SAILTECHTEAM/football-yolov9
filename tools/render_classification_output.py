@@ -395,6 +395,7 @@ def render_segments_to_images_and_videos(
                             draw_triangle(frame, video_point, size=30, color=(0, 255, 255), thickness=-1)
                         # else:
                         #     print(f"⚠️ Skipping point at frame {f}: point {video_point} is out of bounds ({frame_width}x{frame_height})")
+                    writer.write(frame)
                 writer.release()
                 print(f"🎥 Saved annotated clip → {annotated_clip_path}")
                 cap.release()

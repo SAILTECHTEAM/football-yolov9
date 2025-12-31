@@ -57,6 +57,7 @@ pytorch_lightning
 lmdb
 nltk
 timm==0.9.16
+fastdtw==0.3.4
 
 # Code formatting ---------------------------------------------------------------
 # black

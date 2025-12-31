@@ -100,6 +100,7 @@ python3 mini_patch_detect_v2_for_video.py \
 
 - Note: the input order of the homography-src-points and homography-dst-points matter, and wrong order can lead to wrong homographic projection.
 - For multiple camera processing, run the above command with changes on the `source, game-time, name, homography-src-points, homography-dst-points`.
+- **Class 0: Player; Class 1: Ball.**
 
 The folder storing the otuput jsonl data should look like this:
 
@@ -150,7 +151,7 @@ python fuse_ball_tracks.py \
   --output "./runs/detect/test_4k_640/ball_tracking_fused.jsonl"
 ```
 
-Note: after creating the fused ball tracks, we apply some postprocessing in the same program and the final output ball tracks jsonl to be used is `ball_tracking_fused_final.jsonl`
+Note: after creating the fused ball tracks, the output `ball_tracking_fused.jsonl` is teh freshly fused ball tracks jsonl. Then we apply some postprocessing in the same program and the final ball tracks jsonl to be used is `ball_tracking_fused_final.jsonl`.
 
 #### Player tracks
 Step 1: Run this program for all player tracks jsonl.
