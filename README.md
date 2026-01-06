@@ -98,38 +98,61 @@ python3 mini_patch_detect_v2_for_video.py \
   --half
 ```
 
+⚙️ Key Arguments: 
+
+| Argument | Default | Description |
+| -------- | ------- | ----------- |
+| `--weights` | `./yolo.pt` | Model path(s) or Triton URL. |
+| `--source` | `./data/images` | Input source: file/dir/URL/glob/screen/`0` (webcam). |
+| `--game-time` | `[0, 2700, 3600, 6300]` | Game time (seconds) in source video: first half start/end, second half start/end. |
+| `--data` | `./data/coco128.yaml` | (Optional) `dataset.yaml` path. |
+| `--clothes-folder-path` | `./` | Path to clothing features (histograms) used to assign team IDs. |
+| `--imgsz` / `--img` / `--img-size` | `[640]` | Inference size `h,w`. |
+| `--conf-thres` | `0.25` | Confidence threshold. |
+| `--iou-thres` | `0.45` | NMS IoU threshold. |
+| `--max-det` | `1000` | Maximum detections per image. |
+| `--homography-src-points` | `[0, 0, 1, 0, 1, 1, 0, 1]` | Source points for homography: `(x1,y1,x2,y2,x3,y3,x4,y4)`. |
+| `--homography-dst-points` | `[0, 0, 1, 0, 1, 1, 0, 1]` | Destination points for homography: `(x1,y1,x2,y2,x3,y3,x4,y4)`. |
+| `--device` | `""` | CUDA device(s) (e.g. `0`, `0,1,2,3`) or `cpu`. |
+| `--nosave` | `False` | Do not save images/videos. |
+| `--classes` | `None` | Filter by class (e.g. `--classes 0` or `--classes 0 1`). |
+| `--project` | `./runs/detect` | Save results to `project/name`. |
+| `--name` | `exp` | Save results folder name under `--project`. |
+| `--half` | `False` | Use FP16 half-precision inference. |
+| `--dnn` | `False` | Use OpenCV DNN for ONNX inference. |
+| `--vid-stride` | `1` | Video frame-rate stride. |
+| `--ema-alpha` | `0.5` | EMA smoothing factor for bottom-center. |
+| `--slice-size` | `(640, 640)` | Slice width and height. |
+| `--nms-threshold` | `0.45` | NMS threshold for slicer. |
+| `--jersey-weights` | `./jersey_net.pt` | Path to jersey-number recognition model. |
+
 - Note: the input order of the homography-src-points and homography-dst-points matter, and wrong order can lead to wrong homographic projection.
 - For multiple camera processing, run the above command with changes on the `source, game-time, name, homography-src-points, homography-dst-points`.
 - **Class 0: Player; Class 1: Ball.**
 
-The folder storing the otuput jsonl data should look like this:
+The folder storing the output jsonl data should look like this:
 
 ```text
 ./runs
 ├── detect/
 │   ├── test_4k_640_cam0
-│   │   ├── team_tracking.jsonl
-│   │   └── ball_tracking.jsonl
-│   │
+│   │   ├── ball_tracking.jsonl
+│   │   └── team_tracking.jsonl
 │   ├── test_4k_640_cam1
-│   │   ├── team_tracking.jsonl
-│   │   └── ball_tracking.jsonl
-│   │
+│   │   ├── ball_tracking.jsonl
+│   │   └── team_tracking.jsonl
 │   ├── test_4k_640_cam2
-│   │   ├── team_tracking.jsonl
-│   │   └── ball_tracking.jsonl
-│   │
+│   │   ├── ball_tracking.jsonl
+│   │   └── team_tracking.jsonl
 │   ├── test_4k_640_cam3
-│   │   ├── team_tracking.jsonl
-│   │   └── ball_tracking.jsonl
+│   │   ├── ball_tracking.jsonl
+│   │   └── team_tracking.jsonl
 ```
 
-### 2️⃣ Postprocess of Tracks
-The raw detection results (JSONL files) are processed in `post_processing_player.py` and `post_processing_ball.py`. Both scripts would output several intermediate JSONL files. The final JSONL file to use is named `team_tracking_final.jsonl` and `ball_tracking_final.jsonl`.
+### 2️⃣ Postprocess of Ball Tracks
+The raw detection results (JSONL files) are processed in `post_processing_ball.py` and `fuse_ball_tracks.py`. This would output several intermediate JSONL files. The final JSONL file to use is named `ball_tracking_final.jsonl`.
 
-#### Ball tracks
-
-Step 1: Run this program for all ball tracks jsonl separately.
+- Run this for all ball tracks jsonl.
 ```{shell}
 python3 post_processing_ball.py \
   --json-paths \
@@ -140,7 +163,7 @@ python3 post_processing_ball.py \
   --image-path "./data/images/mongkok_football_field.png" \
 ```
 
-Step 2: Run this once to apply the fusion of ball tracks.
+- Run this once to apply the fusion of ball tracks.
 ```{shell}
 python fuse_ball_tracks.py \
   --ball-jsonl-paths \
@@ -151,10 +174,32 @@ python fuse_ball_tracks.py \
   --output "./runs/detect/test_4k_640/ball_tracking_fused.jsonl"
 ```
 
-Note: after creating the fused ball tracks, the output `ball_tracking_fused.jsonl` is teh freshly fused ball tracks jsonl. Then we apply some postprocessing in the same program and the final ball tracks jsonl to be used is `ball_tracking_fused_final.jsonl`.
+Note: after creating the fused ball tracks, the output `ball_tracking_fused.jsonl` is the freshly fused ball tracks jsonl. Then we apply some postprocessing in the same program and the final ball tracks jsonl to be used is `ball_tracking_fused_final.jsonl`.
 
-#### Player tracks
-Step 1: Run this program for all player tracks jsonl.
+The folder storing the ball JSONL data should look like this (ignoring player tracking related JSONL):
+
+```text
+./runs
+├── detect/
+│   ├── test_4k_640_cam0
+│   │   ├── ball_tracking_deduplicated.jsonl
+│   │   ├── ball_tracking_filtered.jsonl
+│   │   ├── ball_tracking_fused.jsonl
+│   │   ├── ball_tracking_merged_filtered.jsonl 
+│   │   ├── ball_tracking_merged.jsonl
+│   │   ├── ball_tracking_processed.jsonl (passed into fuse_ball_tracks.py)
+│   │   ├── ball_tracking_smoothed.jsonl
+│   │   └── ball_tracking.jsonl
+│   ├── ...
+│   ├── test_4k_640
+│   │   ├── ball_tracking_fused_final.jsonl (FINAL OUTPUT)
+│   │   └── ball_tracking_fused.jsonl
+```
+
+### 3️⃣ Postprocess of Player Tracks
+The raw detection results (JSONL files) are processed in `post_processing_player.py`, `cluster_player_tracks.py` and `player_track_identification.py`. This would output several intermediate JSONL files. The final JSONL file to use is named `team_tracking_final.jsonl`.
+
+- Run this program for all player tracks jsonl.
 ```{shell}
 python3 post_processing_player.py \
   --json-paths \
@@ -167,7 +212,7 @@ python3 post_processing_player.py \
   --away-jersey-numbers 26 2 6 7 9 16 20 30 36 77 99 22 33 17 28 42
 ```
 
-Step 2: Run this once to apply the fusion of player tracks. The input file name of the player track jsonl should be `team_tracking_merged_filtered.jsonl`, while the input file name of the ball track jsonl should be `ball_tracking_processed.jsonl`.
+- Run this once to apply the fusion of player tracks. The input file name of the player track jsonl should be `team_tracking_merged_filtered.jsonl`, while the input file name of the ball track jsonl should be `ball_tracking_processed.jsonl`.
 
 ```{shell}
 python cluster_player_tracks.py \
@@ -186,7 +231,7 @@ python cluster_player_tracks.py \
   --output "./runs/detect/test_4k_640/team_tracking_fused.jsonl" \
 ```
 
-Step 3: Run this once to postporcess the fused player tracks.
+- Run this once to postporcess the fused player tracks.
 ```{shell}
 python3 player_track_identification.py  \
   --json-path "./runs/detect/test_4k_640/team_tracking_fused.jsonl"  \
@@ -196,6 +241,31 @@ python3 player_track_identification.py  \
 
 ```
 This will give the `team_tracking_fused_final.jsonl`.
+
+The folder storing the player JSONL data should look like this (ignoring ball tracking related JSONL):
+
+```text
+./runs
+├── detect/
+│   ├── test_4k_640_cam0
+│   │   ├── team_tracking_merged.jsonl
+│   │   ├── team_tracking_merged_filtered.jsonl (passed into cluster_player_tracks.py)
+│   │   ├── team_tracking_merged_filtered_near_boundary.jsonl
+│   │   ├── team_tracking_merged_trimmed.jsonl
+│   │   ├── team_tracking_merged_trimmed_detected.jsonl
+│   │   ├── team_tracking_split.jsonl
+│   │   ├── team_tracking_split_with_jersey.jsonl
+│   │   └── team_tracking.jsonl
+│   ├── ...
+│   ├── test_4k_640
+│   │   ├── team_tracking_fused_final.jsonl (FINAL OUTPUT)
+│   │   ├── team_tracking_fused_metadata.jsonl
+│   │   ├── team_tracking_fused_relabeled.jsonl
+│   │   ├── team_tracking_fused_smoothed.jsonl
+│   │   ├── team_tracking_fused_smoothed_again.jsonl
+│   │   ├── team_tracking_fused_team_size_violations.jsonl
+│   │   └── team_tracking_fused.jsonl
+```
 
 After that run this command to combine both JSONL files into one. The final JSONL file to use is named `team_ball_tracking_final.jsonl`.
 ```{shell}
