@@ -4,11 +4,14 @@ import os
 import re
 import numpy as np
 import random
+import math
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from collections import defaultdict
+from collections import defaultdict, Counter
 from dataclasses import dataclass, field
 from fastdtw import fastdtw
-from typing import List, Tuple, Dict, Optional, Set
+from typing import List, Tuple, Dict, Optional, Set, Iterator
 
 from scipy.spatial.distance import euclidean
 from scipy.cluster.hierarchy import linkage, fcluster
@@ -33,7 +36,18 @@ class CalibrationStats:
 
 @dataclass
 class CalibrationConfig:
-    """Holds all hyper-parameters for the calibration pipeline."""
+    """
+    Holds all hyper-parameters for the calibration pipeline.
+    
+    Attributes:
+        auto_calibrate: Whether to automatically calibrate offsets
+        max_search_offset: Max frame offset to search when calibrating frame offsets
+        overlap_threshold: Min overlapping frames to consider when calibrating frame offsets
+        min_overlap_frames: Min overlapping frames to consider when calibrating coordinate offsets
+        min_confidence: Min confidence for ball detections when calibrating coordinate offsets
+        max_frame: Optional max frame number to limit track pruning
+        verbose: Whether to print detailed logs
+    """
     auto_calibrate: bool = True
     max_search_offset: int = 60
     overlap_threshold: int = 30
@@ -45,7 +59,19 @@ class CalibrationConfig:
 
 @dataclass 
 class MatchingConfig:
-    """Holds all hyper-parameters for the matching pipeline."""
+    """
+    Holds all hyper-parameters for the matching pipeline.
+    
+    Attributes:
+        min_overlap_frames: Minimum overlapping frames required
+        max_analysis_frames: Maximum frames to analyze
+        max_point_distance: Max allowed distance between corresponding points (outlier threshold for pointwise distance)
+        max_outlier_ratio: If more than this ratio are outliers, reject match (outlier threshold for pointwise distance)
+        direction_threshold: Angle threshold for direction similarity (degrees)
+        direction_frame_stride: Frame stride for direction calculation
+        max_step_distance: Max allowed distance per movement step (outlier threshold for total distance)
+        max_initial_distance: Max allowed initial distance between track start points, for early rejection
+    """
     min_overlap_frames: int = 10
     max_analysis_frames: int = 150
     max_point_distance: float = 100.0
@@ -215,16 +241,35 @@ def apply_calibration_to_player_tracks(
     # Pre-calculated offsets (optional inputs)
     frame_offsets: Optional[List[int]] = None,
     coord_offsets: Optional[List[np.ndarray]] = None,
-    cfg: CalibrationConfig = field(default_factory=CalibrationConfig) 
+    cfg: CalibrationConfig = None,
 ) -> Tuple[Dict[int, List[Dict]], List[int], List[np.ndarray]]:
     
+    """
+    Main pipeline to apply calibration to player tracks.
+    Returns calibrated tracks, frame offsets, and coordinate offsets.
+
+    Args:
+        player_jsonl_paths: List of paths to player track JSONL files
+        ball_jsonl_paths: List of paths to ball track JSONL files
+        frame_offsets: Optional pre-calculated frame offsets per camera
+        coord_offsets: Optional pre-calculated coordinate offsets per camera
+        cfg: CalibrationConfig object with hyper-parameters
+    
+    Returns:
+        all_tracks_by_file: Dict mapping camera index to list of calibrated player tracks
+        frame_offsets: List of frame offsets applied per camera
+        coord_offsets: List of coordinate offsets applied per camera
+    """
+
+    if cfg is None:
+        cfg = CalibrationConfig()
+
     if cfg.verbose:
         print("=" * 60)
         print("APPLYING CALIBRATION TO PLAYER TRACKS")
         print("=" * 60)
 
     # Step 1: Compute Offsets
-    # We pass the 'config' object directly to the helper
     all_ball_tracks = load_ball_tracks(ball_jsonl_paths)
     
     frame_offsets, coord_offsets = compute_offsets_from_ball_tracks(
@@ -847,9 +892,9 @@ def compute_normalized_dtw_distance(
 
     # Compute statistics
     median_dist = float(np.median(distances))
-    print(
-        f"DTW distances between track {track1['track_id']} and track {track2['track_id']}: {distances}, median: {median_dist}"
-    )
+    # print(
+    #     f"DTW distances between track {track1['track_id']} and track {track2['track_id']}: {distances}, median: {median_dist}"
+    # )
     metadata = {
         "rejected": False,
         "has_overlap": True,
@@ -875,7 +920,7 @@ def compute_normalized_dtw_distance(
 def calculate_match_score(
     track1: Dict,
     track2: Dict,
-    cfg: MatchingConfig = MatchingConfig(),
+    cfg: Optional[MatchingConfig] = None,
 ) -> Tuple[float, Dict]:
     """
     Calculate a composite match score between two tracks.
@@ -893,6 +938,10 @@ def calculate_match_score(
     Returns:
         Tuple of (score: float, metadata: dict)
     """
+
+    if cfg is None:
+        cfg = MatchingConfig()
+
     # Find overlapping frames
     overlapping_frames = find_overlapping_frames(track1, track2)
 
@@ -1029,16 +1078,16 @@ def calculate_match_score(
         + overlap_bonus  # Bonus for overlap
     )
 
-    print(
-        f"Calculated match score between track {track1['track_id']} and track {track2['track_id']}: {score:.2f}"
-    )
-    print(
-        f"  Components: distance_score={distance_score:.2f}, "
-        #    f"distance_diff_score={distance_diff_score:.2f}, "
-        f"direction_score={direction_score:.2f}, "
-        f"velocity_score={velocity_score:.2f}, "
-        f"overlap_bonus={overlap_bonus:.2f}"
-    )
+    # print(
+    #     f"Calculated match score between track {track1['track_id']} and track {track2['track_id']}: {score:.2f}"
+    # )
+    # print(
+    #     f"  Components: distance_score={distance_score:.2f}, "
+    #     #    f"distance_diff_score={distance_diff_score:.2f}, "
+    #     f"direction_score={direction_score:.2f}, "
+    #     f"velocity_score={velocity_score:.2f}, "
+    #     f"overlap_bonus={overlap_bonus:.2f}"
+    # )
 
     metadata["composite_score"] = score
     metadata["score_components"] = {
@@ -1051,67 +1100,183 @@ def calculate_match_score(
 
     return score, metadata
 
-def prepare_tracks(
-    jsonl_paths: List[str],
-    frame_offsets: List[int] = None,
-    coord_offsets: List[np.ndarray] = None,
-    ball_jsonl_paths: List[str] = None,
-    cfg: CalibrationConfig = None,
-) -> Tuple[List[Dict], Dict[int, List[Dict]]]:
-    """
-    Load and prepare player tracks from multiple JSONL files.
-    Applies ball track calibration if offsets are provided or auto-calibration is enabled.
 
-    Args:
-        jsonl_paths: List of JSONL file paths containing player tracks
-        frame_offsets: Optional list of frame offsets for calibration
-        coord_offsets: Optional list of coordinate offsets for calibration
-        ball_jsonl_paths: Optional list of JSONL file paths containing ball tracks
-        cfg: CalibrationConfig object for calibration settings
-    
-    Returns:
-        all_tracks: List of all player tracks with metadata
-        all_tracks_by_file: Dict mapping source index to list of tracks
-    """
-
-    # Apply ball calibration if offsets provided or auto-calibrate enabled
-    if frame_offsets is not None or coord_offsets is not None or cfg.auto_calibrate:
-        if ball_jsonl_paths is None and cfg.auto_calibrate:
-            print("⚠️  Warning: auto_calibrate=True but no ball_jsonl_paths provided")
-            print("    Loading player tracks without calibration...")
-            all_tracks_by_file = load_player_tracks(jsonl_paths)
-        else:
-            print("🔧 Applying ball track calibration to player tracks...")
-            all_tracks_by_file, frame_offsets, coord_offsets = apply_calibration_to_player_tracks(
-                player_jsonl_paths=jsonl_paths,
-                ball_jsonl_paths=ball_jsonl_paths or jsonl_paths,  # Fallback
-                frame_offsets=frame_offsets,
-                coord_offsets=coord_offsets,
-                cfg=cfg
-            )
-    else:
-        # Load tracks normally without calibration
-        print("📥 Loading player tracks without calibration...")
-        all_tracks_by_file = load_player_tracks(jsonl_paths)
-    
-    # Print summary of loaded tracks
-    for src_idx, tracks in all_tracks_by_file.items():
-        print(f"  File {src_idx} ({jsonl_paths[src_idx]}): {len(tracks)} tracks loaded")
-
-    # Build all_tracks list with metadata
-    all_tracks = []
+def flatten_tracks_with_metadata(all_tracks_by_file: Dict[int, List[Dict]]) -> List[Dict]:
+    """Logic: flatten per-file tracks into all_tracks and attach internal metadata."""
+    all_tracks: List[Dict] = []
     for src_idx, tracks in all_tracks_by_file.items():
         for orig_idx, t in enumerate(tracks):
             t["_source_idx"] = src_idx
             t["_orig_idx"] = orig_idx
             t["_global_idx"] = len(all_tracks)
             all_tracks.append(t)
+    return all_tracks
 
-    n_total = len(all_tracks)
-    n_files = len(jsonl_paths)
-    print(f"Total tracks: {n_total} from {n_files} files")
 
+def prepare_tracks_by_file(
+    jsonl_paths: List[str],
+    frame_offsets: Optional[List[int]] = None,
+    coord_offsets: Optional[List[np.ndarray]] = None,
+    ball_jsonl_paths: Optional[List[str]] = None,
+    cfg: Optional[CalibrationConfig] = None,
+) -> Tuple[Dict[int, List[Dict]], Optional[List[int]], Optional[List[np.ndarray]]]:
+    """
+    I/O + optional calibration. Returns:
+      - all_tracks_by_file
+      - frame_offsets (possibly computed)
+      - coord_offsets (possibly computed)
+    """
+    if cfg is None:
+        cfg = CalibrationConfig(auto_calibrate=False)
+
+    want_calibration = (
+        frame_offsets is not None
+        or coord_offsets is not None
+        or bool(cfg.auto_calibrate)
+    )
+
+    if want_calibration:
+        if cfg.auto_calibrate and not ball_jsonl_paths:
+            print("⚠️  Warning: auto_calibrate=True but no ball_jsonl_paths provided")
+            print("    Loading player tracks without calibration...")
+            all_tracks_by_file = load_player_tracks(jsonl_paths)
+            return all_tracks_by_file, frame_offsets, coord_offsets
+
+        # Calibration requires ball_jsonl_paths (no fallback to player paths)
+        if not ball_jsonl_paths:
+            raise ValueError("ball_jsonl_paths is required when calibration is enabled")
+
+        print("🔧 Applying ball track calibration to player tracks...")
+        all_tracks_by_file, frame_offsets, coord_offsets = apply_calibration_to_player_tracks(
+            player_jsonl_paths=jsonl_paths,
+            ball_jsonl_paths=ball_jsonl_paths,
+            frame_offsets=frame_offsets,
+            coord_offsets=coord_offsets,
+            cfg=cfg,
+        )
+    else:
+        print("📥 Loading player tracks without calibration...")
+        all_tracks_by_file = load_player_tracks(jsonl_paths)
+
+    # Summary
+    for src_idx, tracks in all_tracks_by_file.items():
+        print(f"  File {src_idx} ({jsonl_paths[src_idx]}): {len(tracks)} tracks loaded")
+
+    return all_tracks_by_file, frame_offsets, coord_offsets
+
+
+def prepare_tracks(
+    jsonl_paths: List[str],
+    frame_offsets: Optional[List[int]] = None,
+    coord_offsets: Optional[List[np.ndarray]] = None,
+    ball_jsonl_paths: Optional[List[str]] = None,
+    cfg: Optional[CalibrationConfig] = None,
+) -> Tuple[List[Dict], Dict[int, List[Dict]]]:
+    """
+    Backward compatible wrapper: returns (all_tracks, all_tracks_by_file).
+    """
+    all_tracks_by_file, _, _ = prepare_tracks_by_file(
+        jsonl_paths=jsonl_paths,
+        frame_offsets=frame_offsets,
+        coord_offsets=coord_offsets,
+        ball_jsonl_paths=ball_jsonl_paths,
+        cfg=cfg,
+    )
+    all_tracks = flatten_tracks_with_metadata(all_tracks_by_file)
+
+    print(f"Total tracks: {len(all_tracks)} from {len(jsonl_paths)} files")
     return all_tracks, all_tracks_by_file
+
+
+_worker_all_tracks: List[Dict] = None
+_worker_cfg = None
+_worker_filter_by_team: bool = None
+_worker_filter_by_jersey: bool = None
+_worker_dtw_params: dict = None
+
+
+def _init_stage1_worker(all_tracks, cfg, filter_by_team, filter_by_jersey):
+    """Initializer for stage 1 workers - data copied ONCE per worker, not per task."""
+    global _worker_all_tracks, _worker_cfg, _worker_filter_by_team, _worker_filter_by_jersey
+    _worker_all_tracks = all_tracks
+    _worker_cfg = cfg
+    _worker_filter_by_team = filter_by_team
+    _worker_filter_by_jersey = filter_by_jersey
+
+
+def _pairwise_score_worker_v2(pair: Tuple[int, int]):
+    """
+    Worker for stage 1 scoring.
+    Only receives indices (8 bytes); accesses track data from process-global.
+    """
+    i, j = pair
+    t1 = _worker_all_tracks[i]
+    t2 = _worker_all_tracks[j]
+
+    if _worker_filter_by_team and t1.get("team") != t2.get("team"):
+        return None
+    if _worker_filter_by_jersey and t1.get("jersey_num") != t2.get("jersey_num"):
+        return None
+
+    score, _metadata = calculate_match_score(t1, t2, cfg=_worker_cfg)
+    if score == float("inf"):
+        return None
+
+    return (float(score), int(i), int(j))
+
+
+def _init_stage2_worker(all_tracks, dtw_params):
+    """Initializer for stage 2 (DTW) workers."""
+    global _worker_all_tracks, _worker_dtw_params
+    _worker_all_tracks = all_tracks
+    _worker_dtw_params = dtw_params
+
+
+def _dtw_worker_v2(args: Tuple[float, int, int]):
+    """
+    Worker for stage 2 DTW. Only receives (score, i, j).
+    """
+    score, i, j = args
+    t1 = _worker_all_tracks[i]
+    t2 = _worker_all_tracks[j]
+    
+    params = _worker_dtw_params
+    dtw_dist, _dtw_meta = compute_normalized_dtw_distance(
+        t1, t2,
+        use_sampling=True,
+        num_samples=params['dtw_num_samples'],
+        segment_ratio=params['dtw_segment_ratio'],
+        segment_length=params['dtw_segment_length'],
+        min_length=params['dtw_min_length'],
+        random_seed=42,
+    )
+
+    if dtw_dist == float("inf") or dtw_dist > params['dtw_threshold']:
+        return None
+
+    return (float(score), int(i), int(j), float(dtw_dist))
+
+
+def _iter_cross_source_pairs(all_tracks: List[Dict]) -> Iterator[Tuple[int, int]]:
+    """Yield (i, j) for i<j where tracks come from different sources. GENERATOR - no memory!"""
+    n_total = len(all_tracks)
+    for i in range(n_total):
+        s1 = all_tracks[i]["_source_idx"]
+        for j in range(i + 1, n_total):
+            if s1 != all_tracks[j]["_source_idx"]:
+                yield i, j
+
+
+def _count_cross_source_pairs(all_tracks: List[Dict]) -> int:
+    """Count pairs WITHOUT materializing them - O(sources²) not O(pairs)."""
+    source_counts = Counter(t["_source_idx"] for t in all_tracks)
+    total_pairs = 0
+    sources = list(source_counts.keys())
+    for i, s1 in enumerate(sources):
+        for s2 in sources[i + 1:]:
+            total_pairs += source_counts[s1] * source_counts[s2]
+    return total_pairs
+
 
 def greedy_match_tracks(
     all_tracks: List[Dict],
@@ -1120,7 +1285,7 @@ def greedy_match_tracks(
     filter_by_jersey: bool = False,
     max_score_threshold: float = 50.0,
     temporal_overlap_threshold: float = 0.3,
-    cfg: MatchingConfig = MatchingConfig(),
+    cfg: Optional[MatchingConfig] = None,
     use_dtw_filter: bool = True,
     dtw_threshold: float = 0.3,
     dtw_num_samples: int = 5,
@@ -1129,180 +1294,170 @@ def greedy_match_tracks(
     dtw_segment_length: int = 50,
     save_pairwise_path: str = None,
     verbose: bool = False,
-) -> Tuple[Dict, Dict[int, List[Dict]]]:
-    """
-    Greedy matching: tracks find best matches across multiple files.
-    Supports many-to-one matching (multiple short tracks can match one long track)
-    as long as the short tracks don't overlap temporally.
-
-    Args:
-        all_tracks: List of all track dictionaries
-        jsonl_paths: List of JSONL file paths (supports 2+ files)
-        min_overlap_frames: Minimum overlapping frames required
-        max_analysis_frames: Maximum frames to analyze per comparison
-        filter_by_team: Only compare tracks from same team
-        filter_by_jersey: Only compare tracks with same jersey number
-        direction_frame_stride: Frame stride for direction calculation
-        max_score_threshold: Maximum score to accept a match
-        temporal_overlap_threshold: Maximum allowed overlap ratio (0-1) between
-                                    tracks from same source matching same target
-        max_initial_distance: Max initial distance for fast rejection
-        max_point_distance: Max allowed distance between corresponding points
-                                    (outlier threshold for pointwise distance)
-        max_step_distance: Max allowed distance per movement step
-                                    (outlier threshold for total distance)
-        max_outlier_ratio: If more than this ratio are outliers, reject match
-        use_dtw_filter: Whether to apply DTW distance check (default: True)
-        dtw_threshold: Maximum DTW distance to accept (default: 0.3)
-        dtw_num_samples: Number of samples for DTW (default: 5)
-        dtw_segment_ratio: Segment ratio for DTW sampling (default: 0.5)
-        dtw_min_length: Minimum segment length for DTW (default: 10)
-        verbose: Print detailed progress
-
-    Returns:
-        Tuple of (results dict, all_tracks_by_file dict)
-    """
+    parallel_workers: Optional[int] = 4,
+    parallel_chunksize: int = 1000,  # Can be larger now since we pass only indices
+) -> Dict:
+    
+    if cfg is None:
+        cfg = MatchingConfig()
 
     n_total = len(all_tracks)
     n_files = len(jsonl_paths)
-    print(f"Total tracks: {n_total} from {n_files} files")
 
-    # Stage 1: Compute all pairwise scores
-    print("\n📊 Stage 1/3: Computing pairwise match scores...")
-    all_pairs = []
-    total_pairs = 0
-    skipped_filter = 0
-    skipped_incompatible = 0
+    if parallel_workers is None:
+        parallel_workers = max(1, (os.cpu_count() or 2) - 1)
 
-    for i in tqdm(range(n_total), desc="Tracks processed", unit="track"):
-        t1 = all_tracks[i]
+    # -------- Stage 1: Pairwise scores (memory efficient) --------
+    print("\n📊 Stage 1/3: Computing pairwise match scores (memory efficient)...")
 
-        for j in range(i + 1, n_total):
-            t2 = all_tracks[j]
-
-            # Skip same file
-            if t1["_source_idx"] == t2["_source_idx"]:
-                continue
-
-            total_pairs += 1
-
-            # Apply filters
-            if filter_by_team and t1.get("team") != t2.get("team"):
-                skipped_filter += 1
-                continue
-            if filter_by_jersey and t1.get("jersey_num") != t2.get("jersey_num"):
-                skipped_filter += 1
-                continue
-
-            # Calculate score
-            score, metadata = calculate_match_score(
-                t1,
-                t2,
-                cfg=cfg,
-            )
-
-            if score == float("inf"):
-
-                skipped_incompatible += 1
-
-            all_pairs.append((score, i, j, metadata))
-
-    # Stage 2: Compute DTW scores for valid pairs
-    if use_dtw_filter:
-        print(f"\n🔍 Stage 2/3: Computing DTW scores for valid pairs...")
-        valid_pairs_for_dtw = [
-            (score, track1_idx, track2_idx, metadata)
-            for score, track1_idx, track2_idx, metadata in all_pairs
-            if score != float("inf")
-        ]
-
-        dtw_results = {}  # (i, j) -> (dtw_distance, dtw_metadata)
-        skipped_dtw = 0
-
-        for score, i, j, metadata in tqdm(valid_pairs_for_dtw, desc="DTW computation"):
-            t1 = all_tracks[i]
-            t2 = all_tracks[j]
-
-            dtw_dist, dtw_meta = compute_normalized_dtw_distance(
-                t1,
-                t2,
-                use_sampling=True,
-                num_samples=dtw_num_samples,
-                segment_ratio=dtw_segment_ratio,
-                segment_length=dtw_segment_length,
-                min_length=dtw_min_length,
-                random_seed=42,
-            )
-
-            dtw_results[(i, j)] = (dtw_dist, dtw_meta)
-
-            # Count rejections
-            if dtw_dist > dtw_threshold or dtw_dist == float("inf"):
-                skipped_dtw += 1
-
-        print(f"  Valid pairs: {len(valid_pairs_for_dtw)}")
-        print(f"  DTW threshold: {dtw_threshold}")
-        print(f"  Rejected by DTW: {skipped_dtw}")
-        print(f"  Passing DTW filter: {len(valid_pairs_for_dtw) - skipped_dtw}")
-
-        # Add DTW info to metadata
-        for score, i, j, metadata in all_pairs:
-            if (i, j) in dtw_results:
-                dtw_dist, dtw_meta = dtw_results[(i, j)]
-                metadata["dtw_distance"] = dtw_dist
-                metadata["dtw_metadata"] = dtw_meta
-                metadata["passes_dtw_filter"] = dtw_dist <= dtw_threshold
-            else:
-                metadata["dtw_distance"] = None
-                metadata["dtw_metadata"] = None
-                metadata["passes_dtw_filter"] = False
-    # ⭐ NEW: Save pairwise scores if requested
+    pairwise_fh = None
     if save_pairwise_path:
-        save_pairwise_scores(all_pairs, all_tracks, save_pairwise_path, verbose=verbose)
+        os.makedirs(os.path.dirname(save_pairwise_path) or ".", exist_ok=True)
+        pairwise_fh = open(save_pairwise_path, "w", encoding="utf-8")
 
-    # Sort by score (best first) - FILTER OUT inf scores for matching
-    # ⭐ Filter valid pairs: must pass both composite score AND DTW (if enabled)
+    candidates = []
+    skipped_score_threshold = 0
+
+    # ✅ Count pairs without materializing (O(sources²) memory, not O(pairs))
+    total_pairs = _count_cross_source_pairs(all_tracks)
+    
+    print(f"  Cross-file pairs to evaluate: {total_pairs:,}")
+    print(f"  Parallel workers: {parallel_workers}")
+
+    # ✅ Use mp.Pool with initializer - data copied ONCE per worker, not per task
+    # ✅ Use imap_unordered - doesn't buffer all results, processes as available
+    with mp.Pool(
+        processes=parallel_workers,
+        initializer=_init_stage1_worker,
+        initargs=(all_tracks, cfg, filter_by_team, filter_by_jersey)
+    ) as pool:
+        
+        results_iter = pool.imap_unordered(
+            _pairwise_score_worker_v2,
+            _iter_cross_source_pairs(all_tracks),  # ✅ Generator - never materialized!
+            chunksize=parallel_chunksize
+        )
+        
+        for out in tqdm(results_iter, total=total_pairs, desc="Stage1 scoring", unit="pair"):
+            if out is None:
+                continue
+                
+            score, i, j = out
+
+            if score > max_score_threshold:
+                skipped_score_threshold += 1
+                if pairwise_fh is not None:
+                    pairwise_fh.write(json.dumps({
+                        "track1_id": all_tracks[i]["track_id"],
+                        "track2_id": all_tracks[j]["track_id"],
+                        "track1_source": all_tracks[i]["_source_idx"],
+                        "track2_source": all_tracks[j]["_source_idx"],
+                        "track1_global_idx": i,
+                        "track2_global_idx": j,
+                        "composite_score": score,
+                        "passes_score_threshold": False,
+                    }) + "\n")
+                continue
+
+            candidates.append((score, i, j))
+
+            if pairwise_fh is not None:
+                pairwise_fh.write(json.dumps({
+                    "track1_id": all_tracks[i]["track_id"],
+                    "track2_id": all_tracks[j]["track_id"],
+                    "track1_source": all_tracks[i]["_source_idx"],
+                    "track2_source": all_tracks[j]["_source_idx"],
+                    "track1_global_idx": i,
+                    "track2_global_idx": j,
+                    "composite_score": score,
+                    "passes_score_threshold": True,
+                }) + "\n")
+
+    if pairwise_fh is not None:
+        pairwise_fh.close()
+
+    print(f"  ✓ Candidates passing threshold: {len(candidates):,}")
+    print(f"  ✓ Skipped (score > {max_score_threshold}): {skipped_score_threshold:,}")
+
+    if not candidates:
+        print("⚠️  No candidate pairs passed Stage 1 thresholds.")
+        return _empty_results(all_tracks, n_total, n_files)
+
+    # -------- Continue with Stage 2 (DTW) if needed --------
+    # ... rest of the function using similar pattern for DTW stage
+    # Convert to numpy for compact storage & fast sorting
+    # dtype: float32 for score, int32 for indices (saves RAM)
+    candidates_np = np.array(candidates, dtype=np.float32)
+    # But indices get cast to float32 — not good. Use a structured array instead:
+    candidates_np = np.zeros(len(candidates), dtype=[("score", "f4"), ("i", "i4"), ("j", "i4")])
+    candidates_np["score"] = [c[0] for c in candidates]
+    candidates_np["i"] = [c[1] for c in candidates]
+    candidates_np["j"] = [c[2] for c in candidates]
+    candidates_np.sort(order="score")
+
+    print("\n✅ Stage 1 complete")
+    print(f"  Candidates passing score threshold: {len(candidates_np)}")
+    print(f"  Skipped (score>{max_score_threshold}): {skipped_score_threshold}")
+    print("  NOTE: skipped_filter / skipped_incompatible counts are not tracked in parallel mode (see note below)")
+
+    # -------- Stage 2: DTW filter (optional & parallel) --------
     if use_dtw_filter:
-        valid_pairs = [
-            (score, track1_idx, track2_idx, metadata)
-            for score, track1_idx, track2_idx, metadata in all_pairs
-            if score != float("inf") and metadata.get("passes_dtw_filter", False)
-        ]
-        print(f"\n✅ Final valid pairs after both filters: {len(valid_pairs)}")
-    else:
-        valid_pairs = [
-            (score, track1_idx, track2_idx, metadata)
-            for score, track1_idx, track2_idx, metadata in all_pairs
-            if score != float("inf")
-        ]
-    valid_pairs.sort(key=lambda x: x[0])
+        print("\n🔍 Stage 2/3: Computing DTW scores for valid pairs (parallel)...")
+        
+        dtw_params = {
+            'dtw_num_samples': dtw_num_samples,
+            'dtw_segment_ratio': dtw_segment_ratio,
+            'dtw_min_length': dtw_min_length,
+            'dtw_segment_length': dtw_segment_length,
+            'dtw_threshold': dtw_threshold,
+        }
+        
+        dtw_passed = []
 
-    print(f"  Skipped (filter): {skipped_filter}")
-    print(f"  Skipped (incompatible): {skipped_incompatible}")
-    if use_dtw_filter:
-        print(f"  Skipped (DTW filter): {skipped_dtw}")
-
-    if verbose and valid_pairs:
-        print(f"\n  Top 5 best pairs:")
-        for score, track1_idx, track2_idx, _ in valid_pairs[:5]:
-            print(
-                f"    {all_tracks[track1_idx]['track_id']} <-> {all_tracks[track2_idx]['track_id']}: score={score:.2f}"
+        with mp.Pool(
+            processes=parallel_workers,
+            initializer=_init_stage2_worker,
+            initargs=(all_tracks, dtw_params)
+        ) as pool:
+            results_iter = pool.imap_unordered(
+                _dtw_worker_v2,
+                candidates,
+                chunksize=parallel_chunksize
             )
+            for out in tqdm(results_iter, total=len(candidates), desc="Stage2 DTW", unit="pair"):
+                if out is None:
+                    continue
+                score, i, j, dtw_dist = out
+                dtw_passed.append((score, i, j, dtw_dist))
 
-    # Track which tracks from each source have matched to a target track
-    # matched_to_target[target_idx][source_idx] = list of (matched_idx, frame_start, frame_end)
-    matched_to_target = defaultdict(lambda: defaultdict(list))
+        if not dtw_passed:
+            print("⚠️  No pairs passed DTW filter.")
+            candidates_final = np.zeros(0, dtype=[("score", "f4"), ("i", "i4"), ("j", "i4"), ("dtw", "f4")])
+        else:
+            candidates_final = np.zeros(len(dtw_passed), dtype=[("score", "f4"), ("i", "i4"), ("j", "i4"), ("dtw", "f4")])
+            candidates_final["score"] = [x[0] for x in dtw_passed]
+            candidates_final["i"] = [x[1] for x in dtw_passed]
+            candidates_final["j"] = [x[2] for x in dtw_passed]
+            candidates_final["dtw"] = [x[3] for x in dtw_passed]
+            candidates_final.sort(order="score")
 
-    # Stage 3: Greedy matching with many-to-one support
+        print("\n✅ Stage 2 complete")
+        print(f"  Passing DTW filter: {len(candidates_final)}")
+        valid_pairs_iter = ((float(r["score"]), int(r["i"]), int(r["j"]), {"dtw_distance": float(r["dtw"])}) for r in candidates_final)
+    else:
+        valid_pairs_iter = ((float(r["score"]), int(r["i"]), int(r["j"]), {}) for r in candidates_np)
+        candidates_final = candidates_np  # for stats
+
+    # -------- Stage 3: greedy grouping (unchanged) --------
     print("🎯 Stage 3/3: Performing greedy matching...")
 
+    matched_to_target = defaultdict(lambda: defaultdict(list))
     matches = []
     groups = defaultdict(set)
     track_to_group = {}
     next_group_id = 0
 
     def get_match_frame_range(idx1: int, idx2: int) -> Tuple[int, int]:
-        """Get the overlapping frame range for a match."""
         t1 = all_tracks[idx1]
         t2 = all_tracks[idx2]
 
@@ -1320,88 +1475,52 @@ def greedy_match_tracks(
         return (start, end)
 
     def get_all_group_members(idx: int) -> Set[int]:
-        """Get all tracks in the same group as idx (BFS)."""
         if idx not in track_to_group:
             return {idx}
         group_id = track_to_group[idx]
         return groups[group_id].copy()
 
-    def would_create_source_conflict(
-        idx1: int, idx2: int, match_start: int, match_end: int
-    ) -> bool:
-        """
-        Check if matching idx1 and idx2 would create a conflict where:
-        - Two tracks from the SAME source end up in the same group
-        - With overlapping time ranges
-
-        This checks the ENTIRE connected component, not just direct neighbors.
-        """
-        # Get all members in both groups (or singleton sets if not yet grouped)
+    def would_create_source_conflict(idx1: int, idx2: int, match_start: int, match_end: int) -> bool:
         members1 = get_all_group_members(idx1)
         members2 = get_all_group_members(idx2)
-
-        # The new group would be the union
         future_group = members1 | members2 | {idx1, idx2}
 
-        # Group tracks by source
         tracks_by_source = defaultdict(list)
         for idx in future_group:
             src = all_tracks[idx]["_source_idx"]
             frame_range = all_tracks[idx].get("frame_range", [0, 0])
             tracks_by_source[src].append((idx, frame_range[0], frame_range[1]))
 
-        # Check each source for temporal conflicts
         for src, track_list in tracks_by_source.items():
             if len(track_list) <= 1:
                 continue
 
-            # Check all pairs within this source
-            for i in range(len(track_list)):
-                idx_i, start_i, end_i = track_list[i]
-                for j in range(i + 1, len(track_list)):
-                    idx_j, start_j, end_j = track_list[j]
+            for a in range(len(track_list)):
+                idx_a, start_a, end_a = track_list[a]
+                for b in range(a + 1, len(track_list)):
+                    idx_b, start_b, end_b = track_list[b]
 
-                    # Check temporal overlap
-                    overlap_start = max(start_i, start_j)
-                    overlap_end = min(end_i, end_j)
-
+                    overlap_start = max(start_a, start_b)
+                    overlap_end = min(end_a, end_b)
                     if overlap_start <= overlap_end:
-                        # Calculate overlap ratio relative to shorter segment
-                        duration_i = end_i - start_i + 1
-                        duration_j = end_j - start_j + 1
-                        overlap_duration = overlap_end - overlap_start + 1
-
-                        overlap_ratio_i = overlap_duration / duration_i if duration_i > 0 else 1.0
-                        overlap_ratio_j = overlap_duration / duration_j if duration_j > 0 else 1.0
-                        max_overlap_ratio = max(overlap_ratio_i, overlap_ratio_j)
-
-                        if max_overlap_ratio > temporal_overlap_threshold:
-                            if verbose:
-                                print(
-                                    f"    ⚠️  Would create conflict: {all_tracks[idx_i]['track_id']} "
-                                    f"and {all_tracks[idx_j]['track_id']} (both from source {src}) "
-                                    f"overlap {max_overlap_ratio:.1%} in frames [{overlap_start}, {overlap_end}]"
-                                )
+                        dur_a = end_a - start_a + 1
+                        dur_b = end_b - start_b + 1
+                        overlap_dur = overlap_end - overlap_start + 1
+                        overlap_ratio = max(
+                            overlap_dur / dur_a if dur_a > 0 else 1.0,
+                            overlap_dur / dur_b if dur_b > 0 else 1.0,
+                        )
+                        if overlap_ratio > temporal_overlap_threshold:
                             return True
-
         return False
 
-    for score, idx1, idx2, metadata in valid_pairs:
-        if score > max_score_threshold:
-            continue
-
+    for score, idx1, idx2, metadata in valid_pairs_iter:
+        # score already <= max_score_threshold due to early pruning
         match_start, match_end = get_match_frame_range(idx1, idx2)
 
-        # NEW: Check if this match would create source conflicts in the merged group
         if would_create_source_conflict(idx1, idx2, match_start, match_end):
-            if verbose:
-                print(
-                    f"  Skipping {all_tracks[idx1]['track_id']} <-> {all_tracks[idx2]['track_id']}: "
-                    f"would create source conflict in merged group"
-                )
             continue
 
-        # Accept this match - record in both directions
         src1 = all_tracks[idx1]["_source_idx"]
         src2 = all_tracks[idx2]["_source_idx"]
 
@@ -1412,19 +1531,12 @@ def greedy_match_tracks(
             {
                 "i": idx1,
                 "j": idx2,
-                "score": score,
-                "metadata": metadata,
+                "score": float(score),
+                "metadata": metadata,  # minimal metadata only (dtw_distance if enabled)
                 "frame_range": [match_start, match_end],
             }
         )
 
-        if verbose:
-            print(
-                f"  ✓ Matched {all_tracks[idx1]['track_id']} <-> {all_tracks[idx2]['track_id']}: "
-                f"score={score:.2f}, frames {match_start}-{match_end}"
-            )
-
-        # Update groups (union-find)
         group1 = track_to_group.get(idx1)
         group2 = track_to_group.get(idx2)
 
@@ -1554,6 +1666,7 @@ def greedy_match_tracks(
         if len(matched_to_target[target_idx][src_idx]) > 1
     )
 
+    # Update stats total_candidate_pairs to reflect candidates_final length
     results = {
         "aggregated_groups": aggregated,
         "pairwise_matches": matches,
@@ -1561,7 +1674,7 @@ def greedy_match_tracks(
         "stats": {
             "total_tracks": n_total,
             "total_files": n_files,
-            "total_candidate_pairs": len(valid_pairs),
+            "total_candidate_pairs": int(len(candidates_final)),
             "matches_accepted": len(matches),
             "groups_count": len(groups),
             "matched_tracks": len(matched_indices),
@@ -1570,9 +1683,35 @@ def greedy_match_tracks(
             "many_to_one_matches": many_to_one_count,
         },
     }
-
     return results
 
+def _empty_results(all_tracks, n_total, n_files):
+    """Return empty results structure."""
+    return {
+        "aggregated_groups": [],
+        "pairwise_matches": [],
+        "unmatched_tracks": [
+            {
+                "track_id": t["track_id"],
+                "team": t.get("team"),
+                "jersey_num": t.get("jersey_num"),
+                "source_idx": t["_source_idx"],
+                "frame_range": t.get("frame_range"),
+            }
+            for t in all_tracks
+        ],
+        "stats": {
+            "total_tracks": n_total,
+            "total_files": n_files,
+            "total_candidate_pairs": 0,
+            "matches_accepted": 0,
+            "groups_count": 0,
+            "matched_tracks": 0,
+            "unmatched_tracks": n_total,
+            "match_rate": 0.0,
+            "many_to_one_matches": 0,
+        },
+    }
 
 def load_tracks_from_jsonl(jsonl_path: str) -> List[Dict]:
     """
@@ -2754,12 +2893,14 @@ def main():
         auto_calibrate=args.auto_calibrate,
         verbose=args.verbose,
     )
+
+    # Load and prepare tracks
     all_tracks, all_tracks_by_file = prepare_tracks(
         jsonl_paths=args.player_jsonl_paths,
         ball_jsonl_paths=args.ball_jsonl_paths,
-        cfg=calibration_config,
         frame_offsets=args.frame_offsets,
-        coord_offsets=coord_offsets
+        coord_offsets=coord_offsets,
+        cfg=calibration_config
     )
 
     matching_config = MatchingConfig(
@@ -2856,8 +2997,8 @@ def main():
                     flattened_jerseys.append(jersey)
             print(f"    Jerseys: {set(flattened_jerseys)}")
             print(f"    Pairwise comparisons: {len(g.get('pairs', []))}")
-            if g.get("median_distance"):
-                print(f"    Avg median distance: {np.mean(g['median_distance']):.2f} units")
+            # if g.get("median_distance"):
+            #     print(f"    Avg median distance: {np.mean(g['median_distance']):.2f} units")
 
     # NEW: Print spatial clustering summary if available
     if results.get("spatial_clustering"):
