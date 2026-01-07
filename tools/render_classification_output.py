@@ -304,6 +304,8 @@ def render_segments_to_images_and_videos(
                     jersey_num = "GK"
                 if team == "referee":
                     jersey_num = "REF"
+                if team == "ball":
+                    jersey_num = "Ball"
                     
                 frames = t.get("frames", [])
                 points = np.array(t.get("projected", t.get("points", [])))
@@ -325,14 +327,14 @@ def render_segments_to_images_and_videos(
                 ax.text(xs[-1], ys[-1], str(jersey_num), fontsize=8, color=label_color)
             ax.set_title(f"Track {track_id} [{frame_to_time(start_f)} → {frame_to_time(end_f)}]")
             plt.tight_layout()
-            image_path = os.path.join(track_output_dir, f"{track_id}_{suspicious_player_team}_{suspicious_jersey_num}_{frame_to_time(video_start_frame, no_colon=True)}_{frame_to_time(video_end_frame, no_colon=True)}.png")
+            image_path = os.path.join(track_output_dir, f"{track_id}_{suspicious_player_team}_{suspicious_jersey_num}_{frame_to_time(start_f, no_colon=True)}_{frame_to_time(end_f, no_colon=True)}.png")
             plt.savefig(image_path, dpi=300)
             plt.close()
             print(f"🖼️ Saved image: {image_path}")
 
             # === 🎥 Render Video ===
             height, width, _ = bg_img.shape
-            video_path = os.path.join(track_output_dir, f"{track_id}_{suspicious_player_team}_{suspicious_jersey_num}_{frame_to_time(video_start_frame, no_colon=True)}_{frame_to_time(video_end_frame, no_colon=True)}.mp4")
+            video_path = os.path.join(track_output_dir, f"{track_id}_{suspicious_player_team}_{suspicious_jersey_num}_{frame_to_time(start_f, no_colon=True)}_{frame_to_time(end_f, no_colon=True)}.mp4")
             writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
 
             for f in range(start_f, end_f + 1):
@@ -361,7 +363,7 @@ def render_segments_to_images_and_videos(
                 # print(f"🎥 Saved raw clip for camera {idx} → {raw_clip_path}")
                 
                 # Create annotated version of the clip
-                annotated_clip_path = os.path.join(track_output_dir, f"{track_id}_{suspicious_player_team}_{suspicious_jersey_num}_cam{idx}_{frame_to_time(video_start_frame, fps, no_colon=True)}_{frame_to_time(video_end_frame, fps, no_colon=True)}.mp4")
+                annotated_clip_path = os.path.join(track_output_dir, f"{track_id}_{suspicious_player_team}_{suspicious_jersey_num}_cam{idx}_{frame_to_time(start_f, fps, no_colon=True)}_{frame_to_time(end_f, fps, no_colon=True)}.mp4")
                 
                 # Process and annotate video
                 cap = cv2.VideoCapture(video_file)

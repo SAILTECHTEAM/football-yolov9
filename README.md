@@ -368,7 +368,7 @@ Change the value of `jersey-number` and `team` for selecting the specific player
 
 - Whole match JSONL → generate_player_heatmap.py → heatmap.png
 
-Here let say player 16a with jersey number 8 from home team has been detected suspicious on Class 1 and 7. For the naming format, the first 3 digits combined is the minute, the last 2 digits combined is the second (00016 is 000:16, 10545 is 105:45).
+Here let say player 16a with jersey number 8 from home team has been detected suspicious on Class 1 and 7. For the naming format, the first 3 digits combined is the minute, the last 2 digits combined is the second (00016 is 000:16, 10545 is 105:45). Note that the time shown is in game time, not in video time.
 ```text
 .
 ├── suspicious-output/
@@ -377,9 +377,9 @@ Here let say player 16a with jersey number 8 from home team has been detected su
 │   │   │   ├── 16a_home_8_00016_00036.mp4
 │   │   │   ├── 16a_home_8_00016_00036.png
 │   │   │   ├── 16a_home_8_cam0_00016_00036.mp4
-│   │   │   ├── 16a_home_8_cam1_00028_00048.mp4
-│   │   │   ├── 16a_home_8_cam2_00050_00110.mp4
-│   │   │   └── 16a_home_8_cam3_00004_00024.mp4
+│   │   │   ├── 16a_home_8_cam1_00016_00036.mp4
+│   │   │   ├── 16a_home_8_cam2_00016_00036.mp4
+│   │   │   └── 16a_home_8_cam3_00016_00036.mp4
 │   │   ├── class_7/
 │   │   │   ├── 16a_home_8_10511_10545.mp4
 │   │   │   ├── 16a_home_8_10511_10545.png
