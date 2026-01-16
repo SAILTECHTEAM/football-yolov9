@@ -1,73 +1,13 @@
 import json
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib import cm
-from collections import defaultdict, deque
-from scipy.signal import savgol_filter
-from scipy.interpolate import UnivariateSpline
+from collections import defaultdict
 import cv2
 import os
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import time
-import ijson.backends.python as ijson_python
-from typing import Counter, List, Dict, Any, Tuple, Iterator, Union
+from typing import List, Dict, Tuple, Union
 from heapq import nsmallest
 from tools.remove_track_sharp import process_jsonl_detect_replace
 import argparse
-
-
-def assign_team_by_majority_vote(team_conf_list):
-    team_count = defaultdict(float)
-    for conf in team_conf_list:
-        for k, v in conf.items():
-            team_count[k] += v
-    return max(team_count, key=team_count.get) if team_count else "ball"
-
-
-def interpolate_full_track(
-    frames: List[int], points: np.ndarray, areas: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Interpolate full track to fill in all missing frames using linear interpolation.
-
-    Args:
-        frames (List[int]): List of frame indices.
-        points (np.ndarray): Corresponding points (N, 2) for each frame.
-
-    Returns:
-        Tuple[np.ndarray, np.ndarray]: Interpolated frames and points (in same order).
-    """
-    if len(frames) < 2:
-        return np.array(frames), points, areas  # Not enough points to interpolate
-
-    all_frames = np.arange(frames[0], frames[-1] + 1)
-    xs_interp = np.interp(all_frames, frames, points[:, 0])
-    ys_interp = np.interp(all_frames, frames, points[:, 1])
-    full_points = np.stack([xs_interp, ys_interp], axis=1)
-    areas_interp = np.interp(all_frames, frames, areas)
-
-    return all_frames, full_points, areas_interp
-
-
-def frame_to_time(frame: int, fps: float = 29.97, format_output: bool = True) -> str:
-    """
-    Convert frame index to time based on FPS.
-
-    Args:
-        frame (int): Frame index.
-        fps (float): Frames per second. Default is 29.97.
-        format_output (bool): If True, return formatted time (HH:MM:SS.ms), else return seconds.
-
-    Returns:
-        str or float: Formatted timestamp or raw seconds.
-    """
-    seconds = frame / fps
-    if not format_output:
-        return seconds
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = seconds % 60
-    return f"{hours:02}:{minutes:02}:{secs:06.3f}"  # includes milliseconds
 
 
 def detect_team_size_violations_streaming(
@@ -355,7 +295,7 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
             track = json.loads(line.strip())
             tid = track.get("track_id")
             if tid in relabel_map:
-                if track.get("team") not in [not_sure_label, "referee"]:
+                if track.get("team") not in [not_sure_label]:
                     track["team"] = relabel_map[tid]
             json.dump(track, f_out)
             f_out.write("\n")
@@ -364,65 +304,14 @@ def relabel_tracks_by_confidence_and_decrement_windows_streaming(
     return relabel_count
 
 
-def get_jersey_num_confidence(track, frame_idx=None):
-    """
-    Get the jersey number confidence for a track, handling both list and scalar values.
-    """
-    jersey_conf = track.get("jersey_conf", 0.0)
-    if isinstance(jersey_conf, list):
-        if frame_idx is not None and frame_idx < len(jersey_conf):
-            return jersey_conf[frame_idx]
-        return sum(jersey_conf) / len(jersey_conf) if jersey_conf else 0.0
-    return jersey_conf
-
-
-def find_similar_jersey_numbers(jersey_num, available_jerseys):
-    """
-    Find jersey numbers similar to the given one.
-    For single-digit jersey (e.g., "7"), look for numbers containing this digit (e.g., "17", "70").
-    For multi-digit jerseys (e.g., "28"), look for numbers starting with "2" or ending with "8".
-
-    Args:
-        jersey_num: The jersey number to find alternatives for
-        available_jerseys: List of available jersey numbers for this team
-
-    Returns:
-        List of similar jersey numbers not used by other players
-    """
-    similar_jerseys = []
-
-    # Convert to string for easier manipulation
-    jersey_str = str(jersey_num)
-
-    if len(jersey_str) == 1:
-        # Single digit: find all numbers containing this digit
-        digit = jersey_str
-        for available in available_jerseys:
-            if digit in str(available) or available == jersey_num:
-                similar_jerseys.append(available)
-    else:
-        # Multi-digit: find all numbers starting or ending with same digit
-        first_digit = jersey_str[0]
-        last_digit = jersey_str[-1]
-
-        for available in available_jerseys:
-            available_str = str(available)
-            if (
-                available_str.startswith(first_digit) or available_str.endswith(last_digit)
-            ) or available == jersey_num:
-                similar_jerseys.append(available)
-
-    return similar_jerseys
-
-
-def allocate_jersey_numbers_by_confidence(
+def allocate_jersey_numbers_by_count_and_confidence(
     jsonl_path: str,
     output_path: str,
     home_jersey_numbers: List[int],
     away_jersey_numbers: List[int],
 ):
     """
-    Allocate jersey numbers to tracks based on confidence scores and handle conflicts.
+    Allocate jersey numbers to tracks based on count and confidence scores and handle conflicts.
 
     Args:
         jsonl_path: Path to the input JSONL file with track data
@@ -1245,7 +1134,7 @@ def prepare_background_and_tracks(
         detector_kwargs=detector_secondpass_kwargs,
     )
 
-    allocate_jersey_numbers_by_confidence(
+    allocate_jersey_numbers_by_count_and_confidence(
         jsonl_path=json_path.replace(".jsonl", "_smoothed_again.jsonl"),
         output_path=json_path.replace(".jsonl", "_final.jsonl"),
         home_jersey_numbers=home_jersey_numbers,
