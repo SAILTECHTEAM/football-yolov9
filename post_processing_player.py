@@ -37,6 +37,17 @@ class RawTrack:
             jersey_num=data.get("jersey_num", []),
             jersey_conf=data.get("jersey_conf", []),
         )
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "track_id": self.track_id,
+            "frame_id": self.frames,
+            "projected": self.projected,
+            "bbox": self.bbox,
+            "team_conf": self.team_conf,
+            "jersey_num": self.jersey_num,
+            "jersey_conf": self.jersey_conf,
+        }
 
 
 @dataclass
@@ -48,12 +59,26 @@ class TrackSegment:
     track_id: str  # e.g., "123a", "123b"
     team: str  # "home" or "away" (voted)
     team_conf: float  # Aggregated confidence for this segment
-    frames: List[int]
-    projected: List[List[float]]  # [[x, y], ...]
-    bbox_area: List[float]  # Derived from bbox
     jersey_num: List[int]  # Still frame-level
     jersey_conf: List[List[float]]  # Still frame-level
-    
+    bbox_area: List[float]  # Derived from bbox
+    frames: List[int]
+    projected: List[List[float]]  # [[x, y], ...]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TrackSegment":
+        """Load from JSONL dict."""
+        return cls(
+            track_id=data["track_id"],
+            team=data["team"],
+            team_conf=data.get("team_conf", 0.0),
+            jersey_num=data.get("jersey_num", []),
+            jersey_conf=data.get("jersey_conf", []),
+            bbox_area=data.get("bbox_area", []),
+            frames=data["frames"],
+            projected=data["points"],
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "track_id": self.track_id,
@@ -65,6 +90,10 @@ class TrackSegment:
             "frames": self.frames,
             "points": self.projected,
         }
+
+
+
+
 
 def calculate_bbox_area(bboxes: List[List[float]]) -> List[float]:
     """
@@ -779,6 +808,139 @@ def trim_track_endpoints_streaming(
     print(f"   Removed (too short): {removed_count} tracks ({removed_count/total_count*100:.1f}%)")
 
 
+
+# # ================== determine_track_jersey_number related ================== #
+class NumpyEncoder(json.JSONEncoder):
+    """
+    Custom JSON encoder for NumPy types.
+    
+    Usage:
+        json.dumps(data, cls=NumpyEncoder)
+    """
+    def default(self, obj):
+        if isinstance(obj, (np.integer, np.int32, np.int64)):
+            return int(obj)
+        if isinstance(obj, (np.floating, np.float32, np.float64)):
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
+
+@dataclass
+class JerseyAnalysisResult:
+    """
+    Result of jersey number statistical analysis.
+    
+    Attributes:
+        final_nums: List of jersey numbers sorted by (count, confidence)
+        final_confs: Corresponding confidence scores
+        counts: Detection counts for each jersey number
+        status: "confirmed", "unsure", "NA", "ball"
+    """
+    final_nums: List[int] = field(default_factory=list)
+    final_confs: List[float] = field(default_factory=list)
+    counts: List[int] = field(default_factory=list)
+    status: str = "unsure"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to JSON-compatible dict for track output."""
+        if self.status in ["NA", "unsure", "ball"]:
+            return {
+                "jersey_num": self.status,
+                "jersey_conf": 0.0,
+                "count": 0,
+            }
+        
+        return {
+            "jersey_num": self.final_nums,
+            "jersey_conf": self.final_confs,
+            "count": self.counts,
+        }
+
+
+def analyze_jersey_stats(
+    team: str,
+    raw_nums: List[int],
+    raw_confs: List[List[float]],
+    threshold: float,
+    min_entries: int
+) -> JerseyAnalysisResult:
+    """
+    Pure function: Calculates dominant jersey numbers from raw frame data.
+    
+    Args:
+        team: Team label ("home", "away", "referee", "ball")
+        raw_nums: Frame-level jersey number predictions
+        raw_confs: Corresponding confidence scores per frame
+        threshold: Minimum confidence to accept a prediction
+        min_entries: Minimum detections needed to confirm a jersey number
+    
+    Returns:
+        JerseyAnalysisResult with status and (optionally) confirmed numbers
+    
+    Examples:
+        >>> analyze_jersey_stats("home", [10, 10, 7], [[0.99], [0.98], [0.85]], 0.95, 2)
+        JerseyAnalysisResult(final_nums=[10], final_confs=[0.985], counts=[2], status="confirmed")
+    """
+    # 1. Early Exit: Special Teams
+    if team == "referee":
+        return JerseyAnalysisResult(status="NA")
+    
+    # Note: "ball" should be handled by caller (early exit before calling this function)
+    
+    # 2. Validation
+    if not raw_nums or not raw_confs or len(raw_nums) != len(raw_confs):
+        return JerseyAnalysisResult(status="unsure")
+    
+    # 3. Filtering Candidates (High-Confidence Only)
+    candidates = []
+    for num, conf_list in zip(raw_nums, raw_confs):
+        # Skip invalid detections
+        if num == -1 or not isinstance(conf_list, list) or not conf_list:
+            continue
+        
+        # Strict threshold: ALL confidences in this frame must pass
+        if any(c < threshold for c in conf_list):
+            continue
+        
+        avg_conf = sum(conf_list) / len(conf_list)
+        candidates.append({"num": num, "conf": avg_conf})
+    
+    if not candidates:
+        return JerseyAnalysisResult(status="unsure")
+    
+    # 4. Aggregation (Group by Jersey Number)
+    stats = defaultdict(list)
+    for c in candidates:
+        stats[c["num"]].append(c["conf"])
+    
+    # 5. Final Selection (Min Detection Count Filter)
+    accepted = []
+    for num, confs in stats.items():
+        if len(confs) >= min_entries:
+            accepted.append({
+                "num": num,
+                "mean_conf": sum(confs) / len(confs),
+                "count": len(confs)
+            })
+    
+    if not accepted:
+        return JerseyAnalysisResult(status="unsure")
+    
+    # 6. Sorting (Count desc, then Confidence desc)
+    accepted.sort(key=lambda x: (x["count"], x["mean_conf"]), reverse=True)
+    
+    return JerseyAnalysisResult(
+        final_nums=[x["num"] for x in accepted],
+        final_confs=[x["mean_conf"] for x in accepted],
+        counts=[x["count"] for x in accepted],
+        status="confirmed"
+    )
+
+
 def determine_track_jersey_number(
     jsonl_path: str,
     output_path: str,
@@ -786,129 +948,85 @@ def determine_track_jersey_number(
     min_accepted_entries: int = 3,
 ):
     """
-    Determines the jersey number for each track based on jersey number recognition confidence.
-
+    Stream-process tracks to determine final jersey numbers.
+    
     Args:
-        jsonl_path: Path to the track data JSONL file that already contains jersey_num and jersey_conf
-        output_path: Path to save the output JSONL with finalized jersey numbers
-        confidence_threshold: Minimum confidence threshold for accepting a jersey number prediction
-        min_accepted_entries: Minimum number of accepted predictions to make a final decision
+        jsonl_path: Input track JSONL (with frame-level jersey predictions)
+        output_path: Output JSONL (with aggregated jersey numbers)
+        confidence_threshold: Minimum confidence to accept a prediction (0-1)
+        min_accepted_entries: Minimum detections needed to confirm a number
     """
-    def _json_default(o):
-        if isinstance(o, (np.integer,)):
-            return int(o)
-        if isinstance(o, (np.floating,)):
-            return float(o)
-        if isinstance(o, (np.bool_,)):
-            return bool(o)
-        if isinstance(o, (np.ndarray,)):
-            return o.tolist()
-        raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
-
-    # Read track data from JSONL
-    with open(jsonl_path, "r") as f, open(output_path, "w") as out_file:
-        for line in f:
+    print(f"🔢 Determining jersey numbers: {jsonl_path} → {output_path}")
+    
+    processed_count = 0
+    ball_count = 0
+    referee_count = 0
+    confirmed_count = 0
+    unsure_count = 0
+    
+    with open(jsonl_path, "r") as f_in, open(output_path, "w") as f_out:
+        for line in f_in:
             if not line.strip():
                 continue
-
+            
+            # 1. Load Track
             track = json.loads(line)
-            track_id = track.get("track_id", "")
-
-            # Skip if this isn't a player track or no jersey number data
-            if track.get("team", "") == "ball" or "jersey_num" not in track:
-                out_file.write(json.dumps(track, default=_json_default, allow_nan=False) + "\n")
+            team = track.get("team", "")
+            
+            # 2. Early Exit for Ball Tracks (no jersey logic needed)
+            if team == "ball":
+                f_out.write(json.dumps(track, cls=NumpyEncoder, allow_nan=False) + "\n")
+                ball_count += 1
                 continue
-
-            # Skip if the team is referee
-            if track.get("team", "") == "referee":
-                track["jersey_num"] = "NA"
-                track["jersey_conf"] = 0.0
-                out_file.write(json.dumps(track, default=_json_default, allow_nan=False) + "\n")
-                continue
-
-            # Get all frame-by-frame jersey number predictions for this track
-            jersey_entries = track.get("jersey_num", [])
-            jersey_conf_entries = track.get("jersey_conf", [])
-
-            if len(jersey_entries) != len(jersey_conf_entries):
-                print(f"⚠️  Mismatched jersey_num and jersey_conf lengths for track {track_id}. Skipping jersey determination.")
-                track["jersey_num"] = "unsure"
-                track["jersey_conf"] = 0.0
-                out_file.write(json.dumps(track, default=_json_default, allow_nan=False) + "\n")
-                continue
-
-            # Skip if no jersey number data
-            if not isinstance(jersey_entries, list) or not isinstance(jersey_conf_entries, list):
-                track["jersey_num"] = "unsure"
-                track["jersey_conf"] = 0.0
-                out_file.write(json.dumps(track, default=_json_default, allow_nan=False) + "\n")
-                continue
-
-            # Validate jersey predictions
-            candidates = []
-            for i, (jersey_num, conf_list) in enumerate(zip(jersey_entries, jersey_conf_entries)):
-                # No valid prediction
-                if not isinstance(conf_list, list):
-                    continue
-                # No valid prediction (-1 indicates no jersey detected as defined in inference)
-                if jersey_num == -1:
-                    continue
-                # Skip if any confidence of a jersey number prediction is below threshold
-                if any(conf < confidence_threshold for conf in conf_list):
-                    continue
-
-                # All confidences meet threshold, add to candidates
-                avg_conf = sum(conf_list) / len(conf_list) if conf_list else 0
-                candidates.append({"jersey_num": jersey_num, "jersey_conf": avg_conf})
-
-            # Group by jersey number and calculate statistics
-            jersey_stats = defaultdict(list)
-            for candidate in candidates:
-                jersey_stats[candidate["jersey_num"]].append(candidate["jersey_conf"])
-
-            # Filter jersey numbers that meet min_accepted_entries
-            accepted_jerseys = []
-            for jersey_num, conf_list in jersey_stats.items():
-                if len(conf_list) >= min_accepted_entries:
-                    avg_confidence = sum(conf_list) / len(conf_list)
-                    count = len(conf_list)
-                    accepted_jerseys.append({
-                        "jersey_num": jersey_num,
-                        "jersey_conf": avg_confidence,
-                        "count": count
-                    })
-
-            # Sort by count (descending) then by confidence (descending)
-            accepted_jerseys.sort(key=lambda x: (x["count"], x["jersey_conf"]), reverse=True)
-
-            # Save all accepted jerseys as lists
-            if accepted_jerseys:
-                track["jersey_num"] = [j["jersey_num"] for j in accepted_jerseys]
-                track["jersey_conf"] = [j["jersey_conf"] for j in accepted_jerseys]
-                track["count"] = [j["count"] for j in accepted_jerseys]
-            else:
-                track["jersey_num"] = "unsure"
-                track["jersey_conf"] = 0.0
-                track["count"] = 0
-
-            track_dict = {
+            
+            # 3. Extract Raw Data
+            raw_nums = track.get("jersey_num", [])
+            raw_confs = track.get("jersey_conf", [])
+            
+            # 4. Run Pure Logic
+            result = analyze_jersey_stats(
+                team=team,
+                raw_nums=raw_nums,
+                raw_confs=raw_confs,
+                threshold=confidence_threshold,
+                min_entries=min_accepted_entries
+            )
+            result_dict = result.to_dict()
+            
+            # 5. Build Output Track (Clean Dictionary)
+            output_track = {
                 "track_id": track.get("track_id", ""),
-                "team": track.get("team", "ball"),
+                "team": team,
                 "team_conf": track.get("team_conf", 0.0),
-                "jersey_num": track.get("jersey_num", "unsure"),
-                "jersey_conf": track.get("jersey_conf", 0.0),
-                "count": track.get("count", 0),
+                "jersey_num": result_dict["jersey_num"],
+                "jersey_conf": result_dict["jersey_conf"],
+                "count": result_dict["count"],
                 "bbox_area": track.get("bbox_area", []),
                 "frames": track.get("frames", []),
                 "points": track.get("points", []),
             }
-            try:
-                out_file.write(json.dumps(track_dict, default=_json_default, allow_nan=False) + "\n")
-            except Exception as e:
-                # If there's a bad value, fail with context (should NOT segfault; should error cleanly)
-                raise RuntimeError(f"Failed to JSON-encode track_id={track_id}: {e}") from e    
+            
+            # 6. Write to Output
+            f_out.write(json.dumps(output_track, cls=NumpyEncoder, allow_nan=False) + "\n")
+            
+            # 7. Update Statistics
+            processed_count += 1
+            if result.status == "confirmed":
+                confirmed_count += 1
+            elif result.status == "unsure":
+                unsure_count += 1
+            elif result.status == "NA":
+                referee_count += 1
+    
+    # 8. Print Summary
+    print(f"✅ Jersey number determination complete:")
+    print(f"   Processed: {processed_count} tracks")
+    print(f"   Confirmed: {confirmed_count} ({confirmed_count/processed_count*100:.1f}%)")
+    print(f"   Unsure: {unsure_count} ({unsure_count/processed_count*100:.1f}%)")
+    print(f"   Referee: {referee_count}")
+    print(f"   Ball (skipped): {ball_count}")
+    print(f"   → Saved to {output_path}")
 
-    print(f"✅ Jersey numbers determined and saved to: {output_path}")
 
 # ================== load_and_split_tracks related ================== #
 def validate_track_length(track_data: Dict[str, Any], min_track_length: int) -> bool:
@@ -971,12 +1089,16 @@ def filter_valid_points(
 def stream_jsonl_tracks(path: str) -> Iterator[Dict[str, Any]]:
     """Generator: Stream JSONL tracks one at a time."""
     with open(path, "r") as f:
-        for line in f:
+        for line_num, line in enumerate(f, 1):
             line = line.strip()
             if line:
                 try:
                     yield json.loads(line)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    # 1. Print the error so you know data is missing
+                    print(f"❌ Corrupt JSON at line {line_num} in {path}: {e}")
+                    
+                    # 2. Continue to the next line (don't crash the pipeline)
                     continue
 
 
@@ -1425,18 +1547,18 @@ def coarse_postprocessing(
 ):
 
     start_load = time.time()
-    # Merge and filter tracks
-    load_and_split_tracks(
-        json_path=json_path,
-        output_path=json_path.replace(".jsonl", "_split.jsonl"),
-        field_size=field_size,
-        min_track_length=min_track_length,
-        window_size=window_size,
-        threshold=threshold,
-    )
+    # # Merge and filter tracks
+    # load_and_split_tracks(
+    #     json_path=json_path,
+    #     output_path=json_path.replace(".jsonl", "_split.jsonl"),
+    #     field_size=field_size,
+    #     min_track_length=min_track_length,
+    #     window_size=window_size,
+    #     threshold=threshold,
+    # )
     end_load = time.time()
     print(f"✅ Loaded and split tracks in {end_load - start_load:.2f} seconds")
-    return "testing"
+
     determine_track_jersey_number(
         jsonl_path=json_path.replace(".jsonl", "_split.jsonl"),
         output_path=json_path.replace(".jsonl", "_split_with_jersey.jsonl"),
@@ -1445,7 +1567,7 @@ def coarse_postprocessing(
     )
     end_jersey = time.time()
     print(f"✅ Determined jersey numbers in {end_jersey - end_load:.2f} seconds")
-
+    return "testing"
     hybrid_merge_stream_fixed(
         jsonl_path=json_path.replace(".jsonl", "_split_with_jersey.jsonl"),
         output_path=json_path.replace(".jsonl", "_merged.jsonl"),
