@@ -139,6 +139,34 @@ class AggregatedTrack:
         }
 
 
+def stream_jsonl_tracks(path: str) -> Iterator[Dict[str, Any]]:
+    """Generator: Stream JSONL tracks one at a time."""
+    with open(path, "r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if line:
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError as e:
+                    # 1. Print the error so you know data is missing
+                    print(f"❌ Corrupt JSON at line {line_num} in {path}: {e}")
+                    
+                    # 2. Continue to the next line (don't crash the pipeline)
+                    continue
+
+
+def write_jsonl_stream(path: str, data_stream: Iterator[Dict[str, Any]]) -> int:
+    """
+    Consume iterator and write to JSONL.
+    Returns count of records written.
+    """
+    count = 0
+    with open(path, "w", encoding="utf-8") as f:
+        for record in data_stream:
+            f.write(json.dumps(record) + "\n")
+            count += 1
+    return count
+
 
 def calculate_bbox_area(bboxes: List[List[float]]) -> List[float]:
     """
@@ -968,95 +996,81 @@ def analyze_jersey_stats(
 
 
 def process_jersey_track(
-    track: Dict[str, Any],
+    track: TrackSegment,
     confidence_threshold: float,
     min_accepted_entries: int,
-) -> Optional[Dict[str, Any]]:
+) -> AggregatedTrack:
     """
-    Pure function: Process single track to determine jersey number.
-    
-    Args:
-        track: Input track dict with frame-level jersey predictions
-        confidence_threshold: Minimum confidence to accept
-        min_accepted_entries: Minimum detections needed
-    
-    Returns:
-        Output track dict with aggregated jersey, or None if ball track
-    
-    Examples:
-        >>> track = {"team": "home", "jersey_num": [10, 10], "jersey_conf": [[0.99], [0.98]], ...}
-        >>> result = process_jersey_track(track, 0.95, 2)
-        >>> result["jersey_num"]
-        [10]
+    Pure function: Transforms a Raw Segment into an Aggregated Track.
+    Handles ALL teams (Ball, Ref, Player) here.
     """
-    team = track.get("team", "")
     
-    # Early exit for ball tracks (pass through unchanged)
-    if team == "ball":
-        return None  # Signal to caller to write original track
-    
-    # Extract raw data
-    raw_nums = track.get("jersey_num", [])
-    raw_confs = track.get("jersey_conf", [])
-    
-    # Run pure logic
-    result = analyze_jersey_stats(
-        team=team,
-        raw_nums=raw_nums,
-        raw_confs=raw_confs,
-        threshold=confidence_threshold,
-        min_entries=min_accepted_entries
+    # 1. Default / Fallback Values
+    final_jersey_num = "unsure"
+    final_jersey_conf = 0.0
+    final_count = 0
+
+    # 2. Logic Branching
+    if track.team == "ball":
+        # Balls are always unsure/0
+        pass 
+        
+    elif track.team == "referee":
+         final_jersey_num = "NA"
+         
+    else:
+        # 3. Complex Analysis for Players
+        stats = analyze_jersey_stats(
+            team=track.team,
+            raw_nums=track.jersey_num,
+            raw_confs=track.jersey_conf,
+            threshold=confidence_threshold,
+            min_entries=min_accepted_entries
+        )
+        
+        # Unpack the result object
+        if stats.status == "confirmed":
+            final_jersey_num = stats.final_nums
+            final_jersey_conf = stats.final_confs
+            final_count = stats.counts
+        elif stats.status == "NA":
+             final_jersey_num = "NA"
+        # else: remains "unsure"
+
+    # 4. Uniform Return Type
+    return AggregatedTrack(
+        track_id=track.track_id,
+        team=track.team,
+        team_conf=track.team_conf,
+        jersey_num=final_jersey_num,
+        jersey_conf=final_jersey_conf,
+        count=final_count,
+        bbox_area=track.bbox_area,
+        frames=track.frames,
+        projected=track.projected,
     )
-    result_dict = result.to_dict()
-    
-    # Build output track
-    return {
-        "track_id": track.get("track_id", ""),
-        "team": team,
-        "team_conf": track.get("team_conf", 0.0),
-        "jersey_num": result_dict["jersey_num"],
-        "jersey_conf": result_dict["jersey_conf"],
-        "count": result_dict["count"],
-        "bbox_area": track.get("bbox_area", []),
-        "frames": track.get("frames", []),
-        "points": track.get("points", []),
-    }
-
-
 
 def jersey_determination_stream(
     input_stream: Iterator[Dict[str, Any]],
     confidence_threshold: float,
     min_accepted_entries: int,
-) -> Iterator[Tuple[Dict[str, Any], str]]:
+) -> Iterator[AggregatedTrack]:
     """
-    Generator: Process tracks and yield (track, status) tuples.
-    
-    Args:
-        input_stream: Iterator of track dicts
-        confidence_threshold: Minimum confidence threshold
-        min_accepted_entries: Minimum detections needed
-    
-    Yields:
-        (output_track, status) where status is "ball", "confirmed", "unsure", "NA"
+    Generator: Maps dicts -> Segments -> AggregatedTracks.
     """
-    for track in input_stream:
-        result = process_jersey_track(track, confidence_threshold, min_accepted_entries)
+    for track_dict in input_stream:
+        # 1. Deserialize (Input Schema)
+        segment = TrackSegment.from_dict(track_dict)
         
-        if result is None:
-            # Ball track - pass through original
-            yield (track, "ball")
-        else:
-            # Determine status from result
-            jersey_num = result["jersey_num"]
-            if jersey_num == "NA":
-                status = "NA"
-            elif jersey_num == "unsure":
-                status = "unsure"
-            else:
-                status = "confirmed"
-            
-            yield (result, status)
+        # 2. Process (Business Logic)
+        result_track = process_jersey_track(
+            segment, 
+            confidence_threshold, 
+            min_accepted_entries
+        )
+        
+        # 3. Yield Result (Output Object)
+        yield result_track
 
 
 def determine_track_jersey_number(
@@ -1086,9 +1100,9 @@ def determine_track_jersey_number(
     )
 
     # Execute and write
-    write_jsonl_stream(
+    count = write_jsonl_stream(
         output_path,
-        (track for track, status in processed_stream)
+        (track.to_dict() for track in processed_stream)  # ← Dict conversion here
     )
 
 
@@ -1148,35 +1162,6 @@ def filter_valid_points(
         jersey_num=filter_list(track.jersey_num),
         jersey_conf=track.jersey_conf,
     )
-
-
-def stream_jsonl_tracks(path: str) -> Iterator[Dict[str, Any]]:
-    """Generator: Stream JSONL tracks one at a time."""
-    with open(path, "r", encoding="utf-8") as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if line:
-                try:
-                    yield json.loads(line)
-                except json.JSONDecodeError as e:
-                    # 1. Print the error so you know data is missing
-                    print(f"❌ Corrupt JSON at line {line_num} in {path}: {e}")
-                    
-                    # 2. Continue to the next line (don't crash the pipeline)
-                    continue
-
-
-def write_jsonl_stream(path: str, data_stream: Iterator[Dict[str, Any]]) -> int:
-    """
-    Consume iterator and write to JSONL.
-    Returns count of records written.
-    """
-    count = 0
-    with open(path, "w", encoding="utf-8") as f:
-        for record in data_stream:
-            f.write(json.dumps(record) + "\n")
-            count += 1
-    return count
 
 
 def segment_track_stream(
