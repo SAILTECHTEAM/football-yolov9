@@ -1,13 +1,70 @@
 import argparse
+from dataclasses import dataclass, field
+from itertools import compress
 import json
 import numpy as np
 from collections import defaultdict
 from scipy.signal import savgol_filter
 
 import time
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Iterator, Optional
 
 from tools.remove_track_sharp import process_jsonl_detect_replace
+
+@dataclass
+class RawTrack:
+    """
+    Raw track data directly from object detection/tracking inference.
+    Frame-level predictions before any aggregation.
+    """
+    track_id: str
+    frames: List[int]
+    projected: List[List[float]]  # [[x, y], ...]
+    bbox: List[List[float]]  # [[x1, y1, x2, y2, conf], ...]
+    team_conf: List[Dict[str, float]]  # [{"home": 0.8, "away": 0.2, ...}, ...] per frame
+    jersey_num: List[int]  # [1, 10, 10, -1, ...] per frame (-1 = no detection)
+    jersey_conf: List[List[float]]  # [[0.9], [0.95, 0.99], ...] per frame
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RawTrack":
+        """Load from JSONL dict."""
+        return cls(
+            track_id=data["track_id"],
+            frames=data["frame_id"], # idk why it's named frame_id in jsonl
+            projected=data["projected"],
+            bbox=data.get("bbox", []),
+            team_conf=data.get("team_conf", []),
+            jersey_num=data.get("jersey_num", []),
+            jersey_conf=data.get("jersey_conf", []),
+        )
+
+
+@dataclass
+class TrackSegment:
+    """
+    Track segment after splitting by team changes.
+    Team is now AGGREGATED (single value), but still frame-level jersey data.
+    """
+    track_id: str  # e.g., "123a", "123b"
+    team: str  # "home" or "away" (voted)
+    team_conf: float  # Aggregated confidence for this segment
+    frames: List[int]
+    points: List[List[float]]  # [[x, y], ...]
+    bbox_area: List[float]  # Derived from bbox
+    jersey_num: List[int]  # Still frame-level
+    jersey_conf: List[List[float]]  # Still frame-level
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "track_id": self.track_id,
+            "team": self.team,
+            "team_conf": self.team_conf,
+            "frames": self.frames,
+            "points": self.points,
+            "bbox_area": self.bbox_area,
+            "jersey_num": self.jersey_num,
+            "jersey_conf": self.jersey_conf,
+        }
 
 def calculate_bbox_area(bboxes: List[List[float]]) -> List[float]:
     """
