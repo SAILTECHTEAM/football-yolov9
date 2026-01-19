@@ -49,7 +49,7 @@ class TrackSegment:
     team: str  # "home" or "away" (voted)
     team_conf: float  # Aggregated confidence for this segment
     frames: List[int]
-    points: List[List[float]]  # [[x, y], ...]
+    projected: List[List[float]]  # [[x, y], ...]
     bbox_area: List[float]  # Derived from bbox
     jersey_num: List[int]  # Still frame-level
     jersey_conf: List[List[float]]  # Still frame-level
@@ -59,11 +59,11 @@ class TrackSegment:
             "track_id": self.track_id,
             "team": self.team,
             "team_conf": self.team_conf,
-            "frames": self.frames,
-            "points": self.points,
-            "bbox_area": self.bbox_area,
             "jersey_num": self.jersey_num,
             "jersey_conf": self.jersey_conf,
+            "bbox_area": self.bbox_area,
+            "frames": self.frames,
+            "points": self.projected,
         }
 
 def calculate_bbox_area(bboxes: List[List[float]]) -> List[float]:
@@ -117,25 +117,20 @@ def index_to_letter_suffix(idx: int) -> str:
 
 
 def split_track_by_sliding_window(
-    obj: Dict[str, Any], window_size: int = 20, threshold: float = 0.8
-) -> List[Dict[str, Any]]:
+    track: RawTrack, window_size: int = 20, threshold: float = 0.8
+) -> List[TrackSegment]:
     """
     Splits a track when a new team dominates a sliding window.
 
     Args:
-        obj: Original track.
+        track: Original track.
         window_size: Size of the sliding window.
         threshold: Ratio of frames in the window needed for a team to trigger a split.
 
     Returns:
-        List of split track segments.
+        List of TrackSegment objects.
     """
-    team_conf_list = obj["team_conf"]
-    frame_ids = obj["frame_id"]
-    projected = obj["projected"]
-    bboxes = obj.get("bbox", [])
-    jersey_nums = obj.get("jersey_num", [])
-    jersey_confs = obj.get("jersey_conf", [])
+    team_conf_list = track.team_conf
 
     # Get dominant team label for each frame
     dominant_team_list = [max(conf, key=conf.get) if conf else "ball" for conf in team_conf_list]
@@ -168,17 +163,17 @@ def split_track_by_sliding_window(
                     ) / len(segment_conf_list)
                 else:
                     team_score = 0.0
-                # Commit segment
-                segment = {
-                    "track_id": f"{obj['track_id']}{chr(97 + len(segments))}",
-                    "frame_id": [frame_ids[j] for j in buffer],
-                    "projected": [projected[j] for j in buffer],
-                    "bbox": [bboxes[j] for j in buffer] if bboxes else [],
-                    "team_conf": team_score,
-                    "team": current_team,
-                    "jersey_num": ([jersey_nums[j] for j in buffer] if jersey_nums else []),
-                    "jersey_conf": ([jersey_confs[j] for j in buffer] if jersey_confs else []),
-                }
+
+                segment = TrackSegment(
+                    track_id=f"{track.track_id}{chr(97 + len(segments))}",
+                    frames=[track.frames[j] for j in buffer],
+                    projected=[track.projected[j] for j in buffer],
+                    bbox_area=calculate_bbox_area([track.bbox[j] for j in buffer]) if track.bbox else [],
+                    team_conf=team_score,
+                    team=current_team,
+                    jersey_num=[track.jersey_num[j] for j in buffer] if track.jersey_num else [],
+                    jersey_conf=[track.jersey_conf[j] for j in buffer] if track.jersey_conf else [],
+                )
                 segments.append(segment)
                 buffer = []
                 current_team = dominant_in_window
@@ -194,16 +189,16 @@ def split_track_by_sliding_window(
         team_score = sum(conf.get(current_team, 0.0) for conf in segment_conf_list) / len(
             segment_conf_list
         )
-        segment = {
-            "track_id": f"{obj['track_id']}{chr(97 + len(segments))}",
-            "frame_id": [frame_ids[j] for j in buffer],
-            "projected": [projected[j] for j in buffer],
-            "bbox": [bboxes[j] for j in buffer] if bboxes else [],
-            "team_conf": team_score,
-            "team": current_team,
-            "jersey_num": [jersey_nums[j] for j in buffer] if jersey_nums else [],
-            "jersey_conf": [jersey_confs[j] for j in buffer] if jersey_confs else [],
-        }
+        segment = TrackSegment(
+            track_id=f"{track.track_id}{chr(97 + len(segments))}",
+            frames=[track.frames[j] for j in buffer],
+            projected=[track.projected[j] for j in buffer],
+            bbox_area=calculate_bbox_area([track.bbox[j] for j in buffer]) if track.bbox else [],
+            team_conf=team_score,
+            team=current_team,
+            jersey_num=[track.jersey_num[j] for j in buffer] if track.jersey_num else [],
+            jersey_conf=[track.jersey_conf[j] for j in buffer] if track.jersey_conf else [],
+        )
         segments.append(segment)
 
     return segments
@@ -1011,50 +1006,16 @@ def load_and_split_tracks(
             
             if len(filtered_track.projected) < min_track_length:
                 continue
-            
-            # Step 4: Reconstruct track object for splitter
-            cleaned_track = {
-                "track_id": filtered_track.track_id,
-                "frame_id": filtered_track.frames,
-                "projected": filtered_track.projected,
-                "bbox": filtered_track.bbox,
-                "team_conf": filtered_track.team_conf,
-                "jersey_num": filtered_track.jersey_num,
-                "jersey_conf": filtered_track.jersey_conf,
-            }
 
-            # Now we split the clean long track
-            split_objects = split_track_by_sliding_window(cleaned_track, window_size, threshold)
+            # Step 4: Now we split the clean long track
+            split_segments = split_track_by_sliding_window(filtered_track, window_size, threshold)
 
-            for split_obj in split_objects:
-                tid = split_obj["track_id"]
-                frames = split_obj["frame_id"]
-                projected_points = split_obj["projected"]
-                bboxes = split_obj.get("bbox", [])
-
-                pts = np.array([pt for pt in projected_points if pt is not None])
-                if len(pts) == 0:
-                    continue  # skip this segment
-                xs, ys = pts[:, 0], pts[:, 1]
-
-                frs = np.array(frames)
-
-                # Calculate bbox areas for later track matching
-                bboxes_area = calculate_bbox_area(bboxes) if bboxes else []
-
-                track_dict = {
-                    "track_id": tid,
-                    "team": split_obj.get("team", "ball"),
-                    "team_conf": split_obj.get("team_conf", []),
-                    "jersey_num": split_obj.get("jersey_num", []),
-                    "jersey_conf": split_obj.get("jersey_conf", []),
-                    "bbox_area": bboxes_area,
-                    "frames": frs.tolist(),
-                    "points": np.stack([xs, ys], axis=1).tolist(),
-                }
+            for segment in split_segments:
+                if len(segment.projected) == 0:
+                    continue
 
                 # save the track_dict to jsonl
-                out_f.write(json.dumps(track_dict) + "\n")
+                out_f.write(json.dumps(segment.to_dict()) + "\n")
 
 
 def frame_to_time(frame: int, fps: float = 29.97, format_output: bool = True) -> str:
