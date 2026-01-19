@@ -7,7 +7,7 @@ from collections import defaultdict
 from scipy.signal import savgol_filter
 
 import time
-from typing import List, Dict, Any, Tuple, Iterator, Optional, Union
+from typing import List, Dict, Any, Tuple, Iterator, Optional, Union, Set
 
 from tools.remove_track_sharp import process_jsonl_detect_replace
 
@@ -305,6 +305,249 @@ def split_track_by_sliding_window(
 
     return segments
 
+# ================== hybrid_merge_stream_fixed related ================== #
+@dataclass
+class ActiveTrack:
+    """
+    Represents a track currently being merged in the buffer.
+    Encapsulates the logic of 'adding a segment'.
+    """
+    track_id: str
+    team: str
+    frames: List[int]
+    points: List[List[float]]
+    bbox_area: List[float]
+    
+    # Jersey Accumulators
+    jersey_entries: List[Any] = field(default_factory=list) # Stores {'num':..., 'conf':..., 'count':...}
+    
+    # Confidence Accumulators
+    team_conf_sum: float = 0.0
+    team_conf_count: int = 0
+    
+    @classmethod
+    def from_segment(cls, seg: Dict[str, Any]) -> 'ActiveTrack':
+        """Initialize from the first segment."""
+        # Helper to normalize jersey data to a consistent list format
+        j_nums = seg.get("jersey_num", [])
+        j_confs = seg.get("jersey_conf", [])
+        j_counts = seg.get("count", 0)
+        
+        # Handle scalar/list mismatch normalization here...
+        # (Simplified for brevity, assuming normalized lists)
+        entries = []
+        if isinstance(j_nums, list):
+            for n, c, cnt in zip(j_nums, j_confs, j_counts if isinstance(j_counts, list) else [j_counts]*len(j_nums)):
+                entries.append({'num': n, 'conf': c, 'count': cnt})
+        elif j_nums not in ["unsure", "NA"]:
+             entries.append({'num': j_nums, 'conf': j_confs, 'count': j_counts})
+
+        return cls(
+            track_id=seg["track_id"],
+            team=seg["team"],
+            frames=seg["frames"],
+            points=seg["points"],
+            bbox_area=seg.get("bbox_area", []),
+            jersey_entries=entries,
+            team_conf_sum=seg.get("team_conf", 0.0) * len(seg["frames"]),
+            team_conf_count=len(seg["frames"])
+        )
+
+    def can_merge(self, seg: Dict[str, Any], max_gap: int, max_dist: float, max_overlap: int) -> bool:
+        """Pure Predicate: Should we merge this segment?"""
+        if seg["team"] != self.team:
+            return False
+            
+        last_frame = self.frames[-1]
+        start_frame = seg["frames"][0]
+        gap = start_frame - last_frame
+
+        # 1. Temporal Check
+        if not ((0 <= gap <= max_gap) or (0 < -gap <= max_overlap)):
+            return False
+
+        # 2. Spatial Check
+        # Use numpy for fast distance
+        p1 = np.array(self.points[-1])
+        p2 = np.array(seg["points"][0])
+        dist = np.linalg.norm(p1 - p2)
+        
+        return dist <= max_dist
+
+    def merge(self, seg: Dict[str, Any]):
+        """Mutator: Absorb the new segment data."""
+        # 1. Merge Spatiotemporal Data
+        self.frames.extend(seg["frames"])
+        self.points.extend(seg["points"])
+        self.bbox_area.extend(seg.get("bbox_area", []))
+        
+        # 2. Deduplicate frames (keep first occurrence for each frame)
+        frame_dict = {}
+        for f, p, a in zip(self.frames, self.points, self.bbox_area):
+            if f not in frame_dict:
+                frame_dict[f] = (p, a)
+        
+        # Sort by frame and reconstruct
+        sorted_frames = sorted(frame_dict.keys())
+        self.frames = sorted_frames
+        self.points = [frame_dict[f][0] for f in sorted_frames]
+        self.bbox_area = [frame_dict[f][1] for f in sorted_frames]
+
+        # 3. Merge Confidence
+        self.team_conf_sum += seg.get("team_conf", 0.0) * len(seg["frames"])
+        self.team_conf_count += len(seg["frames"])
+
+        # 4. Merge Jersey Data - Extract and append entries
+        new_entries = _extract_jersey_entries(seg)
+        self.jersey_entries.extend(new_entries)
+
+
+def _extract_jersey_entries(seg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Extract jersey entries from a segment, handling all formats.
+    
+    Returns:
+        List of dicts with keys: 'num', 'conf', 'count'
+    """
+    j_nums = seg.get("jersey_num", "unsure")
+    j_confs = seg.get("jersey_conf", 0.0)
+    j_counts = seg.get("count", 0)
+    
+    # Handle special statuses
+    if j_nums in ["unsure", "NA"]:
+        return []
+    
+    # Normalize to lists
+    if not isinstance(j_nums, list):
+        j_nums = [j_nums]
+    if not isinstance(j_confs, list):
+        j_confs = [j_confs]
+    if not isinstance(j_counts, list):
+        j_counts = [j_counts]
+    
+    # Zip together (handle length mismatches)
+    entries = []
+    for i in range(len(j_nums)):
+        entries.append({
+            'num': j_nums[i],
+            'conf': j_confs[i] if i < len(j_confs) else 0.0,
+            'count': j_counts[i] if i < len(j_counts) else 0
+        })
+    
+    return entries
+
+
+def finalize_track_data(
+    track: ActiveTrack, 
+    smoothing_window: int, 
+    polyorder: int
+) -> Dict[str, Any]:
+    """
+    Takes an ActiveTrack, performs interpolation/smoothing/jersey-voting, 
+    and returns the Final Dictionary.
+    """
+    # 1. Interpolation & Smoothing
+    # (Assuming interpolate_full_track is defined elsewhere)
+    frames_arr = np.array(track.frames)
+    points_arr = np.array(track.points)
+    areas_arr = np.array(track.bbox_area)
+    
+    # Call your existing helper
+    frames, points, areas = interpolate_full_track(frames_arr, points_arr, areas_arr)
+
+    if len(points) >= smoothing_window:
+        xs = savgol_filter(points[:, 0], smoothing_window, polyorder)
+        ys = savgol_filter(points[:, 1], smoothing_window, polyorder)
+        points = np.stack([xs, ys], axis=1)
+
+    # 2. Resolve Jersey Number (vote across all merged segments)
+    final_jersey, final_conf, final_count = _resolve_jersey_vote(track)
+    return {
+        "track_id": track.track_id,
+        "team": track.team,
+        "jersey_num": final_jersey,
+        "jersey_conf": final_conf,
+        "count": final_count,
+        "frame_range": [int(frames[0]), int(frames[-1])],
+        "frames": frames.tolist(),
+        "projected": points.tolist(),
+        "bbox_area": areas.tolist(),
+        "team_conf": track.team_conf_sum / track.team_conf_count if track.team_conf_count else 0.0,
+    }
+
+
+def _resolve_jersey_vote(track: ActiveTrack) -> Tuple[Union[str, int, List[int]], Union[float, List[float]], Union[int, List[int]]]:
+    """
+    Consolidate jersey entries and determine final jersey number(s).
+    
+    This implements the merge logic from the original hybrid_merge_stream_fixed():
+    1. Referee → "NA"
+    2. No entries → "unsure"
+    3. Multiple entries → Aggregate by number, sort by (count, conf)
+    
+    Returns:
+        (jersey_num, jersey_conf, count) tuple
+        - jersey_num: "NA", "unsure", int, or List[int]
+        - jersey_conf: float or List[float]
+        - count: int or List[int]
+    """
+    # CASE 1: Referee team - always "NA"
+    if track.team == "referee":
+        return "NA", 0.0, 0
+    
+    # CASE 2: No jersey entries collected
+    if not track.jersey_entries:
+        return "unsure", 0.0, 0
+    
+    # CASE 3: Aggregate entries by jersey number
+    # Create mapping: jersey_num -> {"confs": [...], "counts": [...]}
+    jersey_data_map = defaultdict(lambda: {"confs": [], "counts": []})
+    
+    for entry in track.jersey_entries:
+        num = entry["num"]
+        conf = entry["conf"]
+        count = entry["count"]
+        
+        jersey_data_map[num]["confs"].append(conf)
+        jersey_data_map[num]["counts"].append(count)
+    
+    # Average confidences and sum counts for each jersey number
+    merged_jerseys = []
+    merged_confs = []
+    merged_counts = []
+    
+    for jersey_num in sorted(jersey_data_map.keys()):
+        conf_list = jersey_data_map[jersey_num]["confs"]
+        count_list = jersey_data_map[jersey_num]["counts"]
+        
+        # Average confidence (weighted by count if you prefer)
+        avg_conf = sum(conf_list) / len(conf_list)
+        total_count = sum(count_list)
+        
+        merged_jerseys.append(jersey_num)
+        merged_confs.append(avg_conf)
+        merged_counts.append(total_count)
+    
+    # Sort by count (descending), then by confidence (descending)
+    sorted_triplets = sorted(
+        zip(merged_jerseys, merged_confs, merged_counts),
+        key=lambda x: (x[2], x[1]),  # (count, conf)
+        reverse=True
+    )
+    
+    # Extract sorted lists
+    final_nums = [num for num, _, _ in sorted_triplets]
+    final_confs = [conf for _, conf, _ in sorted_triplets]
+    final_counts = [count for _, _, count in sorted_triplets]
+    
+    # Return format depends on number of candidates
+    if len(final_nums) == 1:
+        # Single jersey number - return as scalars
+        return [final_nums[0]], [final_confs[0]], [final_counts[0]]
+    else:
+        # Multiple candidates - return as lists
+        return final_nums, final_confs, final_counts
+
 
 def interpolate_full_track(
     frames: List[int], points: np.ndarray, areas: np.ndarray
@@ -343,256 +586,116 @@ def hybrid_merge_stream_fixed(
     smoothing_window: int = 11,
     polyorder: int = 3,
 ):
-
-    final_output = open(output_path, "w")
-    frame_to_tracks = defaultdict(list)
-    active_tracks = {}
-    done_tracks = set()
-
-    # Load all segments from JSONL (inlined stream_jsonl_segments)
-    with open(jsonl_path, "r") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            seg = json.loads(line)
-            start_frame = seg["frames"][0]
-            frame_to_tracks[start_frame].append(seg)
-
+    """
+    Stream-based track merging with object-oriented state management.
+    
+    Args:
+        jsonl_path: Input JSONL with track segments
+        output_path: Output JSONL with merged tracks
+        max_merge_gap: Maximum frame gap for merging
+        max_merge_overlap_frames: Maximum frame overlap allowed
+        max_merge_distance: Maximum spatial distance for merging
+        smoothing_window: Window size for Savitzky-Golay filter
+        polyorder: Polynomial order for smoothing
+    """
+    # 1. Load Data (Still loaded fully, but isolated)
+    # If optimization is needed later, this is the ONLY part to change.
+    frame_to_tracks = _load_segments_by_frame(jsonl_path)
     max_buffer_frame = max(frame_to_tracks.keys()) if frame_to_tracks else 0
-    current_frame = 0
+    
+    active_tracks: Dict[str, ActiveTrack] = {} # Map ID -> Object
+    done_tracks: Set[str] = set()
+    
+    with open(output_path, "w") as f_out:
+        
+        # 2. Temporal Loop
+        for current_frame in range(max_buffer_frame + 1):
+            
+            # A. Gather Candidates
+            candidates = []
+            for offset in range(-max_merge_overlap_frames, max_merge_gap + 1):
+                candidates.extend(frame_to_tracks.get(current_frame + offset, []))
 
-    while current_frame <= max_buffer_frame:
-        # Load candidate segments for current frame window
-        candidates = []
-        for offset in range(-max_merge_overlap_frames, max_merge_gap + 1):
-            f = current_frame + offset
-            candidates.extend(frame_to_tracks.get(f, []))
-
-        merged_this_round = set()
-        for seg in candidates:
-            tid = seg["track_id"]
-            if tid in done_tracks or tid in merged_this_round or tid in active_tracks:
-                continue
-
-            best_match = None
-            best_dist = float("inf")
-            for mtid, m in active_tracks.items():
-                if seg["team"] != m["team"]:
+            # B. Match Logic
+            merged_this_round = set()
+            
+            for seg in candidates:
+                tid = seg["track_id"]
+                if tid in done_tracks or tid in merged_this_round:
                     continue
-                last_frame = m["frames"][-1]
-                gap = seg["frames"][0] - last_frame
-                if not ((0 <= gap <= max_merge_gap) or (0 < -gap <= max_merge_overlap_frames)):
+
+                if tid in active_tracks:
                     continue
-                dist = np.linalg.norm(np.array(m["points"][-1]) - np.array(seg["points"][0]))
-                if dist <= max_merge_distance and dist < best_dist:
-                    best_match = mtid
-                    best_dist = dist
 
-            if best_match:
-                m = active_tracks[best_match]
+                # Find Best Match in Active Tracks
+                best_match_id = None
+                best_dist = float("inf")
 
-                combined_frames = m["frames"] + seg["frames"]
-                combined_points = m["points"] + seg["points"]
-                combined_bbox_areas = m.get("bbox_area", []) + seg.get("bbox_area", [])
-
-                # Create frame->point mapping and remove duplicates
-                frame_point_map = {}
-                frame_area_map = {}
-                for frame, point, area in zip(
-                    combined_frames, combined_points, combined_bbox_areas
-                ):
-                    if frame not in frame_point_map:
-                        frame_point_map[frame] = point
-                        frame_area_map[frame] = area
-                    # If duplicate frame, keep the one with higher confidence or average them
-                    # For simplicity, we keep the first occurrence
-
-                # Sort by frame and update
-                sorted_frames = sorted(frame_point_map.keys())
-                m["frames"] = sorted_frames
-                m["points"] = [frame_point_map[f] for f in sorted_frames]
-                m["bbox_area"] = [frame_area_map[f] for f in sorted_frames]
-
-                team = m.get("team", "")
-                m_jersey = m.get("jersey_num", "unsure")
-                seg_jersey = seg.get("jersey_num", "unsure")
-                m_conf = m.get("jersey_conf", 0.0)
-                seg_conf = seg.get("jersey_conf", 0.0)
-                m_count = m.get("count", 0)
-                seg_count = seg.get("count", 0)
-
-                # print(f"Merging jersey_num for track {tid}: {m_jersey} + {seg_jersey}")
-
-                # CASE 1: Referee team - always keep as "NA"
-                if team == "referee":
-                    m["jersey_num"] = "NA"
-                    m["jersey_conf"] = 0.0
-                    m["count"] = 0
-
-                # CASE 2: Either side is "unsure" - use the other side
-                elif m_jersey == "unsure" and seg_jersey != "unsure":
-                    m["jersey_num"] = seg_jersey
-                    m["jersey_conf"] = seg_conf
-                    m["count"] = seg_count
-                    # print(f"  → Using seg jersey: {seg_jersey}")
-
-                elif seg_jersey == "unsure" and m_jersey != "unsure":
-                    # Keep m's values (no change needed)
-                    # print(f"  → Keeping m jersey: {m_jersey}")
-                    pass
-
-                # CASE 3: Both have data - merge intelligently
-                elif m_jersey != "unsure" and seg_jersey != "unsure":
-                    # Normalize both to lists
-                    m_nums = m_jersey if isinstance(m_jersey, list) else [m_jersey]
-                    seg_nums = seg_jersey if isinstance(seg_jersey, list) else [seg_jersey]
-                    
-                    m_confs = m_conf if isinstance(m_conf, list) else [m_conf]
-                    seg_confs = seg_conf if isinstance(seg_conf, list) else [seg_conf]
-
-                    m_counts = m_count if isinstance(m_count, list) else [m_count]
-                    seg_counts = seg_count if isinstance(seg_count, list) else [seg_count]
-                    # Create mapping: jersey_num -> {"confs": [...], "counts": [...]}
-                    jersey_data_map = defaultdict(lambda: {"confs": [], "counts": []})
-                    
-                    for num, conf, count in zip(m_nums, m_confs, m_counts):
-                        jersey_data_map[num]["confs"].append(conf)
-                        jersey_data_map[num]["counts"].append(count)
-                    
-                    for num, conf, count in zip(seg_nums, seg_confs, seg_counts):
-                        jersey_data_map[num]["confs"].append(conf)
-                        jersey_data_map[num]["counts"].append(count)
-
-                    # Average confidences and sum counts for each jersey number
-                    merged_jerseys = []
-                    merged_confs = []
-                    merged_counts = []
-                    
-                    for jersey_num in sorted(jersey_data_map.keys()):
-                        conf_list = jersey_data_map[jersey_num]["confs"]
-                        count_list = jersey_data_map[jersey_num]["counts"]
+                for mtid, active_track in active_tracks.items():
+                    # Use the method on the class!
+                    if active_track.can_merge(seg, max_merge_gap, max_merge_distance, max_merge_overlap_frames):
+                        # Calculate specific distance for tie-breaking
+                        p1 = np.array(active_track.points[-1])
+                        p2 = np.array(seg["points"][0])
+                        dist = np.linalg.norm(p1 - p2)
                         
-                        avg_conf = sum(conf_list) / len(conf_list)
-                        total_count = sum(count_list)
-                        
-                        merged_jerseys.append(jersey_num)
-                        merged_confs.append(avg_conf)
-                        merged_counts.append(total_count)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_match_id = mtid
 
-                    # Sort by count (descending), then by confidence (descending)
-                    sorted_triplets = sorted(
-                        zip(merged_jerseys, merged_confs, merged_counts), 
-                        key=lambda x: (x[2], x[1]),  # Sort by count first, then confidence
-                        reverse=True
-                    )
-                    
-                    m["jersey_num"] = [num for num, _, _ in sorted_triplets]
-                    m["jersey_conf"] = [conf for _, conf, _ in sorted_triplets]
-                    m["count"] = [count for _, _, count in sorted_triplets]
-                    
-                    # print(f"  → Merged result: {m['jersey_num']} with confs {m['jersey_conf']}")
-
-                # CASE 4: Both are "unsure"
+                # Perform Merge or Create New
+                if best_match_id:
+                    active_tracks[best_match_id].merge(seg)
+                    merged_this_round.add(tid)
+                    done_tracks.add(tid)
                 else:
-                    m["jersey_num"] = "unsure"
-                    m["jersey_conf"] = 0.0
-                    m["count"] = 0
-                    # print(f"  → Both unsure, keeping unsure")
+                    # Create new object
+                    new_track = ActiveTrack.from_segment(seg)
+                    active_tracks[tid] = new_track
+                    merged_this_round.add(tid)
 
-                # Update team confidence
-                m["team_conf_total"] += seg.get("team_conf", 0.0) * len(seg["frames"])
-                m["team_conf_len"] += len(seg["frames"])
-                merged_this_round.add(tid)
-                done_tracks.add(tid)
-            else:
-                active_tracks[tid] = {
-                    "track_id": tid,
-                    "team": seg["team"],
-                    "frames": seg["frames"],
-                    "points": seg["points"],
-                    "jersey_num": seg.get("jersey_num", []),
-                    "jersey_conf": seg.get("jersey_conf", []),
-                    "count": seg.get("count", 0),
-                    "bbox_area": seg.get("bbox_area", []),
-                    "team_conf_total": seg.get("team_conf", 0.0) * len(seg["frames"]),
-                    "team_conf_len": len(seg["frames"]),
-                }
-                merged_this_round.add(tid)
+            # C. Flush Stale Tracks
+            # Collect IDs first to avoid "dictionary changed size during iteration"
+            stale_ids = [
+                tid for tid, track in active_tracks.items()
+                if track.frames[-1] < current_frame - max_merge_gap
+            ]
 
-        # Finalize stale tracks
-        to_remove = []
-        for tid, m in active_tracks.items():
-        #     print(f"Checking finalization for track {tid} at frame {current_frame}: last frame = {m['frames'][-1]}")
-        #     print(f"  → Frames: {len(m['frames'])}")
-        #     print(f"  → Points: {len(m['points'])}")
-        #     print(f"  → BBox Areas: {len(m.get('bbox_area', []))}")
-            if m["frames"][-1] < current_frame - max_merge_gap:
-                frames = m["frames"]
-                points = m["points"]
-                areas = m.get("bbox_area", [])
+            for tid in stale_ids:
+                track = active_tracks.pop(tid)
+                # Call helper to smooth/write
+                final_data = finalize_track_data(track, smoothing_window, polyorder)
+                f_out.write(json.dumps(final_data) + "\n")
+                done_tracks.add(tid) # Just in case
 
-                frames, points, areas = interpolate_full_track(
-                    m["frames"], np.array(m["points"]), np.array(m.get("bbox_area", []))
-                )
+        # 3. Final Flush (Whatever is left in buffer)
+        for track in active_tracks.values():
+            final_data = finalize_track_data(track, smoothing_window, polyorder)
+            f_out.write(json.dumps(final_data) + "\n")
 
-                if len(points) >= smoothing_window:
-                    xs = savgol_filter(points[:, 0], smoothing_window, polyorder)
-                    ys = savgol_filter(points[:, 1], smoothing_window, polyorder)
-                    points = np.stack([xs, ys], axis=1)
-                team_conf = m["team_conf_total"] / m["team_conf_len"] if m["team_conf_len"] else 0.0
-                output = {
-                    "track_id": m["track_id"],
-                    "team": m["team"],
-                    "jersey_num": m["jersey_num"],
-                    "jersey_conf": m["jersey_conf"],
-                    "count": m.get("count", 0),
-                    "frame_range": [int(frames[0]), int(frames[-1])],
-                    "frames": frames.tolist(),
-                    "projected": points.tolist(),
-                    "bbox_area": areas.tolist(),
-                    "team_conf": team_conf,
-                }
-                final_output.write(json.dumps(output) + "\n")
-                to_remove.append(tid)
-                done_tracks.add(tid)
-
-        for tid in to_remove:
-            del active_tracks[tid]
-
-        current_frame += 1
-
-    # Final flush
-    for tid, m in active_tracks.items():
-        frames = m["frames"]
-        points = m["points"]
-        areas = m.get("bbox_area", [])
-
-        frames, points, areas = interpolate_full_track(
-            m["frames"], np.array(m["points"]), np.array(m.get("bbox_area", []))
-        )
-        if len(points) >= smoothing_window:
-            xs = savgol_filter(points[:, 0], smoothing_window, polyorder)
-            ys = savgol_filter(points[:, 1], smoothing_window, polyorder)
-            points = np.stack([xs, ys], axis=1)
-        team_conf = m["team_conf_total"] / m["team_conf_len"] if m["team_conf_len"] else 0.0
-        output = {
-            "track_id": m["track_id"],
-            "team": m["team"],
-            "jersey_num": m["jersey_num"],
-            "jersey_conf": m["jersey_conf"],
-            "count": m.get("count", 0),
-            "frame_range": [int(frames[0]), int(frames[-1])],
-            "frames": frames.tolist(),
-            "projected": points.tolist(),
-            "bbox_area": areas.tolist(),
-            "team_conf": team_conf,
-        }
-        final_output.write(json.dumps(output) + "\n")
-
-    final_output.close()
     print(f"✅ Merged and saved to: {output_path}")
 
 
+def _load_segments_by_frame(path: str) -> Dict[int, List[dict]]:
+    """
+    Load segments indexed by their start frame.
+    Isolated loader that can be swapped for a buffered generator later.
+    """
+    mapping = defaultdict(list)
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                try:
+                    seg = json.loads(line)
+                    start_frame = seg["frames"][0]
+                    mapping[start_frame].append(seg)
+                except (json.JSONDecodeError, KeyError, IndexError) as e:
+                    print(f"⚠️  Skipping invalid segment: {e}")
+                    continue
+    return mapping
+
+
+# ================== Endpoint Anomaly Detection ================== #
 def detect_endpoint_anomalies(positions: np.ndarray, frames: np.ndarray, 
                               window_size: int = 15,
                               speed_threshold_factor: float = 3.0,
@@ -1049,6 +1152,7 @@ def process_jersey_track(
         frames=track.frames,
         projected=track.projected,
     )
+
 
 def jersey_determination_stream(
     input_stream: Iterator[Dict[str, Any]],
