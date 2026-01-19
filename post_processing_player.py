@@ -916,6 +916,52 @@ def determine_track_jersey_number(
     print(f"✅ Jersey numbers determined and saved to: {output_path}")
 
 
+def filter_valid_points(
+    track: RawTrack,
+    field_size: Tuple[int, int] = (1060, 660),
+) -> RawTrack:
+    """
+    Pure function: Filters points outside field boundaries.
+    
+    Returns:
+        track: Filtered track with only in-bounds points.
+    """
+
+    # 1. Validation
+    if len(track.projected) == 0:
+        return None
+
+    # 2. Geometry Calculation
+    w, h = field_size
+    
+    # This generates a list of booleans: [True, False, True, ...]
+    in_bounds = [
+        (0 <= p[0] <= w) and (0 <= p[1] <= h)
+        for p in track.projected
+    ]
+
+    # 3. Check if we filtered everything out
+    # 'any' is faster than sum() for lists because it stops at the first True
+    if not any(in_bounds): 
+        return None
+
+    # 4. Helper for List Slicing (Solves the "Unbound Variable" & "Repetition" issues)
+    def filter_list(data: list) -> list:
+        # Only try to compress if data exists, otherwise return empty list
+        return list(compress(data, in_bounds)) if data else []
+
+    # 5. Constructor with Inlining
+    return RawTrack(
+        track_id=track.track_id,
+        frames=filter_list(track.frames),
+        projected=filter_list(track.projected),
+        bbox=filter_list(track.bbox),
+        team_conf=filter_list(track.team_conf),
+        jersey_num=filter_list(track.jersey_num),
+        jersey_conf=track.jersey_conf,
+    )
+
+
 def load_and_split_tracks(
     json_path: str,
     output_path: str,
@@ -951,26 +997,34 @@ def load_and_split_tracks(
             if len(projected_points) < min_track_length:
                 continue
 
-            pts = np.array([pt for pt in projected_points if pt is not None])
-            if len(pts) < min_track_length:
-                continue
+            raw_track = RawTrack.from_dict(obj)
+            
+            raw_track.projected = [pt for pt in raw_track.projected if pt is not None]
+            
+            filtered_track = filter_valid_points(
+                raw_track,
+                field_size=field_size,
+            )
 
-            xs, ys = pts[:, 0], pts[:, 1]
-            in_bounds = (xs >= 0) & (xs <= field_size[0]) & (ys >= 0) & (ys <= field_size[1])
-            if in_bounds.sum() < min_track_length:
+            if filtered_track is None:
                 continue
-
-            obj["frame_id"] = np.array(obj["frame_id"])[in_bounds].tolist()
-            obj["projected"] = pts[in_bounds].tolist()
-            if "bbox" in obj:
-                obj["bbox"] = np.array(obj["bbox"])[in_bounds].tolist()
-            if "team_conf" in obj:
-                obj["team_conf"] = np.array(obj["team_conf"])[in_bounds].tolist()
-            if "jersey_num" in obj:
-                obj["jersey_num"] = np.array(obj["jersey_num"])[in_bounds].tolist()
+            
+            if len(filtered_track.projected) < min_track_length:
+                continue
+            
+            # Step 4: Reconstruct track object for splitter
+            cleaned_track = {
+                "track_id": filtered_track.track_id,
+                "frame_id": filtered_track.frames,
+                "projected": filtered_track.projected,
+                "bbox": filtered_track.bbox,
+                "team_conf": filtered_track.team_conf,
+                "jersey_num": filtered_track.jersey_num,
+                "jersey_conf": filtered_track.jersey_conf,
+            }
 
             # Now we split the clean long track
-            split_objects = split_track_by_sliding_window(obj, window_size, threshold)
+            split_objects = split_track_by_sliding_window(cleaned_track, window_size, threshold)
 
             for split_obj in split_objects:
                 tid = split_obj["track_id"]
@@ -1368,7 +1422,7 @@ def coarse_postprocessing(
     )
     end_load = time.time()
     print(f"✅ Loaded and split tracks in {end_load - start_load:.2f} seconds")
-
+    return "testing"
     determine_track_jersey_number(
         jsonl_path=json_path.replace(".jsonl", "_split.jsonl"),
         output_path=json_path.replace(".jsonl", "_split_with_jersey.jsonl"),
