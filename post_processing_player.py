@@ -910,6 +910,17 @@ def determine_track_jersey_number(
 
     print(f"✅ Jersey numbers determined and saved to: {output_path}")
 
+# ================== load_and_split_tracks related ================== #
+def validate_track_length(track_data: Dict[str, Any], min_track_length: int) -> bool:
+    """Pure predicate: Check if track meets minimum length."""
+    projected = track_data.get("projected", [])
+    if not projected:
+        return False
+    
+    # Filter None values
+    valid_points = [pt for pt in projected if pt is not None]
+    return len(valid_points) >= min_track_length
+
 
 def filter_valid_points(
     track: RawTrack,
@@ -957,6 +968,78 @@ def filter_valid_points(
     )
 
 
+def stream_jsonl_tracks(path: str) -> Iterator[Dict[str, Any]]:
+    """Generator: Stream JSONL tracks one at a time."""
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+
+def write_jsonl_stream(path: str, data_stream: Iterator[Dict[str, Any]]) -> int:
+    """
+    Consume iterator and write to JSONL.
+    Returns count of records written.
+    """
+    count = 0
+    with open(path, "w") as f:
+        for record in data_stream:
+            f.write(json.dumps(record) + "\n")
+            count += 1
+    return count
+
+
+def process_track_streaming(
+    track: Dict[str, Any],
+    field_size: Tuple[int, int],
+    min_track_length: int,
+    window_size: int,
+    threshold: float,
+) -> Iterator[Dict[str, Any]]:
+    """
+    Generator: Process single track through full pipeline.
+    Yields formatted track segments.
+    """
+    # Step 1: Validate minimum length (early exit)
+    if not validate_track_length(track, min_track_length):
+        return
+    
+    # Step 2: Filter None values
+    raw_track = RawTrack.from_dict(track)
+    
+    raw_track.projected = [pt for pt in raw_track.projected if pt is not None]
+    
+    # Step 3: Filter out-of-bounds points
+    filtered_track = filter_valid_points(
+        raw_track,
+        field_size=field_size,
+    )
+
+    if filtered_track is None:
+        return
+    
+    if len(filtered_track.projected) < min_track_length:
+        return
+    
+    # Step 4: Reconstruct track object for splitter
+
+    # Step 5: Split track by team changes
+    split_segments = split_track_by_sliding_window(
+        filtered_track, window_size=window_size, threshold=threshold
+    )
+    
+    # Step 6: Format each segment
+    for segment in split_segments:
+        if len(segment.projected) == 0:
+            continue
+        
+        yield segment.to_dict()
+
+
 def load_and_split_tracks(
     json_path: str,
     output_path: str,
@@ -966,58 +1049,28 @@ def load_and_split_tracks(
     threshold: float,
 ):
     """
-    Draw smoothed 2D trajectories from tracking JSON with optional merging of fragmented tracks.
-
-    Args:
-        json_path: Path to tracking JSON.
-        output_path: Path to save processed tracks JSONL.
-        field_size: Field dimension (width, height).
-        min_track_length: Minimum track length to visualize.
-        window_size: Size of the sliding window.
-        threshold: Ratio of frames in the window needed for a team to trigger a split.
-
+    Main entry point: Stream-process tracks with splitting and filtering.
     """
+    # Create processing pipeline (lazy evaluation)
+    input_stream = stream_jsonl_tracks(json_path)
+    
+    processed_stream = (
+        segment
+        for track in input_stream
+        for segment in process_track_streaming(
+            track=track,
+            field_size=tuple(field_size),
+            min_track_length=min_track_length,
+            window_size=window_size,
+            threshold=threshold,
+        )
+    )
+    
+    # Execute and write
+    count = write_jsonl_stream(output_path, processed_stream)
+    print(f"✅ Processed {count} track segments → {output_path}")
 
-    track_dict = {}
-
-    # Make sure the output file is empty/overwritten at start
-    with open(output_path, "w") as out_f:
-        pass  # This creates an empty file or truncates existing file
-
-    with open(json_path, "r") as f, open(output_path, "a") as out_f:
-        for line in f:
-            obj = json.loads(line)
-            # print(type(obj['projected'][0][0]))  # e.g., <class 'float'>
-            projected_points = obj.get("projected", [])
-            if len(projected_points) < min_track_length:
-                continue
-
-            raw_track = RawTrack.from_dict(obj)
-            
-            raw_track.projected = [pt for pt in raw_track.projected if pt is not None]
-            
-            filtered_track = filter_valid_points(
-                raw_track,
-                field_size=field_size,
-            )
-
-            if filtered_track is None:
-                continue
-            
-            if len(filtered_track.projected) < min_track_length:
-                continue
-
-            # Step 4: Now we split the clean long track
-            split_segments = split_track_by_sliding_window(filtered_track, window_size, threshold)
-
-            for segment in split_segments:
-                if len(segment.projected) == 0:
-                    continue
-
-                # save the track_dict to jsonl
-                out_f.write(json.dumps(segment.to_dict()) + "\n")
-
-
+# ================== Other Post-Processing Utilities ================== #
 def frame_to_time(frame: int, fps: float = 29.97, format_output: bool = True) -> str:
     """
     Convert frame index to time based on FPS.
