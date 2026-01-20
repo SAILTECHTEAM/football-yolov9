@@ -29,16 +29,15 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 cv2.setNumThreads(1)
 
 
-def load_pose_model():
+def load_pose_model(config_path: str = None, checkpoint_path: str = None, device: str = "cuda"):
     """
     Load the ViTPose model instead of OnePose.
     """
-    # Configuration paths for ViTPose
-    pose_config = "/ViTPose/configs/body/2d_kpt_sview_rgb_img/topdown_heatmap/coco/ViTPose_huge_simple_coco_256x192.py"
-    pose_checkpoint = "/ViTPose/checkpoints/vitpose-h-simple.pth"
-
-    # Initialize the pose model
-    pose_model = init_pose_model(pose_config, pose_checkpoint, device="cuda")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Pose config not found: {config_path}")
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Pose checkpoint not found: {checkpoint_path}") # Initialize the pose model
+    pose_model = init_pose_model(config_path, checkpoint_path, device=device)
 
     return pose_model
 
@@ -622,7 +621,11 @@ def process_one_file(jsonl_path: Path, args) -> str:
             if not cap.isOpened():
                 cap = None
 
-    pose_model = load_pose_model() if (need_pose and not args.no_pose) else None
+    pose_model = (
+        load_pose_model(args.pose_config, args.pose_checkpoint, args.pose_device)
+        if (need_pose and not args.no_pose)
+        else None
+    )
 
     # trackers & writers (but: ball class uses a fuser instead)
     trackers = {}
@@ -841,6 +844,26 @@ def main():
     # Streaming/flush
     ap.add_argument("--flush-interval", type=int, default=200)
     ap.add_argument("--lost-thresh", type=int, default=50)
+    # Pose model config
+    ap.add_argument(
+        "--pose-config",
+        type=str,
+        default="/usr/src/ViTPose/configs/body/2d_kpt_sview_rgb_img/topdown_heatmap/coco/ViTPose_huge_simple_coco_256x192.py",
+        help="Path to pose model config file"
+    )
+    ap.add_argument(
+        "--pose-checkpoint",
+        type=str,
+        default="/ViTPose/checkpoints/vitpose-h-simple.pth",
+        help="Path to pose model checkpoint file"
+    )
+    ap.add_argument(
+        "--pose-device",
+        type=str,
+        default="cuda",
+        choices=["cuda", "cpu"],
+        help="Device for pose model (cuda or cpu)"
+    )
     # Pose + team
     ap.add_argument("--hist", type=str, default=None)
     ap.add_argument("--skip-small-area", type=int, default=5000)
