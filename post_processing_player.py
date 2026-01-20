@@ -1,5 +1,6 @@
 import argparse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import partial
 from itertools import compress
 import json
 import numpy as np
@@ -1076,13 +1077,113 @@ def _load_segments_by_frame(path: str) -> Dict[int, List[dict]]:
 
 
 # ================== Endpoint Anomaly Detection ================== #
+def trim_single_track(
+    track: AggregatedTrack,  # <--- Reusing your existing class
+    # Explicit parameters
+    window_size: int,
+    speed_threshold_factor: float,
+    acceleration_threshold_factor: float,
+    direction_change_threshold: float,
+    check_start: bool,
+    check_end: bool,
+    min_track_length: int
+) -> Optional[AggregatedTrack]:
+    
+
+    # 1. Filter: Skip Ball
+    if track.team in ["ball"]:
+        return track
+
+    # 2. Filter: Too short
+    if len(track.frames) < window_size * 2 or len(track.frames) < min_track_length:
+        return track
+
+    # 3. Detect (Pass args through)
+    try:
+        start_idx, end_idx = detect_endpoint_anomalies(
+            track.projected, track.frames,
+            window_size, speed_threshold_factor, 
+            acceleration_threshold_factor, direction_change_threshold,
+            check_start, check_end
+        )
+    except Exception as e:
+        print(f"⚠️  Error processing track {track.track_id}: {e}")
+        return track
+
+    # 4. Validate Trim
+    new_len = end_idx - start_idx + 1
+    if start_idx >= end_idx or new_len < min_track_length:
+        return None
+
+    if start_idx == 0 and end_idx == len(track.frames) - 1:
+        return track
+    
+    # Helper to slice lists safely
+    def slice_safe(lst):
+        return lst[start_idx : end_idx + 1] if lst and len(lst) == len(track.frames) else lst
+
+    return replace(
+        track,
+        frames=track.frames[start_idx : end_idx + 1],
+        projected=track.projected[start_idx : end_idx + 1],
+        bbox_area=slice_safe(track.bbox_area),
+        frame_range=[int(track.frames[start_idx]), int(track.frames[end_idx])],
+        # Note: If AggregatedTrack has jersey_conf as list, slice it too:
+        # jersey_conf=slice_safe(track.jersey_conf)
+    )
+
+
+def trim_track_endpoints_streaming(
+    jsonl_path: str,
+    output_path: str,
+    # Explicit arguments in the main entry point
+    window_size: int = 61,
+    speed_threshold_factor: float = 2.5,
+    acceleration_threshold_factor: float = 2.5,
+    direction_change_threshold: float = 60.0,
+    check_start: bool = True,
+    check_end: bool = True,
+    min_track_length: int = 30,
+):
+    print(f"✂️ Trimming endpoints: {jsonl_path} → {output_path}")
+
+    # 1. Prepare the Processor
+    # We bake the configuration into a callable function
+    processor_fn = partial(
+        trim_single_track,
+        window_size=window_size,
+        speed_threshold_factor=speed_threshold_factor,
+        acceleration_threshold_factor=acceleration_threshold_factor,
+        direction_change_threshold=direction_change_threshold,
+        check_start=check_start,
+        check_end=check_end,
+        min_track_length=min_track_length
+    )
+
+    # 2. Pipeline
+    input_stream = stream_jsonl_tracks(jsonl_path)
+    
+    # 3. Execution
+    # Note: AggregatedTrack needs a .from_dict() method as discussed previously
+    processed_stream = (
+        processor_fn(track=AggregatedTrack.from_dict(d))
+        for d in input_stream
+    )
+
+    # 4. Sink
+    # Filter out None (removed tracks) and handle parsing errors if from_dict returns None
+    valid_stream = (t.to_dict() for t in processed_stream if t is not None)
+    
+    count = write_jsonl_stream(output_path, valid_stream)
+
+
 def detect_endpoint_anomalies(positions: np.ndarray, frames: np.ndarray, 
                               window_size: int = 15,
                               speed_threshold_factor: float = 3.0,
                               acceleration_threshold_factor: float = 3.0,
                               direction_change_threshold: float = 60,
                               check_start: bool = True,
-                              check_end: bool = True):
+                              check_end: bool = True) -> Tuple[int, int]:
     """
     Detect anomalous movements at the start or end of a track.
 
@@ -1189,7 +1290,6 @@ def detect_endpoint_anomalies(positions: np.ndarray, frames: np.ndarray,
                     if angle_deg > direction_change_threshold:
                         start_trim_idx = i + 1
                         continue
-            
             break
     
     # Check end
@@ -1223,145 +1323,9 @@ def detect_endpoint_anomalies(positions: np.ndarray, frames: np.ndarray,
                     if angle_deg > direction_change_threshold:
                         end_trim_idx = idx
                         continue
-            
             break
     
     return start_trim_idx, end_trim_idx
-
-
-def trim_track_endpoints_streaming(
-    jsonl_path: str,
-    output_jsonl_path: str,
-    window_size: int = 61,
-    speed_threshold_factor: float = 2.5,
-    acceleration_threshold_factor: float = 2.5,
-    direction_change_threshold: float = 60,
-    check_start: bool = True,
-    check_end: bool = True,
-    min_track_length: int = 30,
-):
-    """
-    Stream-process tracks and trim endpoint anomalies.
-    
-    Args:
-        jsonl_path: Input track JSONL path
-        output_jsonl_path: Output path for trimmed tracks
-        window_size: Number of frames to check at each endpoint (default: 61 frames ≈ 2 seconds)
-        speed_threshold_factor: Std multiplier for speed anomaly (lower = stricter)
-        acceleration_threshold_factor: Std multiplier for acceleration anomaly
-        direction_change_threshold: Degrees threshold for direction change
-        check_start: Check start of track
-        check_end: Check end of track
-        min_track_length: Minimum track length after trimming to keep
-    """
-    trimmed_count = 0
-    removed_count = 0
-    total_count = 0
-    skipped_count = 0  # ⭐ NEW: Track skipped tracks
-    
-    with open(jsonl_path, "r") as fin, open(output_jsonl_path, "w") as fout:
-        for line in fin:
-            line = line.strip()
-            if not line:
-                continue
-            
-            try:
-                track = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            
-            # Skip ball and referee tracks (they have different motion patterns)
-            team = track.get("team", "")
-            if team in ["ball", "referee"]:
-                fout.write(json.dumps(track) + "\n")
-                continue
-            
-            total_count += 1
-            
-            frames = np.array(track.get("frames", []))
-            positions = np.array(track.get("projected", []))
-
-            # ⭐ FIX: Validate data before converting to numpy
-            if frames.size == 0 or positions.size == 0:
-                skipped_count += 1
-                fout.write(json.dumps(track) + "\n")
-                continue
-            
-            if len(frames) != len(positions):
-                skipped_count += 1
-                fout.write(json.dumps(track) + "\n")
-                continue
-            
-            # ⭐ FIX: Convert and validate
-            try:
-                frames_array = np.array(frames)
-                positions_array = np.array(positions)
-            except (ValueError, TypeError):
-                skipped_count += 1
-                fout.write(json.dumps(track) + "\n")
-                continue
-            
-            # ⭐ FIX: Check for valid positions (not all zeros or invalid)
-            if positions_array.size == 0 or frames_array.size == 0:
-                skipped_count += 1
-                fout.write(json.dumps(track) + "\n")
-                continue
-            
-            # ⭐ FIX: Check minimum track length requirement
-            if len(frames_array) < window_size * 2 or len(frames_array) < min_track_length:
-                skipped_count += 1
-                fout.write(json.dumps(track) + "\n")
-                continue            
-            # Validate track has sufficient data
-            if len(frames) < window_size * 2:
-                fout.write(json.dumps(track) + "\n")
-                continue
-            
-            # Detect endpoint anomalies
-            try:
-                start_trim, end_trim = detect_endpoint_anomalies(
-                    positions_array, frames_array,
-                    window_size=window_size,
-                    speed_threshold_factor=speed_threshold_factor,
-                    acceleration_threshold_factor=acceleration_threshold_factor,
-                    direction_change_threshold=direction_change_threshold,
-                    check_start=check_start,
-                    check_end=check_end
-                )
-            except Exception as e:
-                # ⭐ FIX: Catch any unexpected errors and skip this track
-                print(f"⚠️  Error processing track {track.get('track_id', 'unknown')}: {e}")
-                skipped_count += 1
-                fout.write(json.dumps(track) + "\n")
-                continue
-            
-            # Check if trimming would remove entire track
-            if start_trim >= end_trim or (end_trim - start_trim + 1) < min_track_length:
-                removed_count += 1
-                continue  # Skip this track
-            
-            # Check if track was actually trimmed
-            if start_trim > 0 or end_trim < len(frames) - 1:
-                trimmed_count += 1
-                
-                # Trim all corresponding fields
-                trimmed_frames = frames[start_trim:end_trim + 1]
-                trimmed_positions = positions[start_trim:end_trim + 1]
-                
-                track["frames"] = trimmed_frames.tolist()
-                track["projected"] = trimmed_positions.tolist()
-                track["frame_range"] = [int(trimmed_frames[0]), int(trimmed_frames[-1])]
-                
-                # Trim bbox_area if present
-                if "bbox_area" in track and len(track["bbox_area"]) == len(frames):
-                    track["bbox_area"] = np.array(track["bbox_area"])[start_trim:end_trim + 1].tolist()
-            
-            fout.write(json.dumps(track) + "\n")
-    
-    print(f"✅ Trimmed endpoint anomalies:")
-    print(f"   Processed: {total_count} tracks")
-    print(f"   Modified: {trimmed_count} tracks ({trimmed_count/total_count*100:.1f}%)")
-    print(f"   Removed (too short): {removed_count} tracks ({removed_count/total_count*100:.1f}%)")
 
 
 def remove_tracks_near_boundary_stream(
@@ -1494,7 +1458,7 @@ def coarse_postprocessing(
 
     trim_track_endpoints_streaming(
         jsonl_path=json_path.replace(".jsonl", "_merged.jsonl"),
-        output_jsonl_path=json_path.replace(".jsonl", "_merged_trimmed.jsonl"),
+        output_path=json_path.replace(".jsonl", "_merged_trimmed.jsonl"),
         window_size=endpoint_window_size,
         speed_threshold_factor=endpoint_speed_factor,
         acceleration_threshold_factor=endpoint_acceleration_factor,
