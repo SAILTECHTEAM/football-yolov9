@@ -1328,49 +1328,108 @@ def detect_endpoint_anomalies(positions: np.ndarray, frames: np.ndarray,
     return start_trim_idx, end_trim_idx
 
 
+# ================== Boundary Track Removal ================== #
+def is_boundary_track(
+    track: AggregatedTrack,
+    field_size: Tuple[int, int], 
+    margin: float, 
+    threshold: float
+) -> bool:
+    """
+    Pure Predicate: Returns True if track stays near boundary too often.
+    """
+    # 1. Safety Checks
+    if track.team == "ball":
+        return False # Never remove the ball
+        
+    points = track.projected
+    if not points:
+        return True # Remove empty tracks (or False, depending on preference)
+
+    # 2. Math (NumPy)
+    # Note: If passing an Object, access .projected directly
+    pts = np.array(points) 
+    xs, ys = pts[:, 0], pts[:, 1]
+    w, h = field_size
+
+    # Vectorized Boolean Logic
+    near_mask = (
+        (xs < margin) | 
+        (xs > w - margin) | 
+        (ys < margin) | 
+        (ys > h - margin)
+    )
+
+    ratio = near_mask.mean() # .mean() is same as .sum() / len()
+    return ratio >= threshold
+
+
 def remove_tracks_near_boundary_stream(
-    jsonl_path, output_jsonl_path, field_size, margin_meter=30, near_ratio_threshold=0.9
+    jsonl_path: str, 
+    output_path: str, 
+    field_size: Tuple[int, int], 
+    margin_meter: float = 30.0, 
+    near_ratio_threshold: float = 0.9
 ):
     """
     Removes tracks that stay near the field boundary for most of the time.
 
     Args:
         jsonl_path (str): Input path to .jsonl file.
-        output_jsonl_path (str): Output path to write filtered tracks.
+        output_path (str): Output path to write filtered tracks.
         field_size (tuple): Field dimensions (length, width) in 0.1 meters.
         margin_meter (float): Distance from edge considered "near".
         near_ratio_threshold (float): Ratio of points near edge to consider it a boundary-only track.
     """
-    with open(jsonl_path, "r") as f_in, open(output_jsonl_path, "w") as f_out:
-        for line in f_in:
-            track = json.loads(line)
-            team = track.get("team", "")
-            points = np.array(track.get("projected", []))
+    print(f"🧹 Filtering boundary tracks: {jsonl_path} → {output_path}")
 
-            if len(points) == 0:
-                continue  # skip empty tracks
+    # 1. Source
+    input_stream = stream_jsonl_tracks(jsonl_path)
 
-            if team == "ball":
-                f_out.write(json.dumps(track) + "\n")
-                continue  # Always keep ball
+    # 2. Filter Logic
+    # We keep tracks that are NOT boundary tracks
+    filtered_stream = (
+        track 
+        for track in input_stream 
+        if not is_boundary_track(AggregatedTrack.from_dict(track), field_size, margin_meter, near_ratio_threshold)
+    )
 
-            xs, ys = points[:, 0], points[:, 1]
-            near_left = xs < margin_meter
-            near_right = xs > (field_size[0] - margin_meter)
-            near_top = ys < margin_meter
-            near_bottom = ys > (field_size[1] - margin_meter)
-
-            near_edge_mask = near_left | near_right | near_top | near_bottom
-            near_edge_ratio = near_edge_mask.sum() / len(points)
-
-            if near_edge_ratio < near_ratio_threshold:
-                f_out.write(json.dumps(track) + "\n")
+    # 3. Sink (Reuse your robust writer)
+    count = write_jsonl_stream(output_path, filtered_stream)
+    
+    print(f"✅ Saved {count} tracks.")
 
 
-def remove_static_tracks(
-    jsonl_path,
-    output_jsonl_path,
-    movement_threshold=20,  # in meters (10 = 1m if 0.1m units)
+# ================== Static Track Removal ================== #
+def is_static_track(track: AggregatedTrack, movement_threshold: float) -> bool:
+    """
+    Pure Predicate: Returns True if the track has very little movement.
+    """
+    # 1. Safety Checks
+    if track.team == "ball":
+        return False # Never remove the ball
+        
+    points = track.projected
+    if len(points) < 2:
+        return True # Treat single-point tracks as static/noise
+
+    # 2. Math (NumPy)
+    pts = np.array(points)
+    
+    # Calculate step-by-step distance (Path Length)
+    deltas = np.diff(pts, axis=0)
+    step_distances = np.linalg.norm(deltas, axis=1)
+    total_distance = step_distances.sum()
+
+    # Note: You might also want to check 'Max Displacement' (End - Start) 
+    # to catch players running in circles, but sticking to your original logic:
+    return total_distance < movement_threshold
+
+
+def remove_static_tracks_stream(
+    jsonl_path: str,
+    output_path: str,
+    movement_threshold: float = 20.0,
 ):
     """
     Remove tracks that don't move significantly.
@@ -1380,26 +1439,26 @@ def remove_static_tracks(
         output_jsonl_path (str): Output path to write filtered tracks.
         movement_threshold (float): Minimum total movement (Euclidean) to keep.
     """
-    with open(jsonl_path, "r") as f_in, open(output_jsonl_path, "w") as f_out:
-        for line in f_in:
-            track = json.loads(line)
-            # if track.get("team") != "ball":
-            #     f_out.write(json.dumps(track) + "\n")
-            #     continue
+    print(f"🛑 Filtering static tracks: {jsonl_path} → {output_path}")
 
-            points = np.array(track.get("projected", []))
-            if len(points) < 2:
-                continue  # skip too short
+    # 1. Source
+    input_stream = stream_jsonl_tracks(jsonl_path)
 
-            # Compute total movement
-            deltas = np.diff(points, axis=0)
-            distances = np.linalg.norm(deltas, axis=1)
-            total_distance = distances.sum()
+    # 2. Filter Logic
+    # Keep tracks that are NOT static
+    valid_stream = (
+        track 
+        for track in input_stream 
+        if not is_static_track(AggregatedTrack.from_dict(track), movement_threshold)
+    )
 
-            if total_distance >= movement_threshold:
-                f_out.write(json.dumps(track) + "\n")
+    # 3. Sink
+    count = write_jsonl_stream(output_path, valid_stream)
+    
+    print(f"✅ Saved {count} active tracks.")
 
 
+# ================== Main Coarse Postprocessing Pipeline ================== #
 def coarse_postprocessing(
     json_path: str,
     home_jersey_numbers: List[int],
@@ -1476,19 +1535,18 @@ def coarse_postprocessing(
         detector_kwargs=detector_kwargs,
     )
 
-
     remove_tracks_near_boundary_stream(
         jsonl_path=json_path.replace(".jsonl", "_merged_trimmed_detected.jsonl"),
-        output_jsonl_path=json_path.replace(".jsonl", "_merged_filtered_near_boundary.jsonl"),
+        output_path=json_path.replace(".jsonl", "_merged_filtered_near_boundary.jsonl"),
         field_size=field_size,
         margin_meter=30,
     )
     end_boundary = time.time()
     print(f"✅ Removed boundary-only tracks in {end_boundary - end_trim:.2f} seconds")
 
-    remove_static_tracks(
-        json_path.replace(".jsonl", "_merged_filtered_near_boundary.jsonl"),
-        json_path.replace(".jsonl", "_merged_filtered.jsonl"),
+    remove_static_tracks_stream(
+        jsonl_path=json_path.replace(".jsonl", "_merged_filtered_near_boundary.jsonl"),
+        output_path=json_path.replace(".jsonl", "_merged_filtered.jsonl"),
         movement_threshold=30,  # in meters (10 = 1m if 0.1m units)
     )
     end_static_ball = time.time()
