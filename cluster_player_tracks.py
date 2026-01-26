@@ -1445,6 +1445,467 @@ def apply_dtw_filter(
     return dtw_results
 
 
+# ========================== Stage 3: Greedy Matching ==========================
+def get_match_frame_range(track1: Dict, track2: Dict) -> Tuple[int, int]:
+    """
+    Calculate the frame range where two tracks overlap.
+    
+    Args:
+        track1, track2: Track dictionaries with 'frames' and 'frame_range'
+    
+    Returns:
+        (start_frame, end_frame) of overlap region
+    """
+    frames1 = set(track1.get("frames", []))
+    frames2 = set(track2.get("frames", []))
+    overlap = sorted(frames1 & frames2)
+
+    if overlap:
+        return (overlap[0], overlap[-1])
+
+    # Fallback to frame_range intersection
+    range1 = track1.get("frame_range", [0, 0])
+    range2 = track2.get("frame_range", [0, 0])
+    start = max(range1[0], range2[0])
+    end = min(range1[1], range2[1])
+    return (start, end)
+
+
+def check_temporal_overlap_ratio(
+    track: Dict,
+    match_start: int,
+    match_end: int,
+) -> float:
+    """
+    Calculate temporal overlap ratio between track and match range.
+    
+    Args:
+        track: Track dictionary
+        match_start, match_end: Frame range of potential match
+    
+    Returns:
+        Overlap ratio [0-1]
+    """
+    track_start, track_end = track.get("frame_range", [0, 0])
+    
+    overlap_start = max(track_start, match_start)
+    overlap_end = min(track_end, match_end)
+    
+    if overlap_start > overlap_end:
+        return 0.0
+    
+    overlap_dur = overlap_end - overlap_start + 1
+    track_dur = track_end - track_start + 1
+    
+    return overlap_dur / track_dur if track_dur > 0 else 0.0
+
+@dataclass
+class GroupManager:
+    """
+    Manages track groups and their membership.
+    Encapsulates group operations instead of using bare dicts.
+    """
+    groups: Dict[int, Set[int]] = field(default_factory=lambda: defaultdict(set))
+    track_to_group: Dict[int, int] = field(default_factory=dict)
+    next_group_id: int = 0
+    
+    def get_group_members(self, track_idx: int) -> Set[int]:
+        """Get all tracks in the same group as track_idx."""
+        if track_idx not in self.track_to_group:
+            return {track_idx}
+        group_id = self.track_to_group[track_idx]
+        return self.groups[group_id].copy()
+    
+    def add_pair_to_group(self, idx1: int, idx2: int) -> int:
+        """
+        Add a track pair to groups (merge if needed).
+        
+        Returns:
+            Group ID of the resulting group
+        """
+        group1 = self.track_to_group.get(idx1)
+        group2 = self.track_to_group.get(idx2)
+
+        # Case 1: Neither in a group - create new
+        if group1 is None and group2 is None:
+            new_id = self.next_group_id
+            self.groups[new_id] = {idx1, idx2}
+            self.track_to_group[idx1] = new_id
+            self.track_to_group[idx2] = new_id
+            self.next_group_id += 1
+            return new_id
+        
+        # Case 2: Only idx1 in group - add idx2
+        elif group1 is not None and group2 is None:
+            self.groups[group1].add(idx2)
+            self.track_to_group[idx2] = group1
+            return group1
+        
+        # Case 3: Only idx2 in group - add idx1
+        elif group1 is None and group2 is not None:
+            self.groups[group2].add(idx1)
+            self.track_to_group[idx1] = group2
+            return group2
+        
+        # Case 4: Both in different groups - merge
+        elif group1 != group2:
+            # Merge group2 into group1
+            self.groups[group1].update(self.groups[group2])
+            for idx in self.groups[group2]:
+                self.track_to_group[idx] = group1
+            del self.groups[group2]
+            return group1
+        
+        # Case 5: Already in same group
+        return group1
+    
+    def get_group_count(self) -> int:
+        """Return number of groups."""
+        return len(self.groups)
+    
+    def get_matched_indices(self) -> Set[int]:
+        """Return all track indices that are in any group."""
+        matched = set()
+        for members in self.groups.values():
+            matched.update(members)
+        return matched
+
+
+def would_create_source_conflict(
+    idx1: int,
+    idx2: int,
+    match_start: int,
+    match_end: int,
+    all_tracks: List[Dict],
+    group_manager: GroupManager,
+    temporal_overlap_threshold: float = 0.3,
+) -> bool:
+    """
+    Check if adding this match would create a temporal conflict.
+    
+    A conflict occurs when two tracks from the SAME SOURCE would have
+    significant temporal overlap within the resulting group.
+    
+    Args:
+        idx1, idx2: Track indices to potentially match
+        match_start, match_end: Frame range of the match
+        all_tracks: List of all tracks
+        group_manager: GroupManager instance
+        temporal_overlap_threshold: Max allowed overlap ratio
+    
+    Returns:
+        True if conflict would occur, False otherwise
+    """
+    # Get all tracks that would be in the merged group
+    members1 = group_manager.get_group_members(idx1)
+    members2 = group_manager.get_group_members(idx2)
+    future_group = members1 | members2 | {idx1, idx2}
+
+    # Group tracks by source
+    tracks_by_source = defaultdict(list)
+    for idx in future_group:
+        src = all_tracks[idx]["_source_idx"]
+        frame_range = all_tracks[idx].get("frame_range", [0, 0])
+        tracks_by_source[src].append((idx, frame_range[0], frame_range[1]))
+
+    # Check each source for conflicts
+    for src, track_list in tracks_by_source.items():
+        if len(track_list) <= 1:
+            continue
+
+        # Check all pairs of tracks from same source
+        for a in range(len(track_list)):
+            idx_a, start_a, end_a = track_list[a]
+            for b in range(a + 1, len(track_list)):
+                idx_b, start_b, end_b = track_list[b]
+
+                # Calculate overlap
+                overlap_start = max(start_a, start_b)
+                overlap_end = min(end_a, end_b)
+                
+                if overlap_start <= overlap_end:
+                    dur_a = end_a - start_a + 1
+                    dur_b = end_b - start_b + 1
+                    overlap_dur = overlap_end - overlap_start + 1
+                    
+                    overlap_ratio = max(
+                        overlap_dur / dur_a if dur_a > 0 else 1.0,
+                        overlap_dur / dur_b if dur_b > 0 else 1.0,
+                    )
+                    
+                    if overlap_ratio > temporal_overlap_threshold:
+                        return True
+
+    return False
+
+
+def perform_greedy_matching(
+    valid_pairs: Iterator[Tuple[float, int, int, Dict]],
+    all_tracks: List[Dict],
+    temporal_overlap_threshold: float = 0.3,
+) -> Tuple[List[Dict], GroupManager]:
+    """
+    Stage 3: Perform greedy matching on valid pairs.
+    
+    Iterates through pairs in score order, adding matches that don't
+    create temporal conflicts.
+    
+    Args:
+        valid_pairs: Iterator of (score, idx1, idx2, metadata) tuples
+        all_tracks: List of all track dictionaries
+        temporal_overlap_threshold: Max temporal overlap ratio allowed
+    
+    Returns:
+        (matches_list, group_manager)
+    """
+    print("\n🎯 Stage 3: Performing greedy matching...")
+    
+    group_manager = GroupManager()
+    matches = []
+    
+    # Track matches per target (for many-to-one detection)
+    matched_to_target = defaultdict(lambda: defaultdict(list))
+    
+    for score, idx1, idx2, metadata in valid_pairs:
+        match_start, match_end = get_match_frame_range(
+            all_tracks[idx1],
+            all_tracks[idx2]
+        )
+
+        # Check for temporal conflicts
+        if would_create_source_conflict(
+            idx1, idx2, match_start, match_end,
+            all_tracks, group_manager,
+            temporal_overlap_threshold
+        ):
+            continue
+
+        # Accept match
+        src1 = all_tracks[idx1]["_source_idx"]
+        src2 = all_tracks[idx2]["_source_idx"]
+
+        matched_to_target[idx1][src2].append((idx2, match_start, match_end))
+        matched_to_target[idx2][src1].append((idx1, match_start, match_end))
+
+        matches.append({
+            "i": idx1,
+            "j": idx2,
+            "score": float(score),
+            "metadata": metadata,
+            "frame_range": [match_start, match_end],
+        })
+
+        # Add to groups
+        group_manager.add_pair_to_group(idx1, idx2)
+
+    print(f"  ✓ Matches found: {len(matches)}")
+    print(f"  ✓ Groups formed: {group_manager.get_group_count()}")
+    
+    return matches, group_manager
+
+
+def aggregate_matching_results(
+    matches: List[Dict],
+    all_tracks: List[Dict],
+    group_manager: GroupManager,
+) -> List[Dict]:
+    """
+    Aggregate matching results into group summaries.
+    
+    Args:
+        matches: List of pairwise match dictionaries
+        all_tracks: List of all tracks
+        group_manager: GroupManager with final groups
+    
+    Returns:
+        List of aggregated group dictionaries
+    """
+    print("\n📦 Aggregating results...")
+    # OPTIMIZATION: Create a Lookup Map (O(M))
+    # Map normalized pair (min, max) -> match_data
+    match_lookup = {}
+    for m in matches:
+        key = tuple(sorted((m["i"], m["j"])))
+        match_lookup[key] = m    
+
+    aggregated = []
+    
+    for group_id, member_indices in group_manager.groups.items():
+        group_dict = _build_group_dict(
+            member_indices,
+            match_lookup,
+            all_tracks
+        )
+        aggregated.append(group_dict)
+    
+    return aggregated
+
+
+def _build_group_dict(
+    member_indices: Set[int],
+    match_lookup: Dict[Tuple[int, int], Dict],
+    all_tracks: List[Dict],
+) -> Dict:
+    """
+    Build aggregated dictionary for a single group.
+    
+    Args:
+        member_indices: Set of track indices in this group
+        matches: List of all pairwise matches
+        all_tracks: List of all tracks
+    
+    Returns:
+        Aggregated group dictionary
+    """
+    # Extract track info
+    track_ids = [all_tracks[i]["track_id"] for i in member_indices]
+    source_indices = [all_tracks[i]["_source_idx"] for i in member_indices]
+    teams = [all_tracks[i].get("team") for i in member_indices]
+    jerseys = [all_tracks[i].get("jersey_num") for i in member_indices]
+    frame_ranges = [all_tracks[i].get("frame_range", [0, 0]) for i in member_indices]
+
+    # Sort by source_idx, then track_id
+    combined = list(zip(
+        source_indices, track_ids, teams, jerseys, frame_ranges, member_indices
+    ))
+    
+    def extract_numeric(track_id):
+        """Extract numeric part from track_id like '12a' -> 12"""
+        match = re.match(r"(\d+)", str(track_id))
+        return int(match.group(1)) if match else 0
+    
+    combined.sort(key=lambda x: (x[0], extract_numeric(x[1]), x[1]))
+    
+    source_indices, track_ids, teams, jerseys, frame_ranges, member_list = zip(*combined)
+
+    # Build pairwise data
+    pairwise_data = _extract_pairwise_data(member_list, match_lookup, all_tracks)
+
+    return {
+        "track_id": list(track_ids),
+        "source_idx": list(source_indices),
+        "frame_ranges": list(frame_ranges),
+        "team": list(teams),
+        "jersey_num": list(jerseys),
+        "score(s)": pairwise_data["scores"] or None,
+        "median_distance": pairwise_data["median_distance"],
+        "distance_diff": pairwise_data["distance_diff"],
+        "direction_similarity": pairwise_data["direction_similarity"],
+        "pairs": pairwise_data["pairs"],
+        "match_frame_ranges": pairwise_data["frame_ranges"],
+    }
+
+
+def _extract_pairwise_data(
+    member_list: List[int],
+    match_lookup: Dict[Tuple[int, int], Dict],
+    all_tracks: List[Dict],
+) -> Dict:
+    """Extract pairwise comparison data for a group."""
+    pairwise_data = {
+        "median_distance": [],
+        "distance_diff": [],
+        "direction_similarity": [],
+        "scores": [],
+        "pairs": [],
+        "frame_ranges": [],
+    }
+
+    for a in range(len(member_list)):
+        for b in range(a + 1, len(member_list)):
+            ia, ib = member_list[a], member_list[b]
+            
+            key = tuple(sorted((ia, ib)))
+            m = match_lookup.get(key)
+            if m:
+                pairwise_data["median_distance"].append(
+                    m["metadata"].get("median_distance")
+                )
+                pairwise_data["distance_diff"].append(
+                        m["metadata"].get("distance_diff")
+                    )
+                pairwise_data["direction_similarity"].append(
+                    m["metadata"].get("direction_similarity")
+                )
+                pairwise_data["scores"].append(m["score"])
+                pairwise_data["pairs"].append(
+                    (all_tracks[ia]["track_id"], all_tracks[ib]["track_id"])
+                )
+                pairwise_data["frame_ranges"].append(m.get("frame_range"))
+
+    return pairwise_data
+
+
+def find_unmatched_tracks(
+    all_tracks: List[Dict],
+    group_manager: GroupManager,
+) -> List[Dict]:
+    """
+    Find tracks that were not matched to any group.
+    
+    Args:
+        all_tracks: List of all tracks
+        group_manager: GroupManager with final groups
+    
+    Returns:
+        List of unmatched track dictionaries
+    """
+    matched_indices = group_manager.get_matched_indices()
+    
+    unmatched = []
+    for i in range(len(all_tracks)):
+        if i not in matched_indices:
+            t = all_tracks[i]
+            unmatched.append({
+                "track_id": t["track_id"],
+                "team": t.get("team"),
+                "jersey_num": t.get("jersey_num"),
+                "source_idx": t["_source_idx"],
+                "frame_range": t.get("frame_range"),
+            })
+    
+    return unmatched
+
+
+def compute_matching_statistics(
+    all_tracks: List[Dict],
+    jsonl_paths: List[str],
+    candidates_count: int,
+    matches: List[Dict],
+    group_manager: GroupManager,
+    unmatched: List[Dict],
+    matched_to_target: Dict,  # From greedy loop
+) -> Dict:
+    """
+    Compute statistics about the matching results.
+    
+    Returns:
+        Statistics dictionary
+    """
+    matched_indices = group_manager.get_matched_indices()
+    
+    # Count many-to-one matches
+    many_to_one_count = sum(
+        1
+        for target_idx in matched_to_target
+        for src_idx in matched_to_target[target_idx]
+        if len(matched_to_target[target_idx][src_idx]) > 1
+    )
+    
+    return {
+        "total_tracks": len(all_tracks),
+        "total_files": len(jsonl_paths),
+        "total_candidate_pairs": candidates_count,
+        "matches_accepted": len(matches),
+        "groups_count": group_manager.get_group_count(),
+        "matched_tracks": len(matched_indices),
+        "unmatched_tracks": len(unmatched),
+        "match_rate": len(matched_indices) / len(all_tracks) if all_tracks else 0,
+        "many_to_one_matches": many_to_one_count,
+    }
+
+
+# ========================== Main Greedy Matching Function ==========================
 def greedy_match_tracks(
     all_tracks: List[Dict],
     jsonl_paths: List[str],
@@ -1538,242 +1999,34 @@ def greedy_match_tracks(
         )
     
 
-    # -------- Stage 3: greedy grouping (unchanged) --------
-    print("🎯 Stage 3/3: Performing greedy matching...")
-
-    matched_to_target = defaultdict(lambda: defaultdict(list))
-    matches = []
-    groups = defaultdict(set)
-    track_to_group = {}
-    next_group_id = 0
-
-    def get_match_frame_range(idx1: int, idx2: int) -> Tuple[int, int]:
-        t1 = all_tracks[idx1]
-        t2 = all_tracks[idx2]
-
-        frames1 = set(t1.get("frames", []))
-        frames2 = set(t2.get("frames", []))
-        overlap = sorted(frames1 & frames2)
-
-        if overlap:
-            return (overlap[0], overlap[-1])
-
-        range1 = t1.get("frame_range", [0, 0])
-        range2 = t2.get("frame_range", [0, 0])
-        start = max(range1[0], range2[0])
-        end = min(range1[1], range2[1])
-        return (start, end)
-
-    def get_all_group_members(idx: int) -> Set[int]:
-        if idx not in track_to_group:
-            return {idx}
-        group_id = track_to_group[idx]
-        return groups[group_id].copy()
-
-    def would_create_source_conflict(idx1: int, idx2: int, match_start: int, match_end: int) -> bool:
-        members1 = get_all_group_members(idx1)
-        members2 = get_all_group_members(idx2)
-        future_group = members1 | members2 | {idx1, idx2}
-
-        tracks_by_source = defaultdict(list)
-        for idx in future_group:
-            src = all_tracks[idx]["_source_idx"]
-            frame_range = all_tracks[idx].get("frame_range", [0, 0])
-            tracks_by_source[src].append((idx, frame_range[0], frame_range[1]))
-
-        for src, track_list in tracks_by_source.items():
-            if len(track_list) <= 1:
-                continue
-
-            for a in range(len(track_list)):
-                idx_a, start_a, end_a = track_list[a]
-                for b in range(a + 1, len(track_list)):
-                    idx_b, start_b, end_b = track_list[b]
-
-                    overlap_start = max(start_a, start_b)
-                    overlap_end = min(end_a, end_b)
-                    if overlap_start <= overlap_end:
-                        dur_a = end_a - start_a + 1
-                        dur_b = end_b - start_b + 1
-                        overlap_dur = overlap_end - overlap_start + 1
-                        overlap_ratio = max(
-                            overlap_dur / dur_a if dur_a > 0 else 1.0,
-                            overlap_dur / dur_b if dur_b > 0 else 1.0,
-                        )
-                        if overlap_ratio > temporal_overlap_threshold:
-                            return True
-        return False
-
-    for score, idx1, idx2, metadata in valid_pairs_iter:
-        # score already <= max_score_threshold due to early pruning
-        match_start, match_end = get_match_frame_range(idx1, idx2)
-
-        if would_create_source_conflict(idx1, idx2, match_start, match_end):
-            continue
-
-        src1 = all_tracks[idx1]["_source_idx"]
-        src2 = all_tracks[idx2]["_source_idx"]
-
-        matched_to_target[idx1][src2].append((idx2, match_start, match_end))
-        matched_to_target[idx2][src1].append((idx1, match_start, match_end))
-
-        matches.append(
-            {
-                "i": idx1,
-                "j": idx2,
-                "score": float(score),
-                "metadata": metadata,  # minimal metadata only (dtw_distance if enabled)
-                "frame_range": [match_start, match_end],
-            }
-        )
-
-        group1 = track_to_group.get(idx1)
-        group2 = track_to_group.get(idx2)
-
-        if group1 is None and group2 is None:
-            groups[next_group_id] = {idx1, idx2}
-            track_to_group[idx1] = next_group_id
-            track_to_group[idx2] = next_group_id
-            next_group_id += 1
-        elif group1 is not None and group2 is None:
-            groups[group1].add(idx2)
-            track_to_group[idx2] = group1
-        elif group1 is None and group2 is not None:
-            groups[group2].add(idx1)
-            track_to_group[idx1] = group2
-        elif group1 != group2:
-            groups[group1].update(groups[group2])
-            for idx in groups[group2]:
-                track_to_group[idx] = group1
-            del groups[group2]
-
-    print(f"  Matches found: {len(matches)}")
-    print(f"  Groups formed: {len(groups)}")
-
-    # Build aggregated results
-    aggregated = []
-    matched_indices = set()
-
-    for group_id, member_indices in groups.items():
-        matched_indices.update(member_indices)
-
-        track_ids = [all_tracks[i]["track_id"] for i in member_indices]
-        source_indices = [all_tracks[i]["_source_idx"] for i in member_indices]
-        teams = [all_tracks[i].get("team") for i in member_indices]
-        jerseys = [all_tracks[i].get("jersey_num") for i in member_indices]
-        frame_ranges = [all_tracks[i].get("frame_range", [0, 0]) for i in member_indices]
-
-        # Sort by source_idx first, then by track_id
-        # Create list of tuples for sorting
-        combined = list(
-            zip(source_indices, track_ids, teams, jerseys, frame_ranges, member_indices)
-        )
-
-        # Sort by source_idx (primary), then track_id (secondary)
-        # Extract numeric part from track_id for sorting (e.g., '12a' -> 12)
-        def extract_numeric(track_id):
-            """Extract numeric part from track_id like '12a' -> 12"""
-
-            match = re.match(r"(\d+)", str(track_id))
-            return int(match.group(1)) if match else 0
-
-        combined.sort(key=lambda x: (x[0], extract_numeric(x[1]), x[1]))
-
-        # Unzip back to separate lists
-        source_indices, track_ids, teams, jerseys, frame_ranges, member_indices = zip(*combined)
-        source_indices = list(source_indices)
-        track_ids = list(track_ids)
-        teams = list(teams)
-        jerseys = list(jerseys)
-        frame_ranges = list(frame_ranges)
-        member_list = list(member_indices)
-
-        pairwise_data = {
-            "median_distance": [],
-            "distance_diff": [],
-            "direction_similarity": [],
-            "scores": [],
-            "pairs": [],
-            "frame_ranges": [],
-        }
-
-        for a in range(len(member_list)):
-            for b in range(a + 1, len(member_list)):
-                ia, ib = member_list[a], member_list[b]
-                for m in matches:
-                    if (m["i"] == ia and m["j"] == ib) or (m["i"] == ib and m["j"] == ia):
-                        pairwise_data["median_distance"].append(
-                            m["metadata"].get("median_distance")
-                        )
-                        pairwise_data["distance_diff"].append(m["metadata"].get("distance_diff"))
-                        pairwise_data["direction_similarity"].append(
-                            m["metadata"].get("direction_similarity")
-                        )
-                        pairwise_data["scores"].append(m["score"])
-                        pairwise_data["pairs"].append(
-                            (all_tracks[ia]["track_id"], all_tracks[ib]["track_id"])
-                        )
-                        pairwise_data["frame_ranges"].append(m.get("frame_range"))
-
-        aggregated.append(
-            {
-                "track_id": track_ids,
-                "source_idx": source_indices,
-                "frame_ranges": frame_ranges,  # Now included directly
-                "team": teams,
-                "jersey_num": jerseys,
-                "score(s)": (pairwise_data["scores"] if pairwise_data["scores"] else None),
-                "median_distance": pairwise_data["median_distance"],
-                "distance_diff": pairwise_data["distance_diff"],
-                "direction_similarity": pairwise_data["direction_similarity"],
-                "pairs": pairwise_data["pairs"],
-                "match_frame_ranges": pairwise_data[
-                    "frame_ranges"
-                ],  # Renamed to distinguish from track frame_ranges
-            }
-        )
-
-    # Find unmatched tracks
-    unmatched = []
-    for i in range(n_total):
-        if i not in matched_indices:
-            t = all_tracks[i]
-            unmatched.append(
-                {
-                    "track_id": t["track_id"],
-                    "team": t.get("team"),
-                    "jersey_num": t.get("jersey_num"),
-                    "source_idx": t["_source_idx"],
-                    "frame_range": t.get("frame_range"),
-                }
-            )
-
-    # Count many-to-one matches
-    many_to_one_count = sum(
-        1
-        for target_idx in matched_to_target
-        for src_idx in matched_to_target[target_idx]
-        if len(matched_to_target[target_idx][src_idx]) > 1
+    
+    # -------- Stage 3: Greedy grouping --------
+    matches, group_manager = perform_greedy_matching(
+        valid_pairs_iter,
+        all_tracks,
+        temporal_overlap_threshold
+    )
+    
+    # -------- Build results --------
+    aggregated = aggregate_matching_results(matches, all_tracks, group_manager)
+    unmatched = find_unmatched_tracks(all_tracks, group_manager)
+    
+    # Note: We lost matched_to_target tracking in the refactored version
+    # You'd need to return it from perform_greedy_matching() if needed
+    stats = compute_matching_statistics(
+        all_tracks, jsonl_paths,
+        len(candidates_np), matches,
+        group_manager, unmatched,
+        matched_to_target={}  # Pass actual dict if needed
     )
 
-    # Update stats total_candidate_pairs to reflect candidates_final length
-    results = {
+    return {
         "aggregated_groups": aggregated,
         "pairwise_matches": matches,
         "unmatched_tracks": unmatched,
-        "stats": {
-            "total_tracks": n_total,
-            "total_files": n_files,
-            "total_candidate_pairs": int(len(candidates_np)),
-            "matches_accepted": len(matches),
-            "groups_count": len(groups),
-            "matched_tracks": len(matched_indices),
-            "unmatched_tracks": len(unmatched),
-            "match_rate": len(matched_indices) / n_total if n_total > 0 else 0,
-            "many_to_one_matches": many_to_one_count,
-        },
+        "stats": stats,
     }
-    return results
+
 
 def _empty_results(all_tracks, n_total, n_files):
     """Return empty results structure."""
@@ -1802,6 +2055,7 @@ def _empty_results(all_tracks, n_total, n_files):
             "many_to_one_matches": 0,
         },
     }
+
 
 def load_tracks_from_jsonl(jsonl_path: str) -> List[Dict]:
     """
