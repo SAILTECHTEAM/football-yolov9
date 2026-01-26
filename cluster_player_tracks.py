@@ -57,7 +57,7 @@ class CalibrationConfig:
     verbose: bool = False
 
 
-@dataclass 
+@dataclass(frozen=True)
 class MatchingConfig:
     """
     Holds all hyper-parameters for the matching pipeline.
@@ -993,6 +993,13 @@ def calculate_match_score(
         max_outlier_ratio=cfg.max_outlier_ratio,
     )
 
+    # ✅ Early exit: if median distance rejected, don't compute velocity/direction
+    if median_distance == float("inf"):
+        metadata["reason"] = metadata.get("reason") or median_meta.get("reason") or "median_distance_rejected"
+        metadata["median_metadata"] = median_meta
+        return float("inf"), metadata
+
+
     # # Calculate total distances of track 1
     # total_distance_track1, td1_meta = calculate_total_distance(
     #     track1,
@@ -1188,41 +1195,220 @@ def prepare_tracks(
     return all_tracks, all_tracks_by_file
 
 
-_worker_all_tracks: List[Dict] = None
-_worker_cfg = None
-_worker_filter_by_team: bool = None
-_worker_filter_by_jersey: bool = None
-_worker_dtw_params: dict = None
-
-
-def _init_stage1_worker(all_tracks, cfg, filter_by_team, filter_by_jersey):
-    """Initializer for stage 1 workers - data copied ONCE per worker, not per task."""
-    global _worker_all_tracks, _worker_cfg, _worker_filter_by_team, _worker_filter_by_jersey
-    _worker_all_tracks = all_tracks
-    _worker_cfg = cfg
-    _worker_filter_by_team = filter_by_team
-    _worker_filter_by_jersey = filter_by_jersey
-
-
-def _pairwise_score_worker_v2(pair: Tuple[int, int]):
+# =============== Stage 1: Pairwise Score Computation ===============
+class Stage1WorkerState:
     """
-    Worker for stage 1 scoring.
-    Only receives indices (8 bytes); accesses track data from process-global.
+    Static container for process-local data.
+    Replaces global variables with explicit encapsulation.
+    """
+    all_tracks: List[Dict] = []
+    cfg: MatchingConfig = None
+    filter_by_team: bool = False
+    filter_by_jersey: bool = False
+    
+    @classmethod
+    def initialize(
+        cls,
+        all_tracks: List[Dict],
+        cfg: MatchingConfig,
+        filter_by_team: bool,
+        filter_by_jersey: bool,
+    ):
+        """
+        Called by multiprocessing.Pool initializer.
+        Sets up process-local state ONCE per worker.
+        """
+        cls.all_tracks = all_tracks
+        cls.cfg = cfg
+        cls.filter_by_team = filter_by_team
+        cls.filter_by_jersey = filter_by_jersey
+    
+    @classmethod
+    def reset(cls):
+        """For testing - clear state between tests."""
+        cls.all_tracks = []
+        cls.cfg = None
+        cls.filter_by_team = False
+        cls.filter_by_jersey = False
+
+
+def _stage1_worker_entrypoint(pair: Tuple[int, int]) -> Optional[Tuple[float, int, int]]:
+    """
+    Multiprocessing worker entry point.
+    
+    Separates:
+    - Infrastructure (accessing process-local state)
+    - Business logic (compute_track_match_score)
+    
+    Args:
+        pair: Tuple of (track_index_1, track_index_2)
+    
+    Returns:
+        (score, idx1, idx2) or None if rejected
     """
     i, j = pair
-    t1 = _worker_all_tracks[i]
-    t2 = _worker_all_tracks[j]
-
-    if _worker_filter_by_team and t1.get("team") != t2.get("team"):
+    
+    # Fast lookups from process-local state (no pickling overhead)
+    t1 = Stage1WorkerState.all_tracks[i]
+    t2 = Stage1WorkerState.all_tracks[j]
+    
+    # Call pure business logic
+    score = compute_track_match_score(
+        t1, t2,
+        cfg=Stage1WorkerState.cfg,
+        filter_by_team=Stage1WorkerState.filter_by_team,
+        filter_by_jersey=Stage1WorkerState.filter_by_jersey,
+    )
+    
+    if score is None:
         return None
-    if _worker_filter_by_jersey and t1.get("jersey_num") != t2.get("jersey_num"):
-        return None
+    
+    return (float(score), int(i), int(j))
 
-    score, _metadata = calculate_match_score(t1, t2, cfg=_worker_cfg)
+
+def compute_pairwise_scores(
+    all_tracks: List[Dict],
+    cfg: MatchingConfig,
+    max_score_threshold: float,
+    save_pairwise_path: Optional[str] = None,
+    filter_by_team: bool = False,
+    filter_by_jersey: bool = False,
+    parallel_workers: int = 4,
+    chunksize: int = 1000,
+) -> Tuple[List[Tuple[float, int, int]], int]:
+    """
+    Stage 1: Compute pairwise match scores in parallel.
+    
+    Args:
+        all_tracks: List of all track dictionaries with metadata
+        cfg: Matching configuration
+        filter_by_team: Only compare same-team tracks
+        filter_by_jersey: Only compare same-jersey tracks
+        parallel_workers: Number of worker processes
+        chunksize: Tasks per worker batch
+    
+    Returns:
+        - List of candidate pairs (score, idx1, idx2) passing threshold
+        - Count of pairs skipped due to threshold
+    """
+    print(f"\n📊 Stage 1: Computing pairwise scores...")
+    print(f"  Workers: {parallel_workers}")
+    
+    total_pairs = _count_cross_source_pairs(all_tracks)
+    print(f"  Cross-source pairs: {total_pairs:,}")
+
+    pairwise_fh = None
+    if save_pairwise_path:
+        os.makedirs(os.path.dirname(save_pairwise_path) or ".", exist_ok=True)
+        pairwise_fh = open(save_pairwise_path, "w", encoding="utf-8")
+    
+    candidates: List[Tuple[float, int, int]] = []
+    skipped_score_threshold = 0
+    
+    with mp.Pool(
+        processes=parallel_workers,
+        initializer=Stage1WorkerState.initialize,
+        initargs=(all_tracks, cfg, filter_by_team, filter_by_jersey),
+    ) as pool:
+        
+        results_iter = pool.imap_unordered(
+            _stage1_worker_entrypoint,  # Only receives (i, j) indices
+            _iter_cross_source_pairs(all_tracks),
+            chunksize=chunksize,
+        )
+        
+        for out in tqdm(results_iter, total=total_pairs, desc="Stage1 scoring", unit="pair"):
+            if out is None:
+                continue
+
+            score, i, j = out
+
+            passed = score <= max_score_threshold
+            if not passed:
+                skipped_score_threshold += 1
+
+            if pairwise_fh is not None:
+                # Keep the same fields you wrote before (pass/fail)
+                pairwise_fh.write(
+                    json.dumps(
+                        {
+                            "track1_id": all_tracks[i]["track_id"],
+                            "track2_id": all_tracks[j]["track_id"],
+                            "track1_source": all_tracks[i]["_source_idx"],
+                            "track2_source": all_tracks[j]["_source_idx"],
+                            "track1_global_idx": int(i),
+                            "track2_global_idx": int(j),
+                            "composite_score": float(score),
+                            "passes_score_threshold": bool(passed),
+                        }
+                    )
+                    + "\n"
+                )
+
+            if passed:
+                candidates.append((float(score), int(i), int(j)))
+
+    if pairwise_fh is not None:
+        pairwise_fh.close()
+    
+    print(f"  ✓ Valid candidates: {len(candidates):,}")
+    return candidates, skipped_score_threshold
+
+
+def _iter_cross_source_pairs(all_tracks: List[Dict]) -> Iterator[Tuple[int, int]]:
+    """Yield (i, j) for i<j where tracks come from different sources. GENERATOR - no memory!"""
+    n_total = len(all_tracks)
+    for i in range(n_total):
+        s1 = all_tracks[i]["_source_idx"]
+        for j in range(i + 1, n_total):
+            if s1 != all_tracks[j]["_source_idx"]:
+                yield i, j
+
+
+def _count_cross_source_pairs(all_tracks: List[Dict]) -> int:
+    """Count pairs WITHOUT materializing them - O(sources²) not O(pairs)."""
+    source_counts = Counter(t["_source_idx"] for t in all_tracks)
+    total_pairs = 0
+    sources = list(source_counts.keys())
+    for i, s1 in enumerate(sources):
+        for s2 in sources[i + 1:]:
+            total_pairs += source_counts[s1] * source_counts[s2]
+    return total_pairs
+
+
+def compute_track_match_score(
+    track1: Dict,
+    track2: Dict,
+    cfg: MatchingConfig,
+    filter_by_team: bool = False,
+    filter_by_jersey: bool = False,
+) -> Optional[float]:
+    """
+    Pure function - computes match score between two tracks.
+    
+    Args:
+        track1, track2: Track dictionaries with frames/projected data
+        cfg: Matching configuration parameters
+        filter_by_team: Skip if teams don't match
+        filter_by_jersey: Skip if jersey numbers don't match
+    
+    Returns:
+        Match score (lower = better), or None if incompatible
+    """
+    # Fast rejection filters
+    if filter_by_team and track1.get("team") != track2.get("team"):
+        return None
+    
+    if filter_by_jersey and track1.get("jersey_num") != track2.get("jersey_num"):
+        return None
+    
+    # Compute score using existing logic
+    score, _metadata = calculate_match_score(track1, track2, cfg=cfg)
+    
     if score == float("inf"):
         return None
-
-    return (float(score), int(i), int(j))
+    
+    return float(score)
 
 
 def _init_stage2_worker(all_tracks, dtw_params):
@@ -1257,27 +1443,6 @@ def _dtw_worker_v2(args: Tuple[float, int, int]):
     return (float(score), int(i), int(j), float(dtw_dist))
 
 
-def _iter_cross_source_pairs(all_tracks: List[Dict]) -> Iterator[Tuple[int, int]]:
-    """Yield (i, j) for i<j where tracks come from different sources. GENERATOR - no memory!"""
-    n_total = len(all_tracks)
-    for i in range(n_total):
-        s1 = all_tracks[i]["_source_idx"]
-        for j in range(i + 1, n_total):
-            if s1 != all_tracks[j]["_source_idx"]:
-                yield i, j
-
-
-def _count_cross_source_pairs(all_tracks: List[Dict]) -> int:
-    """Count pairs WITHOUT materializing them - O(sources²) not O(pairs)."""
-    source_counts = Counter(t["_source_idx"] for t in all_tracks)
-    total_pairs = 0
-    sources = list(source_counts.keys())
-    for i, s1 in enumerate(sources):
-        for s2 in sources[i + 1:]:
-            total_pairs += source_counts[s1] * source_counts[s2]
-    return total_pairs
-
-
 def greedy_match_tracks(
     all_tracks: List[Dict],
     jsonl_paths: List[str],
@@ -1310,71 +1475,16 @@ def greedy_match_tracks(
     # -------- Stage 1: Pairwise scores (memory efficient) --------
     print("\n📊 Stage 1/3: Computing pairwise match scores (memory efficient)...")
 
-    pairwise_fh = None
-    if save_pairwise_path:
-        os.makedirs(os.path.dirname(save_pairwise_path) or ".", exist_ok=True)
-        pairwise_fh = open(save_pairwise_path, "w", encoding="utf-8")
-
-    candidates = []
-    skipped_score_threshold = 0
-
-    # ✅ Count pairs without materializing (O(sources²) memory, not O(pairs))
-    total_pairs = _count_cross_source_pairs(all_tracks)
-    
-    print(f"  Cross-file pairs to evaluate: {total_pairs:,}")
-    print(f"  Parallel workers: {parallel_workers}")
-
-    # ✅ Use mp.Pool with initializer - data copied ONCE per worker, not per task
-    # ✅ Use imap_unordered - doesn't buffer all results, processes as available
-    with mp.Pool(
-        processes=parallel_workers,
-        initializer=_init_stage1_worker,
-        initargs=(all_tracks, cfg, filter_by_team, filter_by_jersey)
-    ) as pool:
-        
-        results_iter = pool.imap_unordered(
-            _pairwise_score_worker_v2,
-            _iter_cross_source_pairs(all_tracks),  # ✅ Generator - never materialized!
-            chunksize=parallel_chunksize
-        )
-        
-        for out in tqdm(results_iter, total=total_pairs, desc="Stage1 scoring", unit="pair"):
-            if out is None:
-                continue
-                
-            score, i, j = out
-
-            if score > max_score_threshold:
-                skipped_score_threshold += 1
-                if pairwise_fh is not None:
-                    pairwise_fh.write(json.dumps({
-                        "track1_id": all_tracks[i]["track_id"],
-                        "track2_id": all_tracks[j]["track_id"],
-                        "track1_source": all_tracks[i]["_source_idx"],
-                        "track2_source": all_tracks[j]["_source_idx"],
-                        "track1_global_idx": i,
-                        "track2_global_idx": j,
-                        "composite_score": score,
-                        "passes_score_threshold": False,
-                    }) + "\n")
-                continue
-
-            candidates.append((score, i, j))
-
-            if pairwise_fh is not None:
-                pairwise_fh.write(json.dumps({
-                    "track1_id": all_tracks[i]["track_id"],
-                    "track2_id": all_tracks[j]["track_id"],
-                    "track1_source": all_tracks[i]["_source_idx"],
-                    "track2_source": all_tracks[j]["_source_idx"],
-                    "track1_global_idx": i,
-                    "track2_global_idx": j,
-                    "composite_score": score,
-                    "passes_score_threshold": True,
-                }) + "\n")
-
-    if pairwise_fh is not None:
-        pairwise_fh.close()
+    candidates, skipped_score_threshold = compute_pairwise_scores(
+        all_tracks=all_tracks,
+        cfg=cfg,
+        max_score_threshold=max_score_threshold,
+        save_pairwise_path=save_pairwise_path,
+        filter_by_team=filter_by_team,
+        filter_by_jersey=filter_by_jersey,
+        parallel_workers=parallel_workers,
+        chunksize=parallel_chunksize,
+    )
 
     print(f"  ✓ Candidates passing threshold: {len(candidates):,}")
     print(f"  ✓ Skipped (score > {max_score_threshold}): {skipped_score_threshold:,}")
@@ -1383,12 +1493,7 @@ def greedy_match_tracks(
         print("⚠️  No candidate pairs passed Stage 1 thresholds.")
         return _empty_results(all_tracks, n_total, n_files)
 
-    # -------- Continue with Stage 2 (DTW) if needed --------
-    # ... rest of the function using similar pattern for DTW stage
-    # Convert to numpy for compact storage & fast sorting
-    # dtype: float32 for score, int32 for indices (saves RAM)
-    candidates_np = np.array(candidates, dtype=np.float32)
-    # But indices get cast to float32 — not good. Use a structured array instead:
+    # Convert to structured array for compact storage & fast sorting
     candidates_np = np.zeros(len(candidates), dtype=[("score", "f4"), ("i", "i4"), ("j", "i4")])
     candidates_np["score"] = [c[0] for c in candidates]
     candidates_np["i"] = [c[1] for c in candidates]
@@ -1398,7 +1503,6 @@ def greedy_match_tracks(
     print("\n✅ Stage 1 complete")
     print(f"  Candidates passing score threshold: {len(candidates_np)}")
     print(f"  Skipped (score>{max_score_threshold}): {skipped_score_threshold}")
-    print("  NOTE: skipped_filter / skipped_incompatible counts are not tracked in parallel mode (see note below)")
 
     # -------- Stage 2: DTW filter (optional & parallel) --------
     if use_dtw_filter:
