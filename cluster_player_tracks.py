@@ -337,32 +337,53 @@ def find_overlapping_frames(track1: Dict, track2: Dict) -> List[int]:
     return overlapping
 
 
+def _ensure_frame_index(track: Dict) -> Dict[int, int]:
+    """
+    Build (and cache) a mapping: frame_number -> index in track["frames"].
+    Stored on the track dict to avoid repeated O(n) list searches.
+    """
+    idx_map = track.get("_frame_to_index")
+    if isinstance(idx_map, dict):
+        return idx_map
+
+    frames = track.get("frames", [])
+    # Keep the first occurrence if duplicates exist
+    idx_map = {}
+    for i, f in enumerate(frames):
+        if f not in idx_map:
+            idx_map[f] = i
+
+    track["_frame_to_index"] = idx_map  # internal cache
+    return idx_map
+
+
+def warm_frame_index_cache(all_tracks: List[Dict]) -> None:
+    """Build _frame_to_index for each track once (parent process)."""
+    for t in all_tracks:
+        _ensure_frame_index(t)
+
+
 def get_position_at_specific_frame(track: Dict, target_frame: int) -> Optional[np.ndarray]:
     """
     Get the actual observed position for a given frame.
     Returns None if the frame doesn't exist in the track.
-
-    Args:
-        track: Track dictionary with 'frames' and 'projected' fields
-        target_frame: Frame number to get position for
-
-    Returns:
-        [x, y] position as np.ndarray or None if frame not found
     """
     frames = track.get("frames", [])
     projected = track.get("projected", [])
 
-    if target_frame not in frames:
+    if not frames or not projected:
         return None
 
-    try:
-        idx = frames.index(target_frame)
-        if idx < len(projected):
-            return np.array(projected[idx])
-    except (ValueError, IndexError):
-        pass
+    idx_map = _ensure_frame_index(track)
+    idx = idx_map.get(target_frame)
+    if idx is None or idx >= len(projected):
+        return None
 
-    return None
+    pos = projected[idx]
+    if pos is None:
+        return None
+
+    return np.array(pos)
 
 
 def calculate_pairwise_distances(
@@ -523,79 +544,6 @@ def calculate_median_velocity_difference(
         return np.median(velocity_diffs) if velocity_diffs else 0.0
 
     return 0.0
-
-
-def calculate_total_distance(
-    track: Dict,
-    overlapping_frames: List[int],
-    max_step_distance: float = 50.0,
-    max_outlier_ratio: float = 0.3,
-) -> Tuple[float, Dict]:
-    """
-    Calculate total Euclidean distance travelled by a track in overlapping region.
-    Only uses consecutive frames where BOTH positions exist.
-    Rejects individual steps that exceed max_step_distance (outliers).
-
-    Args:
-        track: Track dictionary
-        overlapping_frames: List of frames to analyze
-        max_step_distance: Maximum allowed distance per step (outlier threshold)
-        max_outlier_ratio: If more than this ratio of steps are outliers, return inf
-
-    Returns:
-        Tuple of (total_distance, metadata_dict)
-        Returns (inf, metadata) if too many outliers detected
-    """
-    total_distance = 0.0
-    prev_pos = None
-    prev_frame = None
-
-    n_valid_steps = 0
-    n_outlier_steps = 0
-    outlier_frames = []
-
-    for frame in overlapping_frames:
-        pos = get_position_at_specific_frame(track, frame)
-
-        if pos is not None:
-            if prev_pos is not None:
-                # Only add distance if frames are reasonably close
-                frame_gap = frame - prev_frame if prev_frame is not None else 1
-                if frame_gap <= 5:  # Max gap of 5 frames
-                    dist = euclidean(prev_pos, pos)
-
-                    # Check if this step is an outlier
-                    if dist > max_step_distance:
-                        n_outlier_steps += 1
-                        outlier_frames.append((prev_frame, frame, dist))
-                        # Skip this step - don't add to total
-                    else:
-                        total_distance += dist
-                        n_valid_steps += 1
-
-            prev_pos = pos
-            prev_frame = frame
-
-    total_steps = n_valid_steps + n_outlier_steps
-    outlier_ratio = n_outlier_steps / total_steps if total_steps > 0 else 0.0
-
-    metadata = {
-        "n_valid_steps": n_valid_steps,
-        "n_outlier_steps": n_outlier_steps,
-        "total_steps": total_steps,
-        "outlier_ratio": outlier_ratio,
-        "max_step_distance": max_step_distance,
-        "outlier_frames": outlier_frames[:10],  # Limit for readability
-    }
-
-    # Reject if too many outliers
-    if total_steps > 0 and outlier_ratio > max_outlier_ratio:
-        metadata["rejected"] = True
-        metadata["reason"] = f"outlier_ratio {outlier_ratio:.2%} > {max_outlier_ratio:.2%}"
-        return float("inf"), metadata
-
-    metadata["rejected"] = False
-    return total_distance, metadata
 
 
 def calculate_direction_similarity(
@@ -999,38 +947,6 @@ def calculate_match_score(
         metadata["median_metadata"] = median_meta
         return float("inf"), metadata
 
-
-    # # Calculate total distances of track 1
-    # total_distance_track1, td1_meta = calculate_total_distance(
-    #     track1,
-    #     overlapping_frames,
-    #     max_step_distance=max_step_distance,
-    #     max_outlier_ratio=max_outlier_ratio,
-    # )
-
-    # # Check if either total distance was rejected due to outliers
-    # if total_distance_track1 == float("inf"):
-    #     metadata["reason"] = "track1_total_distance_rejected"
-    #     metadata["track1_distance_metadata"] = td1_meta
-    #     # print(f"Track {track1['track_id']} total distance rejected due to outliers: {td1_meta}")
-    #     return float("inf"), metadata
-
-    # # Calculate total distances of track 2
-    # total_distance_track2, td2_meta = calculate_total_distance(
-    #     track2,
-    #     overlapping_frames,
-    #     max_step_distance=max_step_distance,
-    #     max_outlier_ratio=max_outlier_ratio,
-    # )
-
-    # if total_distance_track2 == float("inf"):
-    #     metadata["reason"] = "track2_total_distance_rejected"
-    #     metadata["track2_distance_metadata"] = td2_meta
-    #     # print(f"Track {track2['track_id']} total distance rejected due to outliers: {td2_meta}")
-    #     return float("inf"), metadata
-
-    # distance_diff = abs(total_distance_track1 - total_distance_track2)
-
     velocity_diff = calculate_median_velocity_difference(
         track1, track2, overlapping_frames, fps=30, window_size=5
     )
@@ -1046,11 +962,6 @@ def calculate_match_score(
         {
             "median_distance": median_distance,
             "median_metadata": median_meta,
-            # "distance_diff": distance_diff,
-            # "total_distance_track1": total_distance_track1,
-            # "total_distance_track2": total_distance_track2,
-            # "track1_outliers": td1_meta.get("n_outlier_steps", 0),
-            # "track2_outliers": td2_meta.get("n_outlier_steps", 0),
             "point_outliers": median_meta.get("n_outliers", 0),
             "velocity_difference": velocity_diff,
             "direction_similarity": direction_sim,
@@ -1064,9 +975,6 @@ def calculate_match_score(
     # Median distance
     distance_score = median_distance / 10.0
 
-    # # Distance diff
-    # distance_diff_score = distance_diff / 10.0
-
     # Direction: 0-1 (higher is better), invert for score
     direction_score = (1.0 - direction_sim) * 10.0
 
@@ -1079,7 +987,6 @@ def calculate_match_score(
     # Composite score
     score = (
         distance_score * 2.0  # Weight: 2x
-        # + distance_diff_score * 1.5  # Weight: 1.5x
         + direction_score * 2.5  # Weight: 2.5x
         + velocity_score * 0.5  # Weight: 0.5x
         + overlap_bonus  # Bonus for overlap
@@ -1090,7 +997,6 @@ def calculate_match_score(
     # )
     # print(
     #     f"  Components: distance_score={distance_score:.2f}, "
-    #     #    f"distance_diff_score={distance_diff_score:.2f}, "
     #     f"direction_score={direction_score:.2f}, "
     #     f"velocity_score={velocity_score:.2f}, "
     #     f"overlap_bonus={overlap_bonus:.2f}"
@@ -1099,7 +1005,6 @@ def calculate_match_score(
     metadata["composite_score"] = score
     metadata["score_components"] = {
         "distance_score": distance_score,
-        # "distance_diff_score": distance_diff_score,
         "direction_score": direction_score,
         "velocity_score": velocity_score,
         "overlap_bonus": overlap_bonus,
@@ -1411,24 +1316,72 @@ def compute_track_match_score(
     return float(score)
 
 
-def _init_stage2_worker(all_tracks, dtw_params):
-    """Initializer for stage 2 (DTW) workers."""
-    global _worker_all_tracks, _worker_dtw_params
-    _worker_all_tracks = all_tracks
-    _worker_dtw_params = dtw_params
-
-
-def _dtw_worker_v2(args: Tuple[float, int, int]):
+# =============== Stage 2: DTW Filtering ===============
+class Stage2WorkerState:
     """
-    Worker for stage 2 DTW. Only receives (score, i, j).
+    Static container for DTW worker process-local data.
+    Matches Stage1WorkerState pattern for consistency.
+    """
+    all_tracks: List[Dict] = []
+    dtw_params: Dict = {}
+    
+    @classmethod
+    def initialize(cls, all_tracks: List[Dict], dtw_params: Dict):
+        """Called by multiprocessing.Pool initializer."""
+        cls.all_tracks = all_tracks
+        cls.dtw_params = dtw_params
+    
+    @classmethod
+    def reset(cls):
+        """For testing - clear state between tests."""
+        cls.all_tracks = []
+        cls.dtw_params = {}
+
+
+def _stage2_worker_entrypoint(args: Tuple[float, int, int]) -> Optional[Tuple[float, int, int, float]]:
+    """
+    Multiprocessing worker entry point for DTW filtering.
+    
+    Separates:
+    - Infrastructure (accessing process-local state)
+    - Business logic (compute_dtw_distance)
+    
+    Args:
+        args: Tuple of (score, track_index_1, track_index_2)
+    
+    Returns:
+        (score, idx1, idx2, dtw_distance) or None if rejected
     """
     score, i, j = args
-    t1 = _worker_all_tracks[i]
-    t2 = _worker_all_tracks[j]
     
-    params = _worker_dtw_params
-    dtw_dist, _dtw_meta = compute_normalized_dtw_distance(
-        t1, t2,
+    # Fast lookups from process-local state (no pickling overhead)
+    t1 = Stage2WorkerState.all_tracks[i]
+    t2 = Stage2WorkerState.all_tracks[j]
+    params = Stage2WorkerState.dtw_params
+    
+    # Call pure business logic
+    dtw_dist = compute_dtw_for_pair(t1, t2, params)
+    
+    # Apply threshold filter
+    if dtw_dist is None or dtw_dist == float("inf") or dtw_dist > params['dtw_threshold']:
+        return None
+    
+    return (float(score), int(i), int(j), float(dtw_dist))
+
+
+def compute_dtw_for_pair(track1: Dict, track2: Dict, params: Dict) -> Optional[float]:
+    """
+    Pure function - computes DTW distance between two tracks.
+    
+    Args:
+        track1, track2: Track dictionaries
+        params: DTW configuration parameters
+    
+    Returns:
+        Normalized DTW distance, or None if incompatible
+    """
+    dtw_dist, _meta = compute_normalized_dtw_distance(
+        track1, track2,
         use_sampling=True,
         num_samples=params['dtw_num_samples'],
         segment_ratio=params['dtw_segment_ratio'],
@@ -1436,11 +1389,60 @@ def _dtw_worker_v2(args: Tuple[float, int, int]):
         min_length=params['dtw_min_length'],
         random_seed=42,
     )
+    
+    return dtw_dist if dtw_dist != float("inf") else None
 
-    if dtw_dist == float("inf") or dtw_dist > params['dtw_threshold']:
-        return None
 
-    return (float(score), int(i), int(j), float(dtw_dist))
+def apply_dtw_filter(
+    candidates: List[Tuple[float, int, int]],
+    all_tracks: List[Dict],
+    dtw_params: Dict,
+    parallel_workers: int = 4,
+    chunksize: int = 1000,
+) -> List[Tuple[float, int, int, float]]:
+    """
+    Stage 2: Apply DTW filter to candidate pairs in parallel.
+    
+    Args:
+        candidates: List of (score, idx1, idx2) from Stage 1
+        all_tracks: List of all track dictionaries
+        dtw_params: DTW configuration dict with keys:
+            - dtw_num_samples
+            - dtw_segment_ratio
+            - dtw_segment_length
+            - dtw_min_length
+            - dtw_threshold
+        parallel_workers: Number of worker processes
+        chunksize: Tasks per worker batch
+    
+    Returns:
+        List of (score, idx1, idx2, dtw_distance) tuples passing threshold
+    """
+    print(f"\n🔍 Stage 2: Applying DTW filter...")
+    print(f"  Workers: {parallel_workers}")
+    print(f"  Candidates to filter: {len(candidates):,}")
+    
+    dtw_results = []
+    
+    with mp.Pool(
+        processes=parallel_workers,
+        initializer=Stage2WorkerState.initialize,
+        initargs=(all_tracks, dtw_params),
+    ) as pool:
+        
+        results_iter = pool.imap_unordered(
+            _stage2_worker_entrypoint,
+            candidates,  # Pass (score, i, j) tuples
+            chunksize=chunksize,
+        )
+        
+        for result in tqdm(results_iter, total=len(candidates), desc="Stage2 DTW", unit="pair"):
+            if result is not None:
+                dtw_results.append(result)
+    
+    dtw_results.sort(key=lambda x: x[0])
+    print(f"  ✓ Passed DTW filter: {len(dtw_results):,}")
+    return dtw_results
 
 
 def greedy_match_tracks(
@@ -1506,8 +1508,6 @@ def greedy_match_tracks(
 
     # -------- Stage 2: DTW filter (optional & parallel) --------
     if use_dtw_filter:
-        print("\n🔍 Stage 2/3: Computing DTW scores for valid pairs (parallel)...")
-        
         dtw_params = {
             'dtw_num_samples': dtw_num_samples,
             'dtw_segment_ratio': dtw_segment_ratio,
@@ -1516,41 +1516,27 @@ def greedy_match_tracks(
             'dtw_threshold': dtw_threshold,
         }
         
-        dtw_passed = []
-
-        with mp.Pool(
-            processes=parallel_workers,
-            initializer=_init_stage2_worker,
-            initargs=(all_tracks, dtw_params)
-        ) as pool:
-            results_iter = pool.imap_unordered(
-                _dtw_worker_v2,
-                candidates,
-                chunksize=parallel_chunksize
-            )
-            for out in tqdm(results_iter, total=len(candidates), desc="Stage2 DTW", unit="pair"):
-                if out is None:
-                    continue
-                score, i, j, dtw_dist = out
-                dtw_passed.append((score, i, j, dtw_dist))
-
-        if not dtw_passed:
-            print("⚠️  No pairs passed DTW filter.")
-            candidates_final = np.zeros(0, dtype=[("score", "f4"), ("i", "i4"), ("j", "i4"), ("dtw", "f4")])
-        else:
-            candidates_final = np.zeros(len(dtw_passed), dtype=[("score", "f4"), ("i", "i4"), ("j", "i4"), ("dtw", "f4")])
-            candidates_final["score"] = [x[0] for x in dtw_passed]
-            candidates_final["i"] = [x[1] for x in dtw_passed]
-            candidates_final["j"] = [x[2] for x in dtw_passed]
-            candidates_final["dtw"] = [x[3] for x in dtw_passed]
-            candidates_final.sort(order="score")
-
-        print("\n✅ Stage 2 complete")
-        print(f"  Passing DTW filter: {len(candidates_final)}")
-        valid_pairs_iter = ((float(r["score"]), int(r["i"]), int(r["j"]), {"dtw_distance": float(r["dtw"])}) for r in candidates_final)
+        # Apply DTW filter
+        dtw_results = apply_dtw_filter(
+            candidates,
+            all_tracks,
+            dtw_params,
+            parallel_workers,
+            parallel_chunksize
+        )
+        
+        # Convert back to iterator with metadata
+        valid_pairs_iter = (
+            (score, i, j, {"dtw_distance": dtw_dist})
+            for score, i, j, dtw_dist in dtw_results
+        )
     else:
-        valid_pairs_iter = ((float(r["score"]), int(r["i"]), int(r["j"]), {}) for r in candidates_np)
-        candidates_final = candidates_np  # for stats
+        # Skip DTW, use candidates directly
+        valid_pairs_iter = (
+            (score, i, j, {})
+            for score, i, j in candidates_np
+        )
+    
 
     # -------- Stage 3: greedy grouping (unchanged) --------
     print("🎯 Stage 3/3: Performing greedy matching...")
@@ -1778,7 +1764,7 @@ def greedy_match_tracks(
         "stats": {
             "total_tracks": n_total,
             "total_files": n_files,
-            "total_candidate_pairs": int(len(candidates_final)),
+            "total_candidate_pairs": int(len(candidates_np)),
             "matches_accepted": len(matches),
             "groups_count": len(groups),
             "matched_tracks": len(matched_indices),
@@ -3006,6 +2992,9 @@ def main():
         coord_offsets=coord_offsets,
         cfg=calibration_config
     )
+
+    # Preload track index
+    warm_frame_index_cache(all_tracks)
 
     matching_config = MatchingConfig(
         min_overlap_frames=args.min_overlap_frames,
