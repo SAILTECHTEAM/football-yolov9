@@ -2,30 +2,30 @@
 # Usage: pip install -r requirements.txt
 
 # Base ------------------------------------------------------------------------
-gitpython
-ipython
-matplotlib>=3.2.2
-numpy<2
+gitpython==3.1.46
+ipython==9.4.0
+matplotlib==3.10.8
+numpy==1.26.4
 # opencv-python==4.11.0.86
-Pillow>=7.1.2,<10.0.0
-psutil
-PyYAML>=5.3.1
-requests>=2.23.0
-scipy>=1.4.1
-thop>=0.1.1
-torch>=1.7.0
-torchvision>=0.8.1
-tqdm>=4.64.0
+Pillow==9.5.0
+psutil==7.0.0
+PyYAML==6.0.2
+requests==2.32.4
+scipy==1.17.0
+thop==0.1.1-2209072238
+torch==2.8.0+cu126
+torchvision==0.23.0+cu126
+tqdm==4.67.1
 # protobuf<=3.20.1
 
 # Logging ---------------------------------------------------------------------
-tensorboard>=2.4.1
+tensorboard==2.20.0
 # clearml>=1.2.0
 # comet
 
 # Plotting --------------------------------------------------------------------
-pandas>=1.1.4
-seaborn>=0.11.0
+pandas==2.3.3
+seaborn==0.13.2
 
 # Export ----------------------------------------------------------------------
 # coremltools>=6.0
@@ -44,18 +44,18 @@ seaborn>=0.11.0
 # Extras ----------------------------------------------------------------------
 # mss
 albumentations==1.0.3
-pycocotools>=2.0
-supervision
-numba
-ijson
-shapely
-scikit-learn
-filterpy
-einops
+pycocotools==2.0.11
+supervision==0.27.0
+numba==0.63.1
+ijson==3.4.0.post0
+shapely==2.1.2
+scikit-learn==1.8.0
+filterpy==1.4.5
+einops==0.8.1
 # opencv-python-headless==4.11.0.86
-pytorch_lightning
-lmdb
-nltk
+pytorch_lightning==2.6.0
+lmdb==1.7.5
+nltk==3.9.2
 timm==0.9.16
 fastdtw==0.3.4
 

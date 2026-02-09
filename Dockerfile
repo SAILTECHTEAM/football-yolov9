@@ -19,6 +19,8 @@ RUN apt-get update && apt-get install -y \
     wget \
     unzip \
     git \
+    nano \
+    vim \
     build-essential pkg-config \
     libswscale-dev libswresample-dev libavdevice-dev \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
