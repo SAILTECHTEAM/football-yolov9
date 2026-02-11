@@ -34,6 +34,7 @@ def estimate_frame_offset_pairwise(
     tracks2: List[Dict],
     max_search_offset: int = 60,
     overlap_threshold: int = 30,
+    velocity_clip_threshold: float = 10.0,
 ) -> Tuple[int, float]:
     """
     Estimate frame offset between two cameras using cross-correlation on velocity signals.
@@ -43,6 +44,7 @@ def estimate_frame_offset_pairwise(
         tracks2: Tracks from camera 2 (to be adjusted)
         max_search_offset: Maximum frame offset to search (±frames)
         overlap_threshold: Minimum overlapping frames needed for comparison
+        velocity_clip_threshold: Maximum velocity to prevent high balls from dominating (in 0.1m/frame units)
 
     Returns:
         (best_offset, confidence_score) where offset means: camera2_frame = camera1_frame + offset
@@ -60,13 +62,18 @@ def estimate_frame_offset_pairwise(
                     frame_positions[f] = np.array(p)
 
         if len(frame_positions) < 2:
-            return None, None
+            return None, None, None
 
         # Sort by frame
         sorted_frames = sorted(frame_positions.keys())
 
-        # Calculate velocities (magnitude)
-        velocities = []
+        # Downsample positions by a factor of 6 to reduce noise
+        sorted_frames = sorted_frames[::6]
+
+
+        # Calculate velocities (magnitude and direction)
+        velocities_x = []
+        velocities_y = []
         velocity_frames = []
 
         for i in range(len(sorted_frames) - 1):
@@ -74,101 +81,117 @@ def estimate_frame_offset_pairwise(
             frame_gap = f2 - f1
 
             # Only use consecutive or near-consecutive frames
-            if frame_gap <= 5:
+            if frame_gap <= 30:
                 pos1 = frame_positions[f1]
                 pos2 = frame_positions[f2]
 
-                # Calculate velocity magnitude
-                velocity = np.linalg.norm(pos2 - pos1) / frame_gap
-                velocities.append(velocity)
+                # Calculate velocity components (preserve direction)
+                vel = (pos2 - pos1) / frame_gap
+
+                vel_magnitude = np.linalg.norm(vel)
+                if vel_magnitude > velocity_clip_threshold:
+                    # print(
+                    #     f"    ⚠️ Clipping high velocity {vel_magnitude:.1f} at frames {f1}-{f2}")
+                    # Scale down to threshold while preserving direction
+                    vel = vel * (velocity_clip_threshold / vel_magnitude)
+
+                velocities_x.append(vel[0])
+                velocities_y.append(vel[1])
                 velocity_frames.append(f1)
 
-        return np.array(velocity_frames), np.array(velocities)
+        return np.array(velocity_frames), np.array(velocities_x), np.array(velocities_y)
 
-    frames1, vel1 = get_velocity_signal(tracks1)
-    frames2, vel2 = get_velocity_signal(tracks2)
+    frames1, vel1_x, vel1_y = get_velocity_signal(tracks1)
+    frames2, vel2_x, vel2_y = get_velocity_signal(tracks2)
 
     if frames1 is None or frames2 is None:
         return 0, 0.0
 
-    if len(vel1) < overlap_threshold or len(vel2) < overlap_threshold:
+    if len(vel1_x) < overlap_threshold or len(vel2_x) < overlap_threshold:
+        print(
+            f"    ⚠️ Not enough velocity data for offset estimation: cam1={len(vel1_x)} frames, cam2={len(vel2_x)} frames"
+        )
         return 0, 0.0
 
-    # Find overlapping frame range
-    min_frame = max(frames1.min(), frames2.min())
-    max_frame = min(frames1.max(), frames2.max())
+    # Find potential overlapping range (with buffer for offset search)
+    min_frame1, max_frame1 = frames1.min(), frames1.max()
+    min_frame2, max_frame2 = frames2.min(), frames2.max()
 
-    if max_frame - min_frame < overlap_threshold:
+    print(f"min/max frames cam1: {min_frame1}/{max_frame1}, cam2: {min_frame2}/{max_frame2}")
+
+    # Check if there's any potential overlap considering max offset
+    if max_frame1 + max_search_offset < min_frame2 or max_frame2 + max_search_offset < min_frame1:
+        print(
+            f"    ⚠️ No overlap possible even with max offset: cam1[{min_frame1}-{max_frame1}] vs cam2[{min_frame2}-{max_frame2}]"
+        )
         return 0, 0.0
 
-    # Create aligned velocity signals for overlapping region
-    overlap_frames = np.arange(min_frame, max_frame + 1)
+    # Create continuous signals over full range
+    full_min = min(min_frame1, min_frame2) - max_search_offset
+    full_max = max(max_frame1, max_frame2) + max_search_offset
+    full_frames = np.arange(full_min, full_max + 1)
 
-    # Interpolate velocities to common frame grid
-    signal1 = np.zeros(len(overlap_frames))
-    signal2 = np.zeros(len(overlap_frames))
+    # Interpolate both signals to common frame grid
+    signal1_x = np.zeros(len(full_frames))
+    signal1_y = np.zeros(len(full_frames))
+    signal2_x = np.zeros(len(full_frames))
+    signal2_y = np.zeros(len(full_frames))
 
-    for i, frame in enumerate(overlap_frames):
-        # Find closest velocity measurement for each signal
+    for i, frame in enumerate(full_frames):
         if frame in frames1:
-            idx1 = np.where(frames1 == frame)[0]
-            if len(idx1) > 0:
-                signal1[i] = vel1[idx1[0]]
+            idx = np.where(frames1 == frame)[0][0]
+            signal1_x[i] = vel1_x[idx]
+            signal1_y[i] = vel1_y[idx]
 
         if frame in frames2:
-            idx2 = np.where(frames2 == frame)[0]
-            if len(idx2) > 0:
-                signal2[i] = vel2[idx2[0]]
+            idx = np.where(frames2 == frame)[0][0]
+            signal2_x[i] = vel2_x[idx]
+            signal2_y[i] = vel2_y[idx]
 
-    # Normalize signals (z-score normalization)
+    # Combine X and Y velocities into magnitude signal
+    signal1 = np.sqrt(signal1_x**2 + signal1_y**2)
+    signal2 = np.sqrt(signal2_x**2 + signal2_y**2)
+
+    # Normalize signals
     if np.std(signal1) > 0:
         signal1 = (signal1 - np.mean(signal1)) / np.std(signal1)
     if np.std(signal2) > 0:
         signal2 = (signal2 - np.mean(signal2)) / np.std(signal2)
 
-    # Compute cross-correlation for different offsets
-    best_offset = 0
-    best_correlation = -float("inf")
+    # Compute cross-correlation using scipy
+    correlation = correlate(signal1, signal2, mode="same")
+    lags = np.arange(-len(signal1) // 2, len(signal1) // 2)
 
-    for offset in range(-max_search_offset, max_search_offset + 1):
-        # Shift signal2 by offset
-        if offset >= 0:
-            # signal2 is delayed
-            shifted_signal2 = (
-                np.concatenate([np.zeros(offset), signal2[:-offset]])
-                if offset < len(signal2)
-                else np.zeros(len(signal2))
-            )
-        else:
-            # signal2 is ahead
-            shifted_signal2 = np.concatenate([signal2[-offset:], np.zeros(-offset)])
+    # Only consider lags within our search range
+    valid_lag_mask = (lags >= -max_search_offset) & (lags <= max_search_offset)
+    valid_lags = lags[valid_lag_mask]
+    valid_correlation = correlation[valid_lag_mask]
 
-        # Ensure same length
-        min_len = min(len(signal1), len(shifted_signal2))
-        if min_len < overlap_threshold:
-            continue
+    if len(valid_correlation) == 0:
+        print("    ⚠️ No valid correlation values found within search range")
+        return 0, 0.0
 
-        sig1_crop = signal1[:min_len]
-        sig2_crop = shifted_signal2[:min_len]
+    # Find peak correlation
+    best_idx = np.argmax(valid_correlation)
+    best_offset = valid_lags[best_idx]
+    best_correlation_value = valid_correlation[best_idx]
 
-        # Calculate correlation coefficient
-        # Only use non-zero parts (where we have actual data)
-        valid_mask = (sig1_crop != 0) & (sig2_crop != 0)
+    # Normalize correlation value to [0, 1]
+    # Correlation is already somewhat normalized, but scale to confidence
+    max_possible_corr = np.sqrt(np.sum(signal1**2) * np.sum(signal2**2))
+    confidence = best_correlation_value / max_possible_corr if max_possible_corr > 0 else 0.0
+    confidence = np.clip(confidence, 0.0, 1.0)
 
-        if np.sum(valid_mask) < overlap_threshold:
-            continue
+    # Verify there's actual overlap after applying offset
+    overlap_start = max(min_frame1, min_frame2 + best_offset)
+    overlap_end = min(max_frame1, max_frame2 + best_offset)
+    overlap_size = overlap_end - overlap_start
 
-        correlation = np.corrcoef(sig1_crop[valid_mask], sig2_crop[valid_mask])[0, 1]
+    if overlap_size < overlap_threshold:
+        print(f"    ⚠️ Insufficient overlap after offset {best_offset}: only {overlap_size} frames")
+        return 0, 0.0
 
-        if not np.isnan(correlation) and correlation > best_correlation:
-            best_correlation = correlation
-            best_offset = offset
-
-    # Confidence based on correlation strength
-    # Correlation ranges from -1 to 1, we want 0 to 1
-    confidence = max(0.0, (best_correlation + 1.0) / 2.0) if best_correlation > -1 else 0.0
-
-    return best_offset, confidence
+    return int(best_offset), float(confidence)
 
 
 def calibrate_frame_offsets(
@@ -344,6 +367,8 @@ def estimate_coordinate_offset(
     tracks1: List[Dict],
     tracks2: List[Dict],
     min_overlap_frames: int = 50,
+    position_diff_clip: float = 50.0,  # ✅ NEW: Clip extreme position differences (5m)
+    mad_threshold: float = 3.0,  # ✅ NEW: Use MAD (Median Absolute Deviation) for outlier detection
 ) -> Tuple[np.ndarray, float]:
     """
     Estimate systematic coordinate offset between two cameras.
@@ -379,36 +404,6 @@ def estimate_coordinate_offset(
         print("Not enough overlapping frames for coordinate offset estimation.")
         return np.array([0.0, 0.0]), 0.0
 
-    # Calculate velocity-based differences
-    velocity_diffs = []
-
-    for i in range(len(common_frames) - 1):
-        f1, f2 = common_frames[i], common_frames[i + 1]
-        frame_gap = f2 - f1
-
-        # Skip if frames are too far apart
-        if frame_gap > 5:
-            continue
-
-        # Calculate velocities for both cameras
-        vel1 = (fp1[f2] - fp1[f1]) / frame_gap
-        vel2 = (fp2[f2] - fp2[f1]) / frame_gap
-
-        # Velocity difference indicates systematic bias
-        vel_diff = vel2 - vel1
-        velocity_diffs.append(vel_diff)
-
-    if len(velocity_diffs) < 10:
-        print("Not enough velocity difference samples for reliable offset estimation.")
-        return np.array([0.0, 0.0]), 0.0
-
-    velocity_diffs = np.array(velocity_diffs)
-
-    # Use median velocity difference (robust to outliers)
-    median_vel_diff = np.median(velocity_diffs, axis=0)
-
-    # If velocity differences are consistent, there's likely a systematic offset
-    # Integrate velocity difference to get position offset
     # Offset = median of (pos2 - pos1) across all overlapping frames
     position_diffs = []
     for f in common_frames:
@@ -416,18 +411,56 @@ def estimate_coordinate_offset(
         position_diffs.append(pos_diff)
 
     position_diffs = np.array(position_diffs)
-    median_pos_diff = np.median(position_diffs, axis=0)
+
+    # MAD is more robust than std for heavy-tailed distributions
+    def robust_outlier_filter(diffs, mad_threshold=3.0):
+        """Remove outliers using MAD (works better than std for high balls)."""
+        # Calculate MAD for each dimension
+        median_diff = np.median(diffs, axis=0)
+        mad = np.median(np.abs(diffs - median_diff), axis=0)
+        
+        # Modified Z-score (using MAD instead of std)
+        # A common approximation: MAD ≈ 0.6745 * std for normal distribution
+        modified_z_scores = np.abs((diffs - median_diff) / (mad / 0.6745 + 1e-6))
+        
+        # Keep points within threshold MAD units
+        inlier_mask = np.all(modified_z_scores < mad_threshold, axis=1)
+        
+        return diffs[inlier_mask], inlier_mask
+
+    # Filter outliers (high balls, tracking errors, etc.)
+    filtered_diffs, inlier_mask = robust_outlier_filter(position_diffs, mad_threshold)
+    
+    n_outliers = len(position_diffs) - len(filtered_diffs)
+    if n_outliers > 0:
+        print(f"  Filtered {n_outliers} outliers ({100*n_outliers/len(position_diffs):.1f}%) from coordinate offset estimation")
+    
+    if len(filtered_diffs) < min_overlap_frames:
+        print(f"  Too many outliers removed. Insufficient data ({len(filtered_diffs)} < {min_overlap_frames})")
+        return np.array([0.0, 0.0]), 0.0
+
+    median_pos_diff = np.median(filtered_diffs, axis=0)
+
+    # ✅ NEW: Additional safety check - clip extreme offsets
+    offset_magnitude = np.linalg.norm(median_pos_diff)
+    if offset_magnitude > position_diff_clip:
+        print(f"  Clipping large offset: {offset_magnitude:.1f} → {position_diff_clip}")
+        median_pos_diff = median_pos_diff * (position_diff_clip / offset_magnitude)
+        offset_magnitude = position_diff_clip
 
     # Calculate consistency (inverse of standard deviation)
-    std_pos_diff = np.std(position_diffs, axis=0)
+    mad_filtered = np.median(np.abs(filtered_diffs - median_pos_diff), axis=0)
     consistency = 1.0 / (
-        1.0 + np.mean(std_pos_diff) / 100.0
+        1.0 + np.mean(mad_filtered) / 100.0
     )  # 100.0 means further than 10m reduces confidence
 
     # Only apply offset if it's significant and consistent
     offset_magnitude = np.linalg.norm(median_pos_diff)
-    if offset_magnitude < 5.0:  # Less than 5.0, ignore
+    if offset_magnitude < 1.0:  # Less than 1.0, ignore
         print("Offset magnitude too small, ignoring offset.")
+        return np.array([0.0, 0.0]), 0.0
+    if offset_magnitude > 80.0:  # More than 80.0, likely error
+        print("Offset magnitude too large, ignoring offset.")
         return np.array([0.0, 0.0]), 0.0
 
     # Confidence based on consistency and number of samples
@@ -538,245 +571,6 @@ def apply_coordinate_offsets(
         aligned_tracks.append(aligned_camera_tracks)
 
     return aligned_tracks
-
-
-def estimate_frame_offset_pairwise(
-    tracks1: List[Dict],
-    tracks2: List[Dict],
-    max_search_offset: int = 60,
-    overlap_threshold: int = 30,
-) -> Tuple[int, float]:
-    """
-    Estimate frame offset between two cameras using cross-correlation on velocity signals.
-
-    Args:
-        tracks1: Tracks from camera 1 (reference)
-        tracks2: Tracks from camera 2 (to be adjusted)
-        max_search_offset: Maximum frame offset to search (±frames)
-        overlap_threshold: Minimum overlapping frames needed for comparison
-
-    Returns:
-        (best_offset, confidence_score) where offset means: camera2_frame = camera1_frame + offset
-    """
-
-    # Extract velocity signals from both cameras
-    def get_velocity_signal(tracks):
-        """Convert tracks to a continuous velocity signal indexed by frame."""
-        frame_positions = {}
-        for track in tracks:
-            frames = track.get("frames", [])
-            projected = track.get("projected", [])
-            for f, p in zip(frames, projected):
-                if f not in frame_positions:
-                    frame_positions[f] = np.array(p)
-
-        if len(frame_positions) < 2:
-            return None, None, None
-
-        # Sort by frame
-        sorted_frames = sorted(frame_positions.keys())
-
-        # Calculate velocities (magnitude and direction)
-        velocities_x = []
-        velocities_y = []
-        velocity_frames = []
-
-        for i in range(len(sorted_frames) - 1):
-            f1, f2 = sorted_frames[i], sorted_frames[i + 1]
-            frame_gap = f2 - f1
-
-            # Only use consecutive or near-consecutive frames
-            if frame_gap <= 5:
-                pos1 = frame_positions[f1]
-                pos2 = frame_positions[f2]
-
-                # Calculate velocity components (preserve direction)
-                vel = (pos2 - pos1) / frame_gap
-                velocities_x.append(vel[0])
-                velocities_y.append(vel[1])
-                velocity_frames.append(f1)
-
-        return np.array(velocity_frames), np.array(velocities_x), np.array(velocities_y)
-
-    frames1, vel1_x, vel1_y = get_velocity_signal(tracks1)
-    frames2, vel2_x, vel2_y = get_velocity_signal(tracks2)
-
-    if frames1 is None or frames2 is None:
-        return 0, 0.0
-
-    if len(vel1_x) < overlap_threshold or len(vel2_x) < overlap_threshold:
-        return 0, 0.0
-
-    # Find potential overlapping range (with buffer for offset search)
-    min_frame1, max_frame1 = frames1.min(), frames1.max()
-    min_frame2, max_frame2 = frames2.min(), frames2.max()
-
-    # Check if there's any potential overlap considering max offset
-    if max_frame1 + max_search_offset < min_frame2 or max_frame2 + max_search_offset < min_frame1:
-        print(
-            f"    ⚠️ No overlap possible even with max offset: cam1[{min_frame1}-{max_frame1}] vs cam2[{min_frame2}-{max_frame2}]"
-        )
-        return 0, 0.0
-
-    # Create continuous signals over full range
-    full_min = min(min_frame1, min_frame2) - max_search_offset
-    full_max = max(max_frame1, max_frame2) + max_search_offset
-    full_frames = np.arange(full_min, full_max + 1)
-
-    # Interpolate both signals to common frame grid
-    signal1_x = np.zeros(len(full_frames))
-    signal1_y = np.zeros(len(full_frames))
-    signal2_x = np.zeros(len(full_frames))
-    signal2_y = np.zeros(len(full_frames))
-
-    for i, frame in enumerate(full_frames):
-        if frame in frames1:
-            idx = np.where(frames1 == frame)[0][0]
-            signal1_x[i] = vel1_x[idx]
-            signal1_y[i] = vel1_y[idx]
-
-        if frame in frames2:
-            idx = np.where(frames2 == frame)[0][0]
-            signal2_x[i] = vel2_x[idx]
-            signal2_y[i] = vel2_y[idx]
-
-    # Combine X and Y velocities into magnitude signal
-    signal1 = np.sqrt(signal1_x**2 + signal1_y**2)
-    signal2 = np.sqrt(signal2_x**2 + signal2_y**2)
-
-    # Normalize signals
-    if np.std(signal1) > 0:
-        signal1 = (signal1 - np.mean(signal1)) / np.std(signal1)
-    if np.std(signal2) > 0:
-        signal2 = (signal2 - np.mean(signal2)) / np.std(signal2)
-
-    # Compute cross-correlation using scipy
-    correlation = correlate(signal1, signal2, mode="same")
-    lags = np.arange(-len(signal1) // 2, len(signal1) // 2)
-
-    # Only consider lags within our search range
-    valid_lag_mask = (lags >= -max_search_offset) & (lags <= max_search_offset)
-    valid_lags = lags[valid_lag_mask]
-    valid_correlation = correlation[valid_lag_mask]
-
-    if len(valid_correlation) == 0:
-        return 0, 0.0
-
-    # Find peak correlation
-    best_idx = np.argmax(valid_correlation)
-    best_offset = valid_lags[best_idx]
-    best_correlation_value = valid_correlation[best_idx]
-
-    # Normalize correlation value to [0, 1]
-    # Correlation is already somewhat normalized, but scale to confidence
-    max_possible_corr = np.sqrt(np.sum(signal1**2) * np.sum(signal2**2))
-    confidence = best_correlation_value / max_possible_corr if max_possible_corr > 0 else 0.0
-    confidence = np.clip(confidence, 0.0, 1.0)
-
-    # Verify there's actual overlap after applying offset
-    overlap_start = max(min_frame1, min_frame2 + best_offset)
-    overlap_end = min(max_frame1, max_frame2 + best_offset)
-    overlap_size = overlap_end - overlap_start
-
-    if overlap_size < overlap_threshold:
-        print(f"    ⚠️ Insufficient overlap after offset {best_offset}: only {overlap_size} frames")
-        return 0, 0.0
-
-    return int(best_offset), float(confidence)
-
-
-# def estimate_coordinate_offset(
-#     tracks1: List[Dict],
-#     tracks2: List[Dict],
-#     min_overlap_frames: int = 50,
-# ) -> Tuple[np.ndarray, float]:
-#     """
-#     Estimate systematic coordinate offset between two cameras.
-#     Uses RANSAC on position differences to handle outliers.
-
-#     Args:
-#         tracks1: Tracks from camera 1 (reference)
-#         tracks2: Tracks from camera 2 (to be adjusted)
-#         min_overlap_frames: Minimum overlapping frames needed
-
-#     Returns:
-#         (offset_vector, confidence) where offset = cam2 - cam1
-#     """
-#     # Get frame-position pairs
-#     def get_frame_positions(tracks):
-#         frame_pos = {}
-#         for track in tracks:
-#             frames = track.get("frames", [])
-#             projected = track.get("projected", [])
-#             for f, p in zip(frames, projected):
-#                 if f not in frame_pos:  # Use first occurrence
-#                     frame_pos[f] = np.array(p)
-#         return frame_pos
-
-#     fp1 = get_frame_positions(tracks1)
-#     fp2 = get_frame_positions(tracks2)
-
-#     # Find overlapping frames
-#     common_frames = sorted(set(fp1.keys()) & set(fp2.keys()))
-
-#     if len(common_frames) < min_overlap_frames:
-#         return np.array([0.0, 0.0]), 0.0
-
-#     # Calculate position differences for overlapping frames
-#     position_diffs = []
-#     for f in common_frames:
-#         pos_diff = fp2[f] - fp1[f]
-#         position_diffs.append(pos_diff)
-
-#     position_diffs = np.array(position_diffs)
-
-#     # Use RANSAC to find consistent offset (robust to outliers)
-#     from sklearn.linear_model import RANSACRegressor
-
-#     # RANSAC for X coordinate
-#     X_dummy = np.arange(len(position_diffs)).reshape(-1, 1)
-
-#     try:
-#         # Fit constant model (offset) using RANSAC for X
-#         ransac_x = RANSACRegressor(residual_threshold=50.0, random_state=42)
-#         ransac_x.fit(X_dummy, position_diffs[:, 0])
-#         offset_x = ransac_x.predict([[0]])[0]
-#         inlier_mask_x = ransac_x.inlier_mask_
-
-#         # Fit constant model (offset) using RANSAC for Y
-#         ransac_y = RANSACRegressor(residual_threshold=50.0, random_state=42)
-#         ransac_y.fit(X_dummy, position_diffs[:, 1])
-#         offset_y = ransac_y.predict([[0]])[0]
-#         inlier_mask_y = ransac_y.inlier_mask_
-
-#         # Combined inlier mask
-#         inlier_mask = inlier_mask_x & inlier_mask_y
-#         n_inliers = np.sum(inlier_mask)
-
-#         if n_inliers < min_overlap_frames * 0.5:  # At least 50% should be inliers
-#             return np.array([0.0, 0.0]), 0.0
-
-#         # Calculate offset from inliers only
-#         offset = np.median(position_diffs[inlier_mask], axis=0)
-
-#         # Calculate consistency (std of inliers)
-#         std_inliers = np.std(position_diffs[inlier_mask], axis=0)
-#         consistency = 1.0 / (1.0 + np.mean(std_inliers) / 100.0) # 100.0 means further than 10m reduces confidence
-
-#         # Confidence based on inlier ratio and consistency
-#         inlier_ratio = n_inliers / len(position_diffs)
-#         confidence = inlier_ratio * consistency
-
-#         # Only return offset if it's significant
-#         offset_magnitude = np.linalg.norm(offset)
-#         if offset_magnitude < 10.0:  # Less than 1m, ignore
-#             return np.array([0.0, 0.0]), 0.0
-
-#         return offset, confidence
-
-#     except Exception as e:
-#         print(f"    ⚠️ RANSAC failed: {e}")
-#         return np.array([0.0, 0.0]), 0.0
 
 
 def print_track_info(all_tracks_by_camera: List[List[Dict]], verbose: bool = False):
@@ -1245,12 +1039,14 @@ def main():
     if len(args.ball_jsonl_paths) < 2:
         print("⚠️ Warning: Fusion works best with 2+ camera angles")
 
+    min_cameras = max(1, len(args.ball_jsonl_paths) - 2)
+
     fuse_ball_tracks(
         ball_jsonl_paths=args.ball_jsonl_paths,
         output_path=args.output,
         max_gap_frames=args.max_gap,
         max_distance_threshold=args.max_distance,
-        min_cameras=args.min_cameras,
+        min_cameras=min_cameras,
         calibrate_frames=not args.no_calibrate_frames,
         calibrate_coordinates=not args.no_calibrate_coordinates,
         max_search_offset=args.max_search_offset,

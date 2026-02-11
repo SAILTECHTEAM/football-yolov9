@@ -386,6 +386,310 @@ def get_position_at_specific_frame(track: Dict, target_frame: int) -> Optional[n
     return np.array(pos)
 
 
+def get_temporal_overlap(track1: Dict, track2: Dict) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Get the temporal overlap range between two tracks.
+
+    Returns:
+        (overlap_start, overlap_end) or (None, None) if no overlap
+    """
+    frames1 = set(track1.get("frames", []))
+    frames2 = set(track2.get("frames", []))
+    overlap = frames1 & frames2
+
+    if not overlap:
+        return None, None
+
+    return min(overlap), max(overlap)
+
+
+def extract_overlapping_segment(
+    track: Dict, overlap_start: int, overlap_end: int
+) -> Tuple[List[int], np.ndarray]:
+    """
+    Extract frames and positions from a track within the overlap range.
+
+    Returns:
+        (frames, positions) as (List[int], np.ndarray)
+    """
+    frames = track.get("frames", [])
+    projected = track.get("projected", [])
+
+    segment_frames = []
+    segment_positions = []
+
+    for i, frame in enumerate(frames):
+        if overlap_start <= frame <= overlap_end and i < len(projected):
+            pos = projected[i]
+            if pos is not None:
+                segment_frames.append(frame)
+                segment_positions.append(pos)
+
+    return segment_frames, np.array(segment_positions)
+
+
+def sample_continuous_segment(
+    frames: List[int],
+    positions: np.ndarray,
+    segment_ratio: float,
+    min_length: int,
+) -> Tuple[List[int], np.ndarray]:
+    """
+    Sample a continuous segment from the frames/positions.
+
+    Args:
+        frames: List of frame numbers
+        positions: Corresponding positions
+        segment_ratio: Fraction of total length to sample (0-1)
+        min_length: Minimum length of segment
+
+    Returns:
+        (sampled_frames, sampled_positions)
+    """
+    total_length = len(frames)
+    segment_length = max(int(total_length * segment_ratio), min_length)
+    segment_length = min(segment_length, total_length)
+
+    if segment_length >= total_length:
+        return frames, positions
+
+    # Random start position
+    max_start = total_length - segment_length
+    start_idx = random.randint(0, max_start)
+    end_idx = start_idx + segment_length
+
+    return frames[start_idx:end_idx], positions[start_idx:end_idx]
+
+
+def sample_fixed_length_segment(
+    frames: List[int],
+    positions: np.ndarray,
+    segment_length: int,
+) -> Tuple[List[int], np.ndarray]:
+    total_length = len(frames)
+    if total_length <= segment_length:
+        return frames, positions
+
+    max_start = total_length - segment_length
+    start_idx = random.randint(0, max_start)
+    end_idx = start_idx + segment_length
+    return frames[start_idx:end_idx], positions[start_idx:end_idx]
+
+
+def compute_normalized_dtw_distance(
+    track1: Dict,
+    track2: Dict,
+    use_sampling: bool = True,
+    num_samples: int = 5,
+    segment_ratio: float = 0.5,
+    min_length: int = 10,
+    segment_length: Optional[int] = 50,
+    random_seed: Optional[int] = 42,
+) -> Tuple[float, Dict]:
+    """
+    Compute normalized DTW distance using overlapping temporal region.
+    Multiple samples are taken and median distance is returned.
+
+    Args:
+        track1, track2: Track dictionaries with 'frames' and 'projected'
+        use_sampling: Whether to sample continuous segments
+        num_samples: Number of samples to take (if use_sampling=True)
+        segment_ratio: Fraction of overlap to sample
+        min_length: Minimum points in sampled segment
+        random_seed: Random seed for reproducibility
+
+    Returns:
+        (median_distance, metadata)
+        Returns (inf, metadata) if no overlap
+    """
+    if random_seed is not None:
+        random.seed(random_seed)
+        np.random.seed(random_seed)
+
+    # Find temporal overlap
+    overlap_start, overlap_end = get_temporal_overlap(track1, track2)
+
+    if overlap_start is None:
+        return float("inf"), {
+            "rejected": True,
+            "reason": "no_temporal_overlap",
+            "has_overlap": False,
+        }
+
+    # Extract overlapping segments
+    frames1, pos1 = extract_overlapping_segment(track1, overlap_start, overlap_end)
+    frames2, pos2 = extract_overlapping_segment(track2, overlap_start, overlap_end)
+
+    if len(pos1) < min_length or len(pos2) < min_length:
+        return float("inf"), {
+            "rejected": True,
+            "reason": "insufficient_overlap_points",
+            "has_overlap": True,
+            "track1_points": len(pos1),
+            "track2_points": len(pos2),
+            "min_required": min_length,
+        }
+    distances = []
+    used_lengths = []
+
+    # Take multiple samples if requested
+    n_iterations = num_samples if use_sampling else 1
+
+    for sample_idx in range(n_iterations):
+        # Sample continuous segments
+        if use_sampling:
+            if segment_length is not None:
+                sample_frames1, sample_pos1 = sample_fixed_length_segment(
+                    frames1, pos1, segment_length
+                )
+                sample_frames2, sample_pos2 = sample_fixed_length_segment(
+                    frames2, pos2, segment_length
+                )
+            else:
+                sample_frames1, sample_pos1 = sample_continuous_segment(
+                    frames1, pos1, segment_ratio, min_length
+                )
+                sample_frames2, sample_pos2 = sample_continuous_segment(
+                    frames2, pos2, segment_ratio, min_length
+                )
+        else:
+            sample_pos1 = pos1
+            sample_pos2 = pos2
+
+        used_lengths.append((len(sample_pos1), len(sample_pos2)))
+
+        # Normalize to remove translation and scale effects
+        pos1_centered = sample_pos1 - sample_pos1.mean(axis=0)
+        pos2_centered = sample_pos2 - sample_pos2.mean(axis=0)
+
+        scale1 = np.std(pos1_centered)
+        scale2 = np.std(pos2_centered)
+
+        pos1_normalized = pos1_centered / scale1 if scale1 > 1e-6 else pos1_centered
+        pos2_normalized = pos2_centered / scale2 if scale2 > 1e-6 else pos2_centered
+
+        # Compute DTW
+        distance, path = fastdtw(pos1_normalized, pos2_normalized, dist=euclidean)
+        # print(f"Sample {sample_idx+1}: DTW raw distance = {distance}, path length = {len(path)}")
+        # Normalize by path length
+        normalized_distance = distance / len(path) if len(path) > 0 else distance
+        distances.append(normalized_distance)
+
+    # Compute statistics
+    median_dist = float(np.median(distances))
+    # print(
+    #     f"DTW distances between track {track1['track_id']} and track {track2['track_id']}: {distances}, median: {median_dist}"
+    # )
+    metadata = {
+        "rejected": False,
+        "has_overlap": True,
+        "overlap_start": overlap_start,
+        "overlap_end": overlap_end,
+        "overlap_duration": overlap_end - overlap_start + 1,
+        "track1_points": len(pos1),
+        "track2_points": len(pos2),
+        "num_samples": n_iterations,
+        "segment_length": segment_length,
+        "used_lengths": used_lengths[:5],
+        "median_distance": median_dist,
+        "mean_distance": float(np.mean(distances)),
+        "min_distance": float(np.min(distances)),
+        "max_distance": float(np.max(distances)),
+        "std_distance": float(np.std(distances)),
+        "all_distances": [float(d) for d in distances],
+    }
+
+    return median_dist, metadata
+
+
+def flatten_tracks_with_metadata(all_tracks_by_file: Dict[int, List[Dict]]) -> List[Dict]:
+    """Logic: flatten per-file tracks into all_tracks and attach internal metadata."""
+    all_tracks: List[Dict] = []
+    for src_idx, tracks in all_tracks_by_file.items():
+        for orig_idx, t in enumerate(tracks):
+            t["_source_idx"] = src_idx
+            t["_orig_idx"] = orig_idx
+            t["_global_idx"] = len(all_tracks)
+            all_tracks.append(t)
+    return all_tracks
+
+
+def prepare_tracks_by_file(
+    jsonl_paths: List[str],
+    frame_offsets: Optional[List[int]] = None,
+    coord_offsets: Optional[List[np.ndarray]] = None,
+    ball_jsonl_paths: Optional[List[str]] = None,
+    cfg: Optional[CalibrationConfig] = None,
+) -> Tuple[Dict[int, List[Dict]], Optional[List[int]], Optional[List[np.ndarray]]]:
+    """
+    I/O + optional calibration. Returns:
+      - all_tracks_by_file
+      - frame_offsets (possibly computed)
+      - coord_offsets (possibly computed)
+    """
+    if cfg is None:
+        cfg = CalibrationConfig(auto_calibrate=False)
+
+    want_calibration = (
+        frame_offsets is not None
+        or coord_offsets is not None
+        or bool(cfg.auto_calibrate)
+    )
+
+    if want_calibration:
+        if cfg.auto_calibrate and not ball_jsonl_paths:
+            print("⚠️  Warning: auto_calibrate=True but no ball_jsonl_paths provided")
+            print("    Loading player tracks without calibration...")
+            all_tracks_by_file = load_player_tracks(jsonl_paths)
+            return all_tracks_by_file, frame_offsets, coord_offsets
+
+        # Calibration requires ball_jsonl_paths (no fallback to player paths)
+        if not ball_jsonl_paths:
+            raise ValueError("ball_jsonl_paths is required when calibration is enabled")
+
+        print("🔧 Applying ball track calibration to player tracks...")
+        all_tracks_by_file, frame_offsets, coord_offsets = apply_calibration_to_player_tracks(
+            player_jsonl_paths=jsonl_paths,
+            ball_jsonl_paths=ball_jsonl_paths,
+            frame_offsets=frame_offsets,
+            coord_offsets=coord_offsets,
+            cfg=cfg,
+        )
+    else:
+        print("📥 Loading player tracks without calibration...")
+        all_tracks_by_file = load_player_tracks(jsonl_paths)
+
+    # Summary
+    for src_idx, tracks in all_tracks_by_file.items():
+        print(f"  File {src_idx} ({jsonl_paths[src_idx]}): {len(tracks)} tracks loaded")
+
+    return all_tracks_by_file, frame_offsets, coord_offsets
+
+
+def prepare_tracks(
+    jsonl_paths: List[str],
+    frame_offsets: Optional[List[int]] = None,
+    coord_offsets: Optional[List[np.ndarray]] = None,
+    ball_jsonl_paths: Optional[List[str]] = None,
+    cfg: Optional[CalibrationConfig] = None,
+) -> Tuple[List[Dict], Dict[int, List[Dict]]]:
+    """
+    Backward compatible wrapper: returns (all_tracks, all_tracks_by_file).
+    """
+    all_tracks_by_file, _, _ = prepare_tracks_by_file(
+        jsonl_paths=jsonl_paths,
+        frame_offsets=frame_offsets,
+        coord_offsets=coord_offsets,
+        ball_jsonl_paths=ball_jsonl_paths,
+        cfg=cfg,
+    )
+    all_tracks = flatten_tracks_with_metadata(all_tracks_by_file)
+
+    print(f"Total tracks: {len(all_tracks)} from {len(jsonl_paths)} files")
+    return all_tracks, all_tracks_by_file
+
+
+# ================ DISTANCE METRICS BETWEEN TRACKS ================
 def calculate_pairwise_distances(
     track1: Dict,
     track2: Dict,
@@ -649,220 +953,75 @@ def calculate_direction_similarity(
     return similarity, metadata
 
 
-def get_temporal_overlap(track1: Dict, track2: Dict) -> Tuple[Optional[int], Optional[int]]:
+# =============== Stage 1: Pairwise Score Computation ===============
+class Stage1WorkerState:
     """
-    Get the temporal overlap range between two tracks.
-
-    Returns:
-        (overlap_start, overlap_end) or (None, None) if no overlap
+    Static container for process-local data.
+    Replaces global variables with explicit encapsulation.
     """
-    frames1 = set(track1.get("frames", []))
-    frames2 = set(track2.get("frames", []))
-    overlap = frames1 & frames2
+    all_tracks: List[Dict] = []
+    cfg: MatchingConfig = None
+    filter_by_team: bool = False
+    filter_by_jersey: bool = False
+    
+    @classmethod
+    def initialize(
+        cls,
+        all_tracks: List[Dict],
+        cfg: MatchingConfig,
+        filter_by_team: bool,
+        filter_by_jersey: bool,
+    ):
+        """
+        Called by multiprocessing.Pool initializer.
+        Sets up process-local state ONCE per worker.
+        """
+        cls.all_tracks = all_tracks
+        cls.cfg = cfg
+        cls.filter_by_team = filter_by_team
+        cls.filter_by_jersey = filter_by_jersey
+    
+    @classmethod
+    def reset(cls):
+        """For testing - clear state between tests."""
+        cls.all_tracks = []
+        cls.cfg = None
+        cls.filter_by_team = False
+        cls.filter_by_jersey = False
 
-    if not overlap:
-        return None, None
 
-    return min(overlap), max(overlap)
-
-
-def extract_overlapping_segment(
-    track: Dict, overlap_start: int, overlap_end: int
-) -> Tuple[List[int], np.ndarray]:
+def _stage1_worker_entrypoint(pair: Tuple[int, int]) -> Optional[Tuple[float, int, int]]:
     """
-    Extract frames and positions from a track within the overlap range.
-
-    Returns:
-        (frames, positions) as (List[int], np.ndarray)
-    """
-    frames = track.get("frames", [])
-    projected = track.get("projected", [])
-
-    segment_frames = []
-    segment_positions = []
-
-    for i, frame in enumerate(frames):
-        if overlap_start <= frame <= overlap_end and i < len(projected):
-            pos = projected[i]
-            if pos is not None:
-                segment_frames.append(frame)
-                segment_positions.append(pos)
-
-    return segment_frames, np.array(segment_positions)
-
-
-def sample_continuous_segment(
-    frames: List[int],
-    positions: np.ndarray,
-    segment_ratio: float,
-    min_length: int,
-) -> Tuple[List[int], np.ndarray]:
-    """
-    Sample a continuous segment from the frames/positions.
-
+    Multiprocessing worker entry point.
+    
+    Separates:
+    - Infrastructure (accessing process-local state)
+    - Business logic (compute_track_match_score)
+    
     Args:
-        frames: List of frame numbers
-        positions: Corresponding positions
-        segment_ratio: Fraction of total length to sample (0-1)
-        min_length: Minimum length of segment
-
+        pair: Tuple of (track_index_1, track_index_2)
+    
     Returns:
-        (sampled_frames, sampled_positions)
+        (score, idx1, idx2) or None if rejected
     """
-    total_length = len(frames)
-    segment_length = max(int(total_length * segment_ratio), min_length)
-    segment_length = min(segment_length, total_length)
-
-    if segment_length >= total_length:
-        return frames, positions
-
-    # Random start position
-    max_start = total_length - segment_length
-    start_idx = random.randint(0, max_start)
-    end_idx = start_idx + segment_length
-
-    return frames[start_idx:end_idx], positions[start_idx:end_idx]
-
-
-def sample_fixed_length_segment(
-    frames: List[int],
-    positions: np.ndarray,
-    segment_length: int,
-) -> Tuple[List[int], np.ndarray]:
-    total_length = len(frames)
-    if total_length <= segment_length:
-        return frames, positions
-
-    max_start = total_length - segment_length
-    start_idx = random.randint(0, max_start)
-    end_idx = start_idx + segment_length
-    return frames[start_idx:end_idx], positions[start_idx:end_idx]
-
-
-def compute_normalized_dtw_distance(
-    track1: Dict,
-    track2: Dict,
-    use_sampling: bool = True,
-    num_samples: int = 5,
-    segment_ratio: float = 0.5,
-    min_length: int = 10,
-    segment_length: Optional[int] = 50,
-    random_seed: Optional[int] = 42,
-) -> Tuple[float, Dict]:
-    """
-    Compute normalized DTW distance using overlapping temporal region.
-    Multiple samples are taken and median distance is returned.
-
-    Args:
-        track1, track2: Track dictionaries with 'frames' and 'projected'
-        use_sampling: Whether to sample continuous segments
-        num_samples: Number of samples to take (if use_sampling=True)
-        segment_ratio: Fraction of overlap to sample
-        min_length: Minimum points in sampled segment
-        random_seed: Random seed for reproducibility
-
-    Returns:
-        (median_distance, metadata)
-        Returns (inf, metadata) if no overlap
-    """
-    if random_seed is not None:
-        random.seed(random_seed)
-        np.random.seed(random_seed)
-
-    # Find temporal overlap
-    overlap_start, overlap_end = get_temporal_overlap(track1, track2)
-
-    if overlap_start is None:
-        return float("inf"), {
-            "rejected": True,
-            "reason": "no_temporal_overlap",
-            "has_overlap": False,
-        }
-
-    # Extract overlapping segments
-    frames1, pos1 = extract_overlapping_segment(track1, overlap_start, overlap_end)
-    frames2, pos2 = extract_overlapping_segment(track2, overlap_start, overlap_end)
-
-    if len(pos1) < min_length or len(pos2) < min_length:
-        return float("inf"), {
-            "rejected": True,
-            "reason": "insufficient_overlap_points",
-            "has_overlap": True,
-            "track1_points": len(pos1),
-            "track2_points": len(pos2),
-            "min_required": min_length,
-        }
-    distances = []
-    used_lengths = []
-
-    # Take multiple samples if requested
-    n_iterations = num_samples if use_sampling else 1
-
-    for sample_idx in range(n_iterations):
-        # Sample continuous segments
-        if use_sampling:
-            if segment_length is not None:
-                sample_frames1, sample_pos1 = sample_fixed_length_segment(
-                    frames1, pos1, segment_length
-                )
-                sample_frames2, sample_pos2 = sample_fixed_length_segment(
-                    frames2, pos2, segment_length
-                )
-            else:
-                sample_frames1, sample_pos1 = sample_continuous_segment(
-                    frames1, pos1, segment_ratio, min_length
-                )
-                sample_frames2, sample_pos2 = sample_continuous_segment(
-                    frames2, pos2, segment_ratio, min_length
-                )
-        else:
-            sample_pos1 = pos1
-            sample_pos2 = pos2
-
-        used_lengths.append((len(sample_pos1), len(sample_pos2)))
-
-        # Normalize to remove translation and scale effects
-        pos1_centered = sample_pos1 - sample_pos1.mean(axis=0)
-        pos2_centered = sample_pos2 - sample_pos2.mean(axis=0)
-
-        scale1 = np.std(pos1_centered)
-        scale2 = np.std(pos2_centered)
-
-        pos1_normalized = pos1_centered / scale1 if scale1 > 1e-6 else pos1_centered
-        pos2_normalized = pos2_centered / scale2 if scale2 > 1e-6 else pos2_centered
-
-        # Compute DTW
-        distance, path = fastdtw(pos1_normalized, pos2_normalized, dist=euclidean)
-        # print(f"Sample {sample_idx+1}: DTW raw distance = {distance}, path length = {len(path)}")
-        # Normalize by path length
-        normalized_distance = distance / len(path) if len(path) > 0 else distance
-        distances.append(normalized_distance)
-
-    # Compute statistics
-    median_dist = float(np.median(distances))
-    # print(
-    #     f"DTW distances between track {track1['track_id']} and track {track2['track_id']}: {distances}, median: {median_dist}"
-    # )
-    metadata = {
-        "rejected": False,
-        "has_overlap": True,
-        "overlap_start": overlap_start,
-        "overlap_end": overlap_end,
-        "overlap_duration": overlap_end - overlap_start + 1,
-        "track1_points": len(pos1),
-        "track2_points": len(pos2),
-        "num_samples": n_iterations,
-        "segment_length": segment_length,
-        "used_lengths": used_lengths[:5],
-        "median_distance": median_dist,
-        "mean_distance": float(np.mean(distances)),
-        "min_distance": float(np.min(distances)),
-        "max_distance": float(np.max(distances)),
-        "std_distance": float(np.std(distances)),
-        "all_distances": [float(d) for d in distances],
-    }
-
-    return median_dist, metadata
+    i, j = pair
+    
+    # Fast lookups from process-local state (no pickling overhead)
+    t1 = Stage1WorkerState.all_tracks[i]
+    t2 = Stage1WorkerState.all_tracks[j]
+    
+    # Call pure business logic
+    score = compute_track_match_score(
+        t1, t2,
+        cfg=Stage1WorkerState.cfg,
+        filter_by_team=Stage1WorkerState.filter_by_team,
+        filter_by_jersey=Stage1WorkerState.filter_by_jersey,
+    )
+    
+    if score is None:
+        return None
+    
+    return (float(score), int(i), int(j))
 
 
 def calculate_match_score(
@@ -1013,162 +1172,39 @@ def calculate_match_score(
     return score, metadata
 
 
-def flatten_tracks_with_metadata(all_tracks_by_file: Dict[int, List[Dict]]) -> List[Dict]:
-    """Logic: flatten per-file tracks into all_tracks and attach internal metadata."""
-    all_tracks: List[Dict] = []
-    for src_idx, tracks in all_tracks_by_file.items():
-        for orig_idx, t in enumerate(tracks):
-            t["_source_idx"] = src_idx
-            t["_orig_idx"] = orig_idx
-            t["_global_idx"] = len(all_tracks)
-            all_tracks.append(t)
-    return all_tracks
-
-
-def prepare_tracks_by_file(
-    jsonl_paths: List[str],
-    frame_offsets: Optional[List[int]] = None,
-    coord_offsets: Optional[List[np.ndarray]] = None,
-    ball_jsonl_paths: Optional[List[str]] = None,
-    cfg: Optional[CalibrationConfig] = None,
-) -> Tuple[Dict[int, List[Dict]], Optional[List[int]], Optional[List[np.ndarray]]]:
+def compute_track_match_score(
+    track1: Dict,
+    track2: Dict,
+    cfg: MatchingConfig,
+    filter_by_team: bool = False,
+    filter_by_jersey: bool = False,
+) -> Optional[float]:
     """
-    I/O + optional calibration. Returns:
-      - all_tracks_by_file
-      - frame_offsets (possibly computed)
-      - coord_offsets (possibly computed)
-    """
-    if cfg is None:
-        cfg = CalibrationConfig(auto_calibrate=False)
-
-    want_calibration = (
-        frame_offsets is not None
-        or coord_offsets is not None
-        or bool(cfg.auto_calibrate)
-    )
-
-    if want_calibration:
-        if cfg.auto_calibrate and not ball_jsonl_paths:
-            print("⚠️  Warning: auto_calibrate=True but no ball_jsonl_paths provided")
-            print("    Loading player tracks without calibration...")
-            all_tracks_by_file = load_player_tracks(jsonl_paths)
-            return all_tracks_by_file, frame_offsets, coord_offsets
-
-        # Calibration requires ball_jsonl_paths (no fallback to player paths)
-        if not ball_jsonl_paths:
-            raise ValueError("ball_jsonl_paths is required when calibration is enabled")
-
-        print("🔧 Applying ball track calibration to player tracks...")
-        all_tracks_by_file, frame_offsets, coord_offsets = apply_calibration_to_player_tracks(
-            player_jsonl_paths=jsonl_paths,
-            ball_jsonl_paths=ball_jsonl_paths,
-            frame_offsets=frame_offsets,
-            coord_offsets=coord_offsets,
-            cfg=cfg,
-        )
-    else:
-        print("📥 Loading player tracks without calibration...")
-        all_tracks_by_file = load_player_tracks(jsonl_paths)
-
-    # Summary
-    for src_idx, tracks in all_tracks_by_file.items():
-        print(f"  File {src_idx} ({jsonl_paths[src_idx]}): {len(tracks)} tracks loaded")
-
-    return all_tracks_by_file, frame_offsets, coord_offsets
-
-
-def prepare_tracks(
-    jsonl_paths: List[str],
-    frame_offsets: Optional[List[int]] = None,
-    coord_offsets: Optional[List[np.ndarray]] = None,
-    ball_jsonl_paths: Optional[List[str]] = None,
-    cfg: Optional[CalibrationConfig] = None,
-) -> Tuple[List[Dict], Dict[int, List[Dict]]]:
-    """
-    Backward compatible wrapper: returns (all_tracks, all_tracks_by_file).
-    """
-    all_tracks_by_file, _, _ = prepare_tracks_by_file(
-        jsonl_paths=jsonl_paths,
-        frame_offsets=frame_offsets,
-        coord_offsets=coord_offsets,
-        ball_jsonl_paths=ball_jsonl_paths,
-        cfg=cfg,
-    )
-    all_tracks = flatten_tracks_with_metadata(all_tracks_by_file)
-
-    print(f"Total tracks: {len(all_tracks)} from {len(jsonl_paths)} files")
-    return all_tracks, all_tracks_by_file
-
-
-# =============== Stage 1: Pairwise Score Computation ===============
-class Stage1WorkerState:
-    """
-    Static container for process-local data.
-    Replaces global variables with explicit encapsulation.
-    """
-    all_tracks: List[Dict] = []
-    cfg: MatchingConfig = None
-    filter_by_team: bool = False
-    filter_by_jersey: bool = False
-    
-    @classmethod
-    def initialize(
-        cls,
-        all_tracks: List[Dict],
-        cfg: MatchingConfig,
-        filter_by_team: bool,
-        filter_by_jersey: bool,
-    ):
-        """
-        Called by multiprocessing.Pool initializer.
-        Sets up process-local state ONCE per worker.
-        """
-        cls.all_tracks = all_tracks
-        cls.cfg = cfg
-        cls.filter_by_team = filter_by_team
-        cls.filter_by_jersey = filter_by_jersey
-    
-    @classmethod
-    def reset(cls):
-        """For testing - clear state between tests."""
-        cls.all_tracks = []
-        cls.cfg = None
-        cls.filter_by_team = False
-        cls.filter_by_jersey = False
-
-
-def _stage1_worker_entrypoint(pair: Tuple[int, int]) -> Optional[Tuple[float, int, int]]:
-    """
-    Multiprocessing worker entry point.
-    
-    Separates:
-    - Infrastructure (accessing process-local state)
-    - Business logic (compute_track_match_score)
+    Pure function - computes match score between two tracks.
     
     Args:
-        pair: Tuple of (track_index_1, track_index_2)
+        track1, track2: Track dictionaries with frames/projected data
+        cfg: Matching configuration parameters
+        filter_by_team: Skip if teams don't match
+        filter_by_jersey: Skip if jersey numbers don't match
     
     Returns:
-        (score, idx1, idx2) or None if rejected
+        Match score (lower = better), or None if incompatible
     """
-    i, j = pair
-    
-    # Fast lookups from process-local state (no pickling overhead)
-    t1 = Stage1WorkerState.all_tracks[i]
-    t2 = Stage1WorkerState.all_tracks[j]
-    
-    # Call pure business logic
-    score = compute_track_match_score(
-        t1, t2,
-        cfg=Stage1WorkerState.cfg,
-        filter_by_team=Stage1WorkerState.filter_by_team,
-        filter_by_jersey=Stage1WorkerState.filter_by_jersey,
-    )
-    
-    if score is None:
+    # Fast rejection filters
+    if filter_by_team and track1.get("team") != track2.get("team"):
         return None
     
-    return (float(score), int(i), int(j))
+    if filter_by_jersey and track1.get("jersey_num") != track2.get("jersey_num"):
+        return None
+    
+    # Compute score using existing logic
+    score, _metadata = calculate_match_score(track1, track2, cfg=cfg)
+    
+    if score == float("inf"):
+        return None
+    
+    return float(score)
 
 
 def compute_pairwise_scores(
@@ -1279,41 +1315,6 @@ def _count_cross_source_pairs(all_tracks: List[Dict]) -> int:
         for s2 in sources[i + 1:]:
             total_pairs += source_counts[s1] * source_counts[s2]
     return total_pairs
-
-
-def compute_track_match_score(
-    track1: Dict,
-    track2: Dict,
-    cfg: MatchingConfig,
-    filter_by_team: bool = False,
-    filter_by_jersey: bool = False,
-) -> Optional[float]:
-    """
-    Pure function - computes match score between two tracks.
-    
-    Args:
-        track1, track2: Track dictionaries with frames/projected data
-        cfg: Matching configuration parameters
-        filter_by_team: Skip if teams don't match
-        filter_by_jersey: Skip if jersey numbers don't match
-    
-    Returns:
-        Match score (lower = better), or None if incompatible
-    """
-    # Fast rejection filters
-    if filter_by_team and track1.get("team") != track2.get("team"):
-        return None
-    
-    if filter_by_jersey and track1.get("jersey_num") != track2.get("jersey_num"):
-        return None
-    
-    # Compute score using existing logic
-    score, _metadata = calculate_match_score(track1, track2, cfg=cfg)
-    
-    if score == float("inf"):
-        return None
-    
-    return float(score)
 
 
 # =============== Stage 2: DTW Filtering ===============
@@ -2450,7 +2451,7 @@ def fuse_all_matched_groups(
     return fused_tracks, spatial_stats
 
 
-def save_fused_tracks(fused_tracks: List[Dict], output_path: str):
+def save_fused_tracks(fused_tracks: List[Dict], output_path: str, player_jsonl_paths: List[str]):
     """Save fused tracks to JSONL file."""
     # Create output directory if it doesn't exist
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -2468,7 +2469,7 @@ def save_fused_tracks(fused_tracks: List[Dict], output_path: str):
                 ys = savgol_filter(points[:, 1], smoothing_window, polyorder)
                 points = np.stack([xs, ys], axis=1)
 
-            if "unmatched" in track_copy["track_id"]:
+            if "unmatched" in track_copy["track_id"] and len(player_jsonl_paths) >= 4:
                 continue  # Skip unmatched tracks if desired
             if "projected" in track_copy:
                 track_copy["projected"] = [p if isinstance(p, list) else p.tolist() for p in points]
@@ -3292,7 +3293,7 @@ def main():
     )
 
     # Save fused tracks
-    save_fused_tracks(fused_tracks, args.output)
+    save_fused_tracks(fused_tracks, args.output, args.player_jsonl_paths)
 
     metadata_path = args.output.replace(".jsonl", "_metadata.jsonl")
     # UPDATE: Add spatial clustering stats to results
